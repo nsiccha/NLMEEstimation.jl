@@ -1,0 +1,15 @@
+name = "NLMEEstimation"
+uuid = "93620da2-aa34-4028-9135-3a6a776ddbc2"
+authors = ["Nikolas Siccha and contributors"]
+version = "0.1.0"
+
+[deps]
+ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
+DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+
+[compat]
+ADTypes = "1.14"
+DifferentiationInterface = "0.7"
+julia = "1.10"
