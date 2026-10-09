@@ -12,62 +12,85 @@ Base.showerror(io::IO, e::ProtocolViolation) =
 
 """
     check_protocol(model, θ, σ, ω; subjects = 1:nsubjects(model), η = nothing,
-                   reference_backend = nothing, population_gradient = false,
-                   rtol = 1e-8) -> true
+                   reference_backend = nothing, reference_hessian_backend = reference_backend,
+                   population_gradient = false, rtol = 1e-8) -> true
 
 Check that `model` implements the protocol consistently at the given parameters,
 and throw a [`ProtocolViolation`](@ref) naming the first violation otherwise.
 
-Checked for each subject in `subjects`, at `η` (zeros by default; a vector, or one
-vector per checked subject):
+Checked for the batch `subjects` at random effects `η` (zeros by default; a
+`neta × length(subjects)` matrix, one vector for all subjects, or one vector per
+subject):
 
-- the layout matches the lengths of θ, σ and ω;
-- the conditional log-density is a finite real;
-- the values returned by the derivative methods agree with it, the gradients
-  agree with each other, and the Hessian is square and symmetric;
+- the layout matches the lengths of θ, σ and ω, and `evaluation_style` is an
+  [`EvaluationStyle`](@ref);
+- the batched log-densities are finite reals and equal the per-subject ones;
+- the batched gradients equal the per-subject gradients, and the values returned
+  alongside derivatives equal the plain values;
+- subjects are separable: changing one subject's η leaves every other subject's
+  log-density unchanged;
+- when [`provides_eta_hessian`](@ref): the Hessian blocks are square, symmetric and
+  equal the per-subject Hessians;
 - a declared [`mu_referencing`](@ref) trait has one design per subject of the right
   size, and the density is invariant under the mu-referencing shift;
 - a declared [`observation_model`](@ref) reproduces the conditional log-density.
 
-With `reference_backend` (an AD backend, never finite differences), the model's η
-gradient and Hessian are also compared against that backend. With
+With `reference_backend` (an AD backend), the model's η gradients are also compared
+against that backend, and its Hessian blocks (when provided) against
+`reference_hessian_backend` (for Enzyme, a forward-over-reverse
+`DifferentiationInterface.SecondOrder`). With
 `population_gradient = true`, the optional θ/σ gradient is checked as well (against
 `reference_backend` when given).
 """
 function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η = nothing, reference_backend = nothing,
+        reference_hessian_backend = reference_backend,
         population_gradient::Bool = false, rtol::Real = 1.0e-8)
     violation(msg) = throw(ProtocolViolation(typeof(model), msg))
     n = nsubjects(model)
     n isa Integer && n >= 1 || violation("nsubjects returned $(repr(n)); expected a positive integer")
     layout = nlme_layout(model)
     layout isa NLMELayout || violation("nlme_layout returned a $(typeof(layout)); expected an NLMELayout")
+    evaluation_style(model) isa EvaluationStyle ||
+        violation("evaluation_style returned $(repr(evaluation_style(model))); expected an EvaluationStyle")
     length(θ) == layout.ntheta || violation("θ has length $(length(θ)), the layout declares ntheta = $(layout.ntheta)")
     length(σ) == layout.nsigma || violation("σ has length $(length(σ)), the layout declares nsigma = $(layout.nsigma)")
     length(ω) == nomega(layout) || violation("ω has length $(length(ω)), the layout requires nomega = $(nomega(layout))")
-    subjects = subjects === nothing ? (1:n) : subjects
+    subjects = subjects === nothing ? collect(1:n) : collect(Int, subjects)
     all(i -> 1 <= i <= n, subjects) || violation("subjects $subjects are outside 1:$n")
     m = neta(layout)
+    H = _check_eta(violation, η, m, length(subjects))
     mr = mu_referencing(model)
     _check_mu_layout(violation, mr, n, m)
     reference = reference_backend === nothing ? nothing :
-        _checked_backend(model, reference_backend, :check_protocol)
+        (gradient = _checked_backend(model, reference_backend, :check_protocol),
+            hessian = reference_hessian_backend === nothing ? nothing :
+                _checked_backend(model, reference_hessian_backend, :check_protocol))
     agrees(a, b) = isapprox(a, b; rtol = rtol, atol = rtol * (1 + maximum(abs, a; init = 0.0)))
+
+    ℓb = conditional_loglikelihoods(model, subjects, θ, σ, H)
+    length(ℓb) == length(subjects) ||
+        violation("conditional_loglikelihoods returned $(length(ℓb)) values for $(length(subjects)) subjects")
     for (k, i) in enumerate(subjects)
-        ηi = _subject_eta(η, k, m)
-        length(ηi) == m || violation("η for subject $i has length $(length(ηi)); neta = $m")
+        ℓb[k] isa Real && isfinite(ℓb[k]) ||
+            violation("the conditional log-density of subject $i is $(repr(ℓb[k])) at the checked point; expected a finite real")
+    end
+    ℓg, G = conditional_loglikelihoods_and_gradients(model, subjects, θ, σ, H)
+    agrees(ℓg, ℓb) || violation("conditional_loglikelihoods_and_gradients values $ℓg ≠ conditional_loglikelihoods $ℓb")
+    size(G) == size(H) || violation("batched η gradients have size $(size(G)); expected $(size(H))")
+    _check_separability(violation, agrees, model, subjects, θ, σ, H, ℓb)
+    blocks = provides_eta_hessian(model) ? conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H) : nothing
+    _check_block_shapes(violation, agrees, blocks, subjects, m)
+
+    for (k, i) in enumerate(subjects)
+        ηi = H[:, k]
         ℓ = conditional_loglikelihood(model, i, θ, σ, ηi)
-        ℓ isa Real && isfinite(ℓ) ||
-            violation("conditional_loglikelihood for subject $i is $(repr(ℓ)) at the checked point; expected a finite real")
-        ℓg, g = conditional_loglikelihood_and_gradient(model, i, θ, σ, ηi)
-        agrees(ℓg, ℓ) || violation("subject $i: conditional_loglikelihood_and_gradient value $ℓg ≠ conditional_loglikelihood $ℓ")
-        length(g) == m || violation("subject $i: η gradient has length $(length(g)); neta = $m")
-        ℓh, gh, H = conditional_loglikelihood_gradient_and_hessian(model, i, θ, σ, ηi)
-        agrees(ℓh, ℓ) || violation("subject $i: conditional_loglikelihood_gradient_and_hessian value $ℓh ≠ conditional_loglikelihood $ℓ")
-        agrees(gh, g) || violation("subject $i: the gradients of the two derivative methods disagree: $gh vs $g")
-        size(H) == (m, m) || violation("subject $i: η Hessian has size $(size(H)); expected ($m, $m)")
-        agrees(H, H') || violation("subject $i: η Hessian is not symmetric")
-        _check_reference(violation, agrees, reference, model, i, θ, σ, ηi, g, H)
+        agrees(ℓ, ℓb[k]) || violation("subject $i: per-subject log-density $ℓ ≠ batched $(ℓb[k])")
+        ℓi, g = conditional_loglikelihood_and_gradient(model, i, θ, σ, ηi)
+        agrees(ℓi, ℓ) || violation("subject $i: conditional_loglikelihood_and_gradient value $ℓi ≠ $ℓ")
+        agrees(g, G[:, k]) || violation("subject $i: per-subject η gradient $g ≠ batched $(G[:, k])")
+        _check_subject_hessian(violation, agrees, blocks, model, k, i, θ, σ, ηi, ℓ, g)
+        _check_reference(violation, agrees, reference, model, i, θ, σ, ηi, g, blocks === nothing ? nothing : blocks[k])
         _check_mu_invariance(violation, agrees, mr, model, i, θ, σ, ηi, ℓ)
         _check_observation_model(violation, agrees, observation_model(model), model, i, θ, σ, ηi, ℓ)
         population_gradient &&
@@ -76,15 +99,64 @@ function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
     return true
 end
 
-_subject_eta(::Nothing, k, m) = zeros(m)
-_subject_eta(η::AbstractVector{<:Real}, k, m) = η
-_subject_eta(η::AbstractVector{<:AbstractVector}, k, m) = η[k]
+_check_eta(violation, ::Nothing, m, n) = zeros(m, n)
+function _check_eta(violation, η::AbstractMatrix{<:Real}, m, n)
+    size(η) == (m, n) || violation("η has size $(size(η)); expected ($m, $n)")
+    return Matrix{Float64}(η)
+end
+function _check_eta(violation, η::AbstractVector{<:Real}, m, n)
+    length(η) == m || violation("η has length $(length(η)); neta = $m")
+    return repeat(η, 1, n)
+end
+function _check_eta(violation, η::AbstractVector{<:AbstractVector}, m, n)
+    length(η) == n || violation("η holds $(length(η)) vectors for $n subjects")
+    all(v -> length(v) == m, η) || violation("some η vector does not have length neta = $m")
+    return reduce(hcat, η)
+end
 
-_check_reference(violation, agrees, ::Nothing, model, i, θ, σ, η, g, H) = nothing
-function _check_reference(violation, agrees, backend, model, i, θ, σ, η, g, H)
-    _, gref, Href = DI.value_gradient_and_hessian(_eta_objective, backend, η, _eta_contexts(model, i, θ, σ)...)
+# Conditional independence: one subject's η moves only that subject's density.
+function _check_separability(violation, agrees, model, subjects, θ, σ, H, ℓb)
+    length(subjects) >= 2 || return nothing
+    moved = copy(H)
+    moved[:, 1] .+= 0.1
+    ℓ1 = conditional_loglikelihoods(model, subjects, θ, σ, moved)
+    agrees(ℓ1[2:end], ℓb[2:end]) || violation(
+        "changing subject $(subjects[1])'s η changed other subjects' log-densities; subjects must be conditionally independent")
+    others = copy(H)
+    others[:, 2:end] .+= 0.1
+    ℓ2 = conditional_loglikelihoods(model, subjects, θ, σ, others)
+    agrees(ℓ2[1], ℓb[1]) || violation(
+        "changing the other subjects' η changed subject $(subjects[1])'s log-density; subjects must be conditionally independent")
+    return nothing
+end
+
+_check_block_shapes(violation, agrees, ::Nothing, subjects, m) = nothing
+function _check_block_shapes(violation, agrees, blocks, subjects, m)
+    length(blocks) == length(subjects) ||
+        violation("conditional_loglikelihood_hessian_blocks returned $(length(blocks)) blocks for $(length(subjects)) subjects")
+    for (k, B) in enumerate(blocks)
+        size(B) == (m, m) || violation("subject $(subjects[k]): η Hessian block has size $(size(B)); expected ($m, $m)")
+        agrees(B, B') || violation("subject $(subjects[k]): η Hessian block is not symmetric")
+    end
+    return nothing
+end
+
+_check_subject_hessian(violation, agrees, ::Nothing, model, k, i, θ, σ, η, ℓ, g) = nothing
+function _check_subject_hessian(violation, agrees, blocks, model, k, i, θ, σ, η, ℓ, g)
+    ℓh, gh, Hi = conditional_loglikelihood_gradient_and_hessian(model, i, θ, σ, η)
+    agrees(ℓh, ℓ) || violation("subject $i: conditional_loglikelihood_gradient_and_hessian value $ℓh ≠ $ℓ")
+    agrees(gh, g) || violation("subject $i: the gradients of the two derivative methods disagree: $gh vs $g")
+    agrees(Hi, blocks[k]) || violation("subject $i: per-subject η Hessian disagrees with its batched block")
+    return nothing
+end
+
+_check_reference(violation, agrees, ::Nothing, model, i, θ, σ, η, g, block) = nothing
+function _check_reference(violation, agrees, reference, model, i, θ, σ, η, g, block)
+    gref = DI.gradient(_eta_objective, reference.gradient, η, _eta_contexts(model, i, θ, σ)...)
     agrees(g, gref) || violation("subject $i: η gradient $g disagrees with the reference backend's $gref")
-    agrees(H, Href) || violation("subject $i: η Hessian disagrees with the reference backend's")
+    (block === nothing || reference.hessian === nothing) && return nothing
+    Href = DI.hessian(_eta_objective, reference.hessian, η, _eta_contexts(model, i, θ, σ)...)
+    agrees(block, Href) || violation("subject $i: η Hessian disagrees with the reference backend's")
     return nothing
 end
 
@@ -133,7 +205,7 @@ function _check_population_gradient(violation, agrees, reference, model, i, θ, 
     length(gσ) == layout.nsigma || violation("subject $i: σ gradient has length $(length(gσ))")
     reference === nothing && return nothing
     x = vcat(θ, σ)
-    gref = DI.gradient(_population_objective, reference, x,
+    gref = DI.gradient(_population_objective, reference.gradient, x,
         DI.Constant(model), DI.Constant(i), DI.Constant(η), DI.Constant(length(θ)))
     agrees(vcat(gθ, gσ), gref) || violation("subject $i: θ/σ gradient disagrees with the reference backend's")
     return nothing

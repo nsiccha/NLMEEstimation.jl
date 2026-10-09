@@ -2,7 +2,9 @@ using NLMEEstimation
 using LinearAlgebra
 using Random
 using Test
-import ForwardDiff
+import DifferentiationInterface as DI
+isdefined(@__MODULE__, :TestCommon) || include("common.jl")
+using .TestCommon
 
 @testset "layout and Ω parameterization" begin
     @test_throws ArgumentError NLMELayout(-1, 0, [1])
@@ -37,6 +39,9 @@ import ForwardDiff
     @test_throws DimensionMismatch omega_matrix(layout, zeros(3))
 end
 
+_prior_at(η, prior) = re_logprior(prior, η)
+_prior_of_ω(ω, layout, η) = re_logprior(NormalREPrior(layout, ω), η)
+
 @testset "η prior N(0, Ω)" begin
     rng = Xoshiro(2)
     layout = NLMELayout(0, 0, [2, 1])
@@ -48,10 +53,16 @@ end
     @test re_logprior(prior, η) ≈ expected
     lp, g, H = re_logprior_gradient_and_hessian(prior, η)
     @test lp ≈ expected
-    # The closed-form derivatives agree with AD of the log-density.
-    @test g ≈ ForwardDiff.gradient(x -> re_logprior(prior, x), η)
-    @test H ≈ ForwardDiff.hessian(x -> re_logprior(prior, x), η)
-    # The prior is differentiable in ω (FOCEI's outer step needs this).
-    gω = ForwardDiff.gradient(w -> re_logprior(NormalREPrior(layout, w), η), ω)
+    # The closed-form derivatives are -Ω⁻¹η and -Ω⁻¹ (Ω inverted independently here),
+    # and agree with Enzyme reverse mode.
+    @test g ≈ -(Ω \ η)
+    @test H ≈ -inv(Ω)
+    @test g ≈ DI.gradient(_prior_at, REVERSE, η, DI.Constant(prior))
+    # The prior is differentiable in ω by reverse-mode AD (population estimators need
+    # this); the ω gradient of the size-one-block terms is known in closed form.
+    gω = DI.gradient(_prior_of_ω, REVERSE, ω, DI.Constant(layout), DI.Constant(η))
     @test all(isfinite, gω)
+    # Block 2 is the single component η[3] with ω[4] = log sd: d/dω of
+    # -(ω + (η/e^ω)²/2) is -1 + η² e^(-2ω).
+    @test gω[4] ≈ -1 + η[3]^2 * exp(-2ω[4])
 end

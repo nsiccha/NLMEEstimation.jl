@@ -73,7 +73,7 @@ oral dose, solved analytically. With `θ = [log ka, log CL, log V, β_WT]`:
 
 Implements the full protocol, including the [`MuReferencing`](@ref) and
 [`GaussianObservations`](@ref) traits. Derivatives come from `backend` (an ADTypes
-backend whose package is loaded, for example `AutoForwardDiff()`).
+backend whose package is loaded, for example `ADTypes.AutoEnzyme()` with Enzyme).
 `eta_blocks` sets the Ω block structure (`[3]` for a dense Ω).
 """
 struct OneCompartmentOral{E <: ResidualError, B}
@@ -108,21 +108,39 @@ NE.observations(m::OneCompartmentOral, i::Integer) = m.subjects[i].concentration
 NE.observation_moments(m::OneCompartmentOral, i::Integer, θ, σ, η) =
     subject_moments(m.error_model, m.reference_weight, m.subjects[i], θ, σ, η)
 
+# One scalar per-observation kernel, `observation_moment`, defines the model: the
+# log-density accumulates it without allocating, `observation_moments` collects it
+# into arrays, and its per-observation (prediction, variance) pair is what FOCE(I)
+# linearizes.
 function NE.conditional_loglikelihood(m::OneCompartmentOral, i::Integer, θ, σ, η)
-    y = m.subjects[i].concentrations
-    μ, v = NE.observation_moments(m, i, θ, σ, η)
-    return sum(j -> -(log(2π * v[j]) + (y[j] - μ[j])^2 / v[j]) / 2, eachindex(y))
+    s = m.subjects[i]
+    p = individual_parameters(m.reference_weight, s, θ, η)
+    ℓ = zero(float(promote_type(eltype(θ), eltype(σ), eltype(η))))
+    for j in eachindex(s.times)
+        C, var = observation_moment(m.error_model, p, s.dose, s.times[j], σ)
+        ℓ += -(log(2π * var) + (s.concentrations[j] - C)^2 / var) / 2
+    end
+    return ℓ
 end
 
 # Predicted concentrations and residual variances of one subject.
 function subject_moments(error_model, reference_weight, s::PKSubject, θ, σ, η)
+    p = individual_parameters(reference_weight, s, θ, η)
+    moments = [observation_moment(error_model, p, s.dose, t, σ) for t in s.times]
+    return first.(moments), last.(moments)
+end
+
+function individual_parameters(reference_weight, s::PKSubject, θ, η)
     ka = exp(θ[1] + η[1])
     cl = exp(θ[2] + θ[4] * log(s.weight / reference_weight) + η[2])
     v = exp(θ[3] + η[3])
-    ke = cl / v
-    μ = [s.dose * ka / v * bateman(ka, ke, t) for t in s.times]
-    variance = [residual_variance(error_model, σ, C) for C in μ]
-    return μ, variance
+    return (ka = ka, ke = cl / v, v = v)
+end
+
+# Predicted concentration and residual variance at time t after the dose.
+function observation_moment(error_model, p, dose, t, σ)
+    C = dose * p.ka / p.v * bateman(p.ka, p.ke, t)
+    return C, residual_variance(error_model, σ, C)
 end
 
 # (exp(-ke t) - exp(-ka t)) / (ka - ke), accurate when ka ≈ ke.

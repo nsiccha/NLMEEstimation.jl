@@ -81,3 +81,18 @@ function complete_data_loglikelihood_gradient_and_hessian(model, i, θ, σ, prio
 end
 complete_data_loglikelihood_gradient_and_hessian(model, i, θ, σ, ω::AbstractVector, η) =
     complete_data_loglikelihood_gradient_and_hessian(model, i, θ, σ, re_prior(model, ω), η)
+
+# Batched complete-data evaluations for the estimators: per-subject conditional and
+# complete-data log-densities, gradients and Hessian blocks of a batch whose η are
+# the columns of `H`.
+function _complete_values(model, subjects, θ, σ, prior::NormalREPrior, H)
+    ℓ = conditional_loglikelihoods(model, subjects, θ, σ, H)
+    return ℓ, ℓ .+ [re_logprior(prior, view(H, :, k)) for k in axes(H, 2)]
+end
+function _complete_gradients(model, subjects, θ, σ, prior::NormalREPrior, H)
+    ℓ, Gc = conditional_loglikelihoods_and_gradients(model, subjects, θ, σ, H)
+    f = ℓ .+ [re_logprior(prior, view(H, :, k)) for k in axes(H, 2)]
+    return ℓ, f, Gc .- prior.precision * H
+end
+_complete_hessians(model, subjects, θ, σ, prior::NormalREPrior, H) =
+    [B - prior.precision for B in conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H)]

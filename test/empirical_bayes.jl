@@ -1,40 +1,49 @@
 using NLMEEstimation
 using NLMEEstimation.ReferenceModels
+import DifferentiationInterface as DI
 using LinearAlgebra
 using Random
 using Statistics: cor
+using DelimitedFiles: readdlm
 using Test
-import ForwardDiff
 isdefined(@__MODULE__, :TestCommon) || include("common.jl")
 using .TestCommon
 
-# The EBEs must coincide with the brute-force joint optimum over all subjects' η, and
-# the returned Hessians with the diagonal blocks of the joint Hessian (whose
-# off-diagonal blocks vanish, because subjects are independent given θ, σ, Ω).
-function check_against_joint_reference(model, θ, σ, ω)
-    r = empirical_bayes(model, θ, σ, ω)
+# The EBEs must coincide with the brute-force joint optimum over all subjects' η; the
+# returned Hessians (when the model provides second order) with the diagonal blocks
+# of the joint Hessian, whose off-diagonal blocks vanish because subjects are
+# independent given θ, σ, Ω.
+function check_against_joint_reference(model, θ, σ, ω; method = default_ebe_method(model), atol = 1.0e-7)
+    r = empirical_bayes(model, θ, σ, ω; method)
     n = nsubjects(model)
     m = neta(nlme_layout(model))
     @test all(r.converged)
     @test r.subjects == 1:n
-    reference, joint = joint_reference(model, θ, σ, ω)
-    @test maximum(abs, stacked(r.modes) - stacked(reference)) < 1.0e-7
-    x = stacked(r.modes)
-    @test maximum(abs, ForwardDiff.gradient(joint, x)) < 1.0e-8
-    H = ForwardDiff.hessian(joint, x)
-    for i in 1:n, j in 1:n
-        block = H[((i - 1) * m + 1):(i * m), ((j - 1) * m + 1):(j * m)]
-        if i == j
-            @test block ≈ r.hessians[i] rtol = 1.0e-10
-        else
-            @test iszero(block)
-        end
-    end
+    @test r.method === method
+    reference, prior = joint_reference(model, θ, σ, ω)
+    @test maximum(abs, r.modes - reference) < atol
+    contexts = (DI.Constant(model), DI.Constant(θ), DI.Constant(σ), DI.Constant(prior), DI.Constant(m))
+    x = vec(r.modes)
+    @test maximum(abs, DI.gradient(joint_logdensity, RUNTIME_REVERSE, x, contexts...)) < 1.0e-6
     for i in 1:n
-        @test r.complete_data_loglikelihood[i] ≈ complete_data_loglikelihood(model, i, θ, σ, ω, r.modes[i])
-        @test r.conditional_loglikelihood[i] ≈ conditional_loglikelihood(model, i, θ, σ, r.modes[i])
-        @test isposdef(Symmetric(-r.hessians[i]))
-        @test r.newton_decrement[i] / 2 <= EBEOptions().decrement_tol
+        @test r.complete_data_loglikelihood[i] ≈ complete_data_loglikelihood(model, i, θ, σ, ω, r.modes[:, i])
+        @test r.conditional_loglikelihood[i] ≈ conditional_loglikelihood(model, i, θ, σ, r.modes[:, i])
+    end
+    if r.hessians === nothing
+        @test !provides_eta_hessian(model)
+    else
+        Hcond = DI.hessian(joint_conditional, RUNTIME_HESSIAN, x,
+            DI.Constant(model), DI.Constant(θ), DI.Constant(σ), DI.Constant(m))
+        Hjoint = Hcond - kron(Matrix(I, n, n), prior.precision)
+        for i in 1:n, j in 1:n
+            block = Hjoint[((i - 1) * m + 1):(i * m), ((j - 1) * m + 1):(j * m)]
+            if i == j
+                @test block ≈ r.hessians[i] rtol = 1.0e-10
+                @test isposdef(Symmetric(-r.hessians[i]))
+            else
+                @test iszero(block)
+            end
+        end
     end
     return r
 end
@@ -43,10 +52,17 @@ end
     @testset "simulated data, diagonal Ω" begin
         model, η_true = simulated_model()
         ω = omega_parameters(nlme_layout(model), Ω_SIM)
+        @test default_ebe_method(model) === NewtonEBE()
         r = check_against_joint_reference(model, θ_SIM, σ_SIM, ω)
+        @test all(<=(1.0e-8), r.gradient_norm)
         # The clearance random effect is well identified by ten samples per subject.
-        @test cor([η[2] for η in r.modes], [η[2] for η in η_true]) > 0.9
+        @test cor(r.modes[2, :], [η[2] for η in η_true]) > 0.9
         @test posthoc === empirical_bayes
+
+        # Gradient-only BFGS reaches the same modes; this model still provides Hessians.
+        q = check_against_joint_reference(model, θ_SIM, σ_SIM, ω; method = QuasiNewtonEBE())
+        @test maximum(abs, q.modes - r.modes) < 1.0e-7
+        @test all(<=(EBEOptions().gtol), q.gradient_norm)
 
         # Laplace posterior covariances of η.
         C = ebe_covariances(r)
@@ -56,14 +72,45 @@ end
         # A warm start from the result is already at the modes (at most the polishing
         # Newton step is taken).
         warm = empirical_bayes(model, θ_SIM, σ_SIM, ω; η0 = r)
-        @test maximum(abs, stacked(warm.modes) - stacked(r.modes)) < 1.0e-12
+        @test maximum(abs, warm.modes - r.modes) < 1.0e-12
         @test all(<=(1), warm.iterations)
         subset = empirical_bayes(model, θ_SIM, σ_SIM, ω; subjects = [4, 9], η0 = r)
         @test subset.subjects == [4, 9]
-        @test maximum(abs, stacked(subset.modes) - stacked(r.modes[[4, 9]])) < 1.0e-12
+        @test maximum(abs, subset.modes - r.modes[:, [4, 9]]) < 1.0e-12
+        @test empirical_bayes(model, θ_SIM, σ_SIM, ω; subjects = [4, 9], η0 = r.modes[:, [4, 9]]).modes ≈ subset.modes
         @test_throws ArgumentError empirical_bayes(model, θ_SIM, σ_SIM, ω; subjects = [nsubjects(model) + 1])
+        @test_throws ArgumentError empirical_bayes(model, θ_SIM, σ_SIM, ω; subjects = [2, 2])
         @test_throws ArgumentError empirical_bayes(model, θ_SIM, σ_SIM, ω; η0 = subset)
+        @test_throws DimensionMismatch empirical_bayes(model, θ_SIM, σ_SIM, ω; η0 = zeros(3, 2))
         @test_throws DimensionMismatch empirical_bayes(model, θ_SIM[1:3], σ_SIM, ω)
+    end
+
+    @testset "joint-program models: batched, lockstep" begin
+        model, _ = simulated_model()
+        ω = omega_parameters(nlme_layout(model), Ω_SIM)
+        r = empirical_bayes(model, θ_SIM, σ_SIM, ω)
+
+        # Gradient-only joint program (the shape of BRM's RK backend today): BFGS by
+        # default, no Hessians in the result.
+        gradient_only = JointView(model; hessian_backend = nothing)
+        @test default_ebe_method(gradient_only) === QuasiNewtonEBE()
+        q = check_against_joint_reference(gradient_only, θ_SIM, σ_SIM, ω)
+        @test q.hessians === nothing
+        @test_throws ArgumentError ebe_covariances(q)
+        @test maximum(abs, q.modes - r.modes) < 1.0e-7
+        # Lockstep: the number of batched evaluations follows the iteration count, not
+        # the number of subjects (each one is an O(N) pass for a joint program).
+        gradient_only.calls[] = 0
+        q = empirical_bayes(gradient_only, θ_SIM, σ_SIM, ω)
+        @info "lockstep batched evaluations" calls = gradient_only.calls[] max_iterations = maximum(q.iterations) total_iterations = sum(q.iterations)
+        @test gradient_only.calls[] < 2 * nsubjects(model) * maximum(q.iterations)
+
+        # With HVP-based Hessian blocks the joint program runs Newton.
+        joint = JointView(model)
+        @test default_ebe_method(joint) === NewtonEBE()
+        j = check_against_joint_reference(joint, θ_SIM, σ_SIM, ω)
+        @test maximum(abs, j.modes - r.modes) < 1.0e-10
+        @test j.hessians ≈ r.hessians
     end
 
     @testset "simulated data, dense Ω" begin
@@ -73,6 +120,7 @@ end
         model, _ = simulated_model(; seed = 12, Ω, eta_blocks = [3])
         ω = omega_parameters(nlme_layout(model), Ω)
         check_against_joint_reference(model, θ_SIM, σ_SIM, ω)
+        check_against_joint_reference(model, θ_SIM, σ_SIM, ω; method = QuasiNewtonEBE())
     end
 
     @testset "Theoph data" begin
@@ -80,27 +128,57 @@ end
         @test nsubjects(model) == 12
         ω = omega_parameters(nlme_layout(model), Ω_THEOPH)
         r = check_against_joint_reference(model, θ_THEOPH, σ_THEOPH, ω)
+        check_against_joint_reference(JointView(model; hessian_backend = nothing), θ_THEOPH, σ_THEOPH, ω)
+        # Test-only oracle: nlmixr2 posthoc at the same fixed parameters on the same data
+        # (`nlmixr2data::theo_sd` equals test/data/theoph.csv), generated by
+        # test/oracles/nlmixr2_posthoc_theoph.R.
+        oracle, oracle_header = readdlm(joinpath(@__DIR__, "data", "nlmixr2_posthoc_theoph.csv"), ','; header = true)
+        @test vec(oracle_header) == ["ID", "eta.ka", "eta.cl", "eta.v"]
+        @test oracle[:, 1] == 1:12
+        nlmixr2_modes = permutedims(Float64.(oracle[:, 2:4]))
+        # The structural model is the same: our predictions equal nlmixr2's individual
+        # predictions at its EBEs (IPRED) and its typical-value predictions (PRED).
+        predictions, predictions_header = readdlm(joinpath(@__DIR__, "data", "nlmixr2_posthoc_theoph_predictions.csv"), ','; header = true)
+        @test vec(predictions_header) == ["ID", "TIME", "IPRED", "PRED"]
+        for i in 1:12
+            rows = findall(==(i), predictions[:, 1])
+            @test Float64.(predictions[rows, 2]) == model.subjects[i].times
+            @test observation_moments(model, i, θ_THEOPH, σ_THEOPH, nlmixr2_modes[:, i])[1] ≈ predictions[rows, 3] atol = 1.0e-10
+            @test observation_moments(model, i, θ_THEOPH, σ_THEOPH, zeros(3))[1] ≈ predictions[rows, 4] atol = 1.0e-10
+        end
+        # nlmixr2's modes are converged only to its own inner tolerance (see the oracle
+        # script): they agree with ours to 1e-3, and on the shared objective ours are at
+        # least as good and within 1e-5 of them, i.e. the same optimum.
+        @info "EBE agreement with nlmixr2 posthoc" max_abs_difference = maximum(abs, r.modes - nlmixr2_modes)
+        @test maximum(abs, r.modes - nlmixr2_modes) < 1.0e-3
+        for i in 1:12
+            ours = complete_data_loglikelihood(model, i, θ_THEOPH, σ_THEOPH, ω, r.modes[:, i])
+            theirs = complete_data_loglikelihood(model, i, θ_THEOPH, σ_THEOPH, ω, nlmixr2_modes[:, i])
+            @test theirs <= ours + 1.0e-12
+            @test ours - theirs < 1.0e-5
+        end
         # The individual fits are better than the typical-value fit.
         sse(i, η) = sum(abs2, observations(model, i) - observation_moments(model, i, θ_THEOPH, σ_THEOPH, η)[1])
-        @test sum(i -> sse(i, r.modes[i]), 1:12) < sum(i -> sse(i, zeros(3)), 1:12) / 2
+        @test sum(i -> sse(i, r.modes[:, i]), 1:12) < sum(i -> sse(i, zeros(3)), 1:12) / 2
     end
 
     @testset "failures are reported, never silent" begin
         model, _ = simulated_model()
         ω = omega_parameters(nlme_layout(model), Ω_SIM)
-        options = EBEOptions(; maxiter = 1)
-        err = try
-            empirical_bayes(model, θ_SIM, σ_SIM, ω; options)
-        catch e
-            e
+        for method in (NewtonEBE(), QuasiNewtonEBE())
+            options = EBEOptions(; maxiter = 1)
+            err = try
+                empirical_bayes(model, θ_SIM, σ_SIM, ω; method, options)
+            catch e
+                e
+            end
+            @test err isa EBEConvergenceError
+            @test !isempty(err.subjects)
+            @test occursin("subject", sprint(showerror, err))
+            partial = empirical_bayes(model, θ_SIM, σ_SIM, ω; method, options, require_convergence = false)
+            @test partial.subjects[.!partial.converged] == err.subjects
+            @test all(==(1), partial.iterations[.!partial.converged])
         end
-        @test err isa EBEConvergenceError
-        @test !isempty(err.subjects)
-        @test occursin("subject", sprint(showerror, err))
-        partial = empirical_bayes(model, θ_SIM, σ_SIM, ω; options, require_convergence = false)
-        @test partial.subjects[.!partial.converged] == err.subjects
-        @test all(==(1), partial.iterations[.!partial.converged])
-
         # A zero residual variance makes the log-density non-finite at the start.
         @test_throws DomainError empirical_bayes(model, θ_SIM, [-400.0, -400.0], ω)
     end

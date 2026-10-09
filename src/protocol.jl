@@ -1,7 +1,12 @@
 # The model protocol. A model is any Julia value; it takes part by adding methods
 # to the functions below. Subjects are indexed `1:nsubjects(model)`. θ, σ and η may
-# be any `AbstractVector` (views, dual numbers), so implementations must not
-# restrict their element type.
+# be any `AbstractVector` (views, AD-tracked values), and a batch of random effects
+# is an `AbstractMatrix` with one column per subject, so implementations must not
+# restrict element types.
+#
+# Two evaluation styles exist, chosen by `evaluation_style(model)`. Estimators always
+# call the batched entry points (`conditional_loglikelihoods`, …); every entry point
+# has a default derived from the other style, so a model implements one style only.
 
 # ── Required ──────────────────────────────────────────────────────────────────
 
@@ -21,16 +26,88 @@ See [`NLMELayout`](@ref) for the coordinate conventions.
 function nlme_layout end
 
 """
+    EvaluationStyle
+
+How a model evaluates its conditional log-density, declared by
+[`evaluation_style`](@ref):
+
+- [`PerSubjectEvaluation`](@ref) (default): the model implements
+  [`conditional_loglikelihood`](@ref) for one subject at a time.
+- [`BatchedEvaluation`](@ref): the model implements
+  [`conditional_loglikelihoods`](@ref) for a batch of subjects in one pass, as
+  joint-program backends (one log-density over all subjects) do.
+"""
+abstract type EvaluationStyle end
+
+"""
+    PerSubjectEvaluation()
+
+The model evaluates one subject per call: it implements
+[`conditional_loglikelihood`](@ref). Batched entry points loop over subjects.
+"""
+struct PerSubjectEvaluation <: EvaluationStyle end
+
+"""
+    BatchedEvaluation()
+
+The model evaluates a batch of subjects per call: it implements
+[`conditional_loglikelihoods`](@ref). Per-subject entry points evaluate a batch of
+one; derivatives of a batch come from AD of the batch's summed log-density, which
+yields every subject's η-gradient at once because subjects are conditionally
+independent.
+"""
+struct BatchedEvaluation <: EvaluationStyle end
+
+"""
+    evaluation_style(model) -> EvaluationStyle
+
+**Optional.** Defaults to [`PerSubjectEvaluation`](@ref).
+"""
+evaluation_style(model) = PerSubjectEvaluation()
+
+"""
     conditional_loglikelihood(model, i, θ, σ, η) -> Real
 
-**Required.** The conditional log-density `log p(y_i | θ, σ, η_i)` of subject `i`'s
-observations, *without* the random-effect prior (which this package owns, see
+The conditional log-density `log p(y_i | θ, σ, η_i)` of subject `i`'s observations,
+*without* the random-effect prior (which this package owns, see
 [`re_logprior`](@ref)). θ and σ are in the model's unconstrained coordinates.
+
+**Required** under [`PerSubjectEvaluation`](@ref); derived from
+[`conditional_loglikelihoods`](@ref) under [`BatchedEvaluation`](@ref).
 
 Return `-Inf` where the density is zero (a failed solve, for example); estimators
 treat non-finite values as infeasible and report them, never as success.
 """
-function conditional_loglikelihood end
+conditional_loglikelihood(model, i, θ, σ, η) =
+    _conditional_loglikelihood(evaluation_style(model), model, i, θ, σ, η)
+
+"""
+    conditional_loglikelihoods(model, subjects, θ, σ, H) -> Vector
+
+The conditional log-densities of a batch of subjects: entry `k` is
+`log p(y_i | θ, σ, η_i)` for `i = subjects[k]` and `η_i = H[:, k]`, with `H` of
+size `neta × length(subjects)`.
+
+**Required** under [`BatchedEvaluation`](@ref): a joint-program model places each
+column of `H` into its subject's random-effect slots (the other subjects' slots are
+irrelevant, by conditional independence) and returns the per-subject terms.
+Derived from [`conditional_loglikelihood`](@ref) under
+[`PerSubjectEvaluation`](@ref).
+"""
+conditional_loglikelihoods(model, subjects, θ, σ, H) =
+    _conditional_loglikelihoods(evaluation_style(model), model, subjects, θ, σ, H)
+
+_conditional_loglikelihood(::PerSubjectEvaluation, model, i, θ, σ, η) = throw(ArgumentError(
+    "$(typeof(model)) declares PerSubjectEvaluation but implements no " *
+    "`NLMEEstimation.conditional_loglikelihood(::$(typeof(model)), i, θ, σ, η)`"))
+_conditional_loglikelihood(::BatchedEvaluation, model, i, θ, σ, η) =
+    only(conditional_loglikelihoods(model, [i], θ, σ, reshape(η, :, 1)))
+
+_conditional_loglikelihoods(::PerSubjectEvaluation, model, subjects, θ, σ, H) =
+    [conditional_loglikelihood(model, i, θ, σ, H[:, k]) for (k, i) in enumerate(subjects)]
+_conditional_loglikelihoods(::BatchedEvaluation, model, subjects, θ, σ, H) = throw(ArgumentError(
+    "$(typeof(model)) declares BatchedEvaluation but implements no " *
+    "`NLMEEstimation.conditional_loglikelihoods(::$(typeof(model)), subjects, θ, σ, H)`"))
 
 # ── Derivatives: implement them, or declare an AD backend ─────────────────────
 
@@ -42,49 +119,80 @@ DifferentiationInterface, for every derivative method the model does not impleme
 itself. The default `nothing` declares no backend; calling a missing derivative
 method is then an error.
 
-Finite-difference backends (`AutoFiniteDiff`, `AutoFiniteDifferences`, also nested
-inside `AutoSparse`, `SecondOrder` or `MixedMode`) are refused: every gradient,
-Hessian and Jacobian in this package comes from AD.
+What this package promises and tests is reverse-mode AD with Enzyme,
+`ADTypes.AutoEnzyme()`; second-order defaults are forward-over-reverse
+Hessian-vector products. Other backends are passed through untested.
 """
 ad_backend(model) = nothing
 
 """
     hessian_ad_backend(model) -> Union{Nothing, ADTypes.AbstractADType}
 
-**Optional.** The backend used for the default η Hessian. Defaults to
-[`ad_backend`](@ref); override it with, for example,
-`DifferentiationInterface.SecondOrder(AutoForwardDiff(), AutoEnzyme())`.
+**Optional.** The backend used for default second-order derivatives (η Hessian
+blocks). Defaults to [`ad_backend`](@ref). Return `nothing` to declare that the
+model provides no second order, so estimators use their gradient-only paths.
 """
 hessian_ad_backend(model) = ad_backend(model)
 
 """
+    provides_eta_hessian(model) -> Bool
+
+**Optional.** Whether η Hessian blocks are available
+([`conditional_loglikelihood_hessian_blocks`](@ref)). Defaults to whether a
+[`hessian_ad_backend`](@ref) is declared; a model implementing the Hessian methods
+itself returns `true`. Second order is only ever requested as per-subject
+`neta × neta` blocks, never as a joint matrix.
+"""
+provides_eta_hessian(model) = hessian_ad_backend(model) !== nothing
+
+"""
     conditional_loglikelihood_and_gradient(model, i, θ, σ, η) -> (ℓ, ∇η ℓ)
 
-**Required, or provided by [`ad_backend`](@ref).** The conditional log-density and
-its gradient in η_i.
+The conditional log-density of subject `i` and its gradient in η_i. Implement it,
+or let it derive from [`ad_backend`](@ref) (per-subject models) or from the batched
+gradient (batched models).
 """
-function conditional_loglikelihood_and_gradient(model, i, θ, σ, η)
-    backend = _checked_backend(model, ad_backend(model), :conditional_loglikelihood_and_gradient)
-    return DI.value_and_gradient(_eta_objective, backend, η, _eta_contexts(model, i, θ, σ)...)
-end
+conditional_loglikelihood_and_gradient(model, i, θ, σ, η) =
+    _and_gradient(evaluation_style(model), model, i, θ, σ, η)
+
+"""
+    conditional_loglikelihoods_and_gradients(model, subjects, θ, σ, H) -> (ℓ::Vector, G::Matrix)
+
+Batched values and η-gradients: `G[:, k]` is `∇η ℓ_i` for `i = subjects[k]` at
+`H[:, k]`. Under [`BatchedEvaluation`](@ref) the default takes the AD gradient of
+`sum(conditional_loglikelihoods(model, subjects, θ, σ, H))` with respect to `H`,
+which by conditional independence is every subject's gradient in one pass;
+implement it directly to fuse that pass with the values.
+"""
+conditional_loglikelihoods_and_gradients(model, subjects, θ, σ, H) =
+    _and_gradients(evaluation_style(model), model, subjects, θ, σ, H)
 
 """
     conditional_loglikelihood_gradient_and_hessian(model, i, θ, σ, η) -> (ℓ, ∇η ℓ, ∇²η ℓ)
 
-**Required, or provided by [`hessian_ad_backend`](@ref).** The conditional
-log-density with its gradient and Hessian in η_i.
+The conditional log-density of subject `i` with its η gradient and `neta × neta`
+η Hessian. Available when [`provides_eta_hessian`](@ref).
 """
-function conditional_loglikelihood_gradient_and_hessian(model, i, θ, σ, η)
-    backend = _checked_backend(model, hessian_ad_backend(model), :conditional_loglikelihood_gradient_and_hessian)
-    return DI.value_gradient_and_hessian(_eta_objective, backend, η, _eta_contexts(model, i, θ, σ)...)
-end
+conditional_loglikelihood_gradient_and_hessian(model, i, θ, σ, η) =
+    _gradient_and_hessian(evaluation_style(model), model, i, θ, σ, η)
+
+"""
+    conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H) -> Vector{Matrix}
+
+The per-subject η Hessian blocks of a batch: entry `k` is `∇²η ℓ_i` for
+`i = subjects[k]` at `H[:, k]`. Available when [`provides_eta_hessian`](@ref).
+Under [`BatchedEvaluation`](@ref) the default takes `neta` Hessian-vector products
+of the batch's summed log-density, one per η component across all subjects at once.
+"""
+conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H) =
+    _hessian_blocks(evaluation_style(model), model, subjects, θ, σ, H)
 
 """
     conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η) -> (ℓ, ∇θ ℓ, ∇σ ℓ)
 
-**Optional, or provided by [`ad_backend`](@ref).** The conditional log-density with
-its gradients in θ and σ at fixed η_i. Used by population-level estimators
-(FOCEI's outer step, for example), not by [`empirical_bayes`](@ref).
+**Optional, or provided by [`ad_backend`](@ref).** The conditional log-density of
+subject `i` with its gradients in θ and σ at fixed η_i. Used by population-level
+estimators, not by [`empirical_bayes`](@ref).
 """
 function conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)
     backend = _checked_backend(model, ad_backend(model), :conditional_loglikelihood_and_population_gradient)
@@ -95,38 +203,72 @@ function conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)
     return ℓ, g[1:ntheta], g[(ntheta + 1):end]
 end
 
+# Per-subject models: derivatives of the per-subject density.
+function _and_gradient(::PerSubjectEvaluation, model, i, θ, σ, η)
+    backend = _checked_backend(model, ad_backend(model), :conditional_loglikelihood_and_gradient)
+    return DI.value_and_gradient(_eta_objective, backend, η, _eta_contexts(model, i, θ, σ)...)
+end
+function _gradient_and_hessian(::PerSubjectEvaluation, model, i, θ, σ, η)
+    backend = _checked_backend(model, hessian_ad_backend(model), :conditional_loglikelihood_gradient_and_hessian)
+    return DI.value_gradient_and_hessian(_eta_objective, backend, η, _eta_contexts(model, i, θ, σ)...)
+end
+function _and_gradients(::PerSubjectEvaluation, model, subjects, θ, σ, H)
+    pairs = [conditional_loglikelihood_and_gradient(model, i, θ, σ, H[:, k]) for (k, i) in enumerate(subjects)]
+    G = similar(H, promote_type(eltype(H), (eltype(last(p)) for p in pairs)...), size(H))
+    for (k, p) in enumerate(pairs)
+        G[:, k] = last(p)
+    end
+    return [first(p) for p in pairs], G
+end
+_hessian_blocks(::PerSubjectEvaluation, model, subjects, θ, σ, H) =
+    [last(conditional_loglikelihood_gradient_and_hessian(model, i, θ, σ, H[:, k])) for (k, i) in enumerate(subjects)]
+
+# Batched models: derivatives of the batch's summed density, then per-subject views.
+function _and_gradients(::BatchedEvaluation, model, subjects, θ, σ, H)
+    backend = _checked_backend(model, ad_backend(model), :conditional_loglikelihoods_and_gradients)
+    ℓ = conditional_loglikelihoods(model, subjects, θ, σ, H)
+    G = DI.gradient(_batch_objective, backend, H, _batch_contexts(model, subjects, θ, σ)...)
+    return ℓ, G
+end
+function _hessian_blocks(::BatchedEvaluation, model, subjects, θ, σ, H)
+    backend = _checked_backend(model, hessian_ad_backend(model), :conditional_loglikelihood_hessian_blocks)
+    m = size(H, 1)
+    # Tangent k moves η component k of every subject at once; by conditional
+    # independence its HVP holds column k of every subject's block.
+    tangents = ntuple(m) do c
+        V = zero(H)
+        V[c, :] .= 1
+        V
+    end
+    hvps = DI.hvp(_batch_objective, backend, H, tangents, _batch_contexts(model, subjects, θ, σ)...)
+    return [reduce(hcat, [hvps[c][:, k] for c in 1:m]) for k in eachindex(subjects)]
+end
+function _and_gradient(::BatchedEvaluation, model, i, θ, σ, η)
+    ℓ, G = conditional_loglikelihoods_and_gradients(model, [i], θ, σ, reshape(η, :, 1))
+    return only(ℓ), G[:, 1]
+end
+function _gradient_and_hessian(::BatchedEvaluation, model, i, θ, σ, η)
+    ℓ, g = conditional_loglikelihood_and_gradient(model, i, θ, σ, η)
+    return ℓ, g, only(conditional_loglikelihood_hessian_blocks(model, [i], θ, σ, reshape(η, :, 1)))
+end
+
 _eta_objective(η, model, i, θ, σ) = conditional_loglikelihood(model, i, θ, σ, η)
 _eta_contexts(model, i, θ, σ) = (DI.Constant(model), DI.Constant(i), DI.Constant(θ), DI.Constant(σ))
+_batch_objective(H, model, subjects, θ, σ) = sum(conditional_loglikelihoods(model, subjects, θ, σ, H))
+_batch_contexts(model, subjects, θ, σ) =
+    (DI.Constant(model), DI.Constant(subjects), DI.Constant(θ), DI.Constant(σ))
 _population_objective(x, model, i, η, ntheta) =
     conditional_loglikelihood(model, i, view(x, 1:ntheta), view(x, (ntheta + 1):length(x)), η)
 
-# Backend validation, by dispatch on the backend type.
+# A declared backend, or an error naming both remedies when none is declared.
 _checked_backend(model, ::Nothing, op) = throw(ArgumentError(
     "$(typeof(model)) has no method for `$op` and declares no AD backend. Either implement " *
-    "`NLMEEstimation.$op` for it or define `NLMEEstimation.ad_backend(::$(typeof(model)))`."))
-_checked_backend(model, backend::Union{ADTypes.AutoFiniteDiff, ADTypes.AutoFiniteDifferences}, op) =
-    throw(ArgumentError(
-        "`$op` for $(typeof(model)): refused finite-difference backend $(nameof(typeof(backend))). " *
-        "NLMEEstimation takes every derivative from automatic differentiation, never from finite " *
-        "differences; declare an AD backend (ForwardDiff, Enzyme, Mooncake, …) instead."))
+    "`NLMEEstimation.$op` for it or declare a backend with `NLMEEstimation.ad_backend` " *
+    "(or `hessian_ad_backend` for second order)."))
 _checked_backend(model, backend::ADTypes.NoAutoDiff, op) = _checked_backend(model, nothing, op)
-function _checked_backend(model, backend::ADTypes.AutoSparse, op)
-    _checked_backend(model, ADTypes.dense_ad(backend), op)
-    return backend
-end
-function _checked_backend(model, backend::DI.SecondOrder, op)
-    _checked_backend(model, DI.outer(backend), op)
-    _checked_backend(model, DI.inner(backend), op)
-    return backend
-end
-function _checked_backend(model, backend::DI.MixedMode, op)
-    _checked_backend(model, DI.forward_backend(backend), op)
-    _checked_backend(model, DI.reverse_backend(backend), op)
-    return backend
-end
 _checked_backend(model, backend::ADTypes.AbstractADType, op) = backend
 _checked_backend(model, backend, op) = throw(ArgumentError(
-    "`ad_backend` for $(typeof(model)) returned $(repr(backend)), which is not an ADTypes backend"))
+    "the AD backend declared for $(typeof(model)) is $(repr(backend)), which is not an ADTypes backend"))
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
@@ -198,8 +340,9 @@ struct GaussianObservations end
 """
     observation_model(model) -> Union{Nothing, GaussianObservations}
 
-**Optional trait.** Declares the observation-model structure FOCE(I) linearizes.
-Default: `nothing`, under which estimators use the exact Laplace Hessian.
+**Optional trait.** Declares the observation-model structure FOCE(I) linearizes
+(first order: the Jacobians of the predicted means and variances in η). Default:
+`nothing`.
 """
 observation_model(model) = nothing
 
@@ -213,7 +356,7 @@ function observations end
 """
     observation_moments(model, i, θ, σ, η) -> (mean::AbstractVector, variance::AbstractVector)
 
-Predicted means and variances of subject `i`'s observations; required when
-[`observation_model`](@ref) is declared.
+Predicted means and variances of subject `i`'s observations, differentiable in η;
+required when [`observation_model`](@ref) is declared.
 """
 function observation_moments end
