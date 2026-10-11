@@ -353,6 +353,27 @@ Subject `i`'s observations; required when [`observation_model`](@ref) is declare
 """
 function observations end
 
+function observations(model, index)
+    index isa Integer && return _observations(evaluation_style(model), model, index)
+    index isa AbstractVector{<:Integer} &&
+        return _observations_batch(evaluation_style(model), model, index)
+    throw(ArgumentError("observations index must be an integer or vector of integers"))
+end
+_observations(::PerSubjectEvaluation, model, i) = throw(ArgumentError(
+    "$(typeof(model)) declares PerSubjectEvaluation but implements no `NLMEEstimation.observations` for subject $i"))
+_observations(::BatchedEvaluation, model, i) = only(observations(model, [i]))
+
+"""
+    observations(model, subjects::AbstractVector{<:Integer})
+
+Observed vectors in `subjects` order. A batched model implements this method to
+obtain all observations in one joint-program query.
+"""
+_observations_batch(::PerSubjectEvaluation, model, subjects) =
+    [observations(model, i) for i in subjects]
+_observations_batch(::BatchedEvaluation, model, subjects) = throw(ArgumentError(
+    "$(typeof(model)) declares BatchedEvaluation but implements no `NLMEEstimation.observations` for a batch"))
+
 """
     observation_moments(model, i, θ, σ, η) -> (mean::AbstractVector, variance::AbstractVector)
 
@@ -360,3 +381,79 @@ Predicted means and variances of subject `i`'s observations, differentiable in �
 required when [`observation_model`](@ref) is declared.
 """
 function observation_moments end
+
+function observation_moments(model, index, θ, σ, eta)
+    index isa Integer && return _observation_moments(evaluation_style(model), model, index, θ, σ, eta)
+    index isa AbstractVector{<:Integer} &&
+        return _observation_moments(evaluation_style(model), model, index, θ, σ, eta)
+    throw(ArgumentError("observation_moments index must be an integer or vector of integers"))
+end
+_observation_moments(::PerSubjectEvaluation, model, i, θ, σ, η) = throw(ArgumentError(
+    "$(typeof(model)) declares PerSubjectEvaluation but implements no `NLMEEstimation.observation_moments` for subject $i"))
+_observation_moments(::BatchedEvaluation, model, i, θ, σ, η) =
+    only(observation_moments(model, [i], θ, σ, reshape(η, :, 1)))
+
+"""
+    observation_moments(model, subjects, θ, σ, H)
+
+One `(mean, variance)` pair per subject in `subjects` order. Column `k` of `H`
+is the random effect for `subjects[k]`. A batched model implements this method
+for a joint-program pass.
+"""
+_observation_moments(::PerSubjectEvaluation, model, subjects::AbstractVector, θ, σ, H::AbstractMatrix) =
+    [observation_moments(model, i, θ, σ, view(H, :, k)) for (k, i) in enumerate(subjects)]
+_observation_moments(::BatchedEvaluation, model, subjects::AbstractVector, θ, σ, H::AbstractMatrix) = throw(ArgumentError(
+    "$(typeof(model)) declares BatchedEvaluation but implements no `NLMEEstimation.observation_moments` for a batch"))
+
+"""
+    observation_moments_and_jacobians(model, i, θ, σ, η) -> (μ, v, Jμ, Jv)
+
+One subject's observation means, variances, and their Jacobians in η. Jacobian
+rows follow observation order. The default derives them with reverse-mode AD
+from [`observation_moments`](@ref); a model may implement this directly.
+"""
+function observation_moments_and_jacobians(model, index, θ, σ, eta)
+    index isa Integer && return _single_observation_moments_and_jacobians(model, index, θ, σ, eta)
+    index isa AbstractVector{<:Integer} &&
+        return _observation_moments_and_jacobians(evaluation_style(model), model, index, θ, σ, eta)
+    throw(ArgumentError("observation_moments_and_jacobians index must be an integer or vector of integers"))
+end
+
+function _single_observation_moments_and_jacobians(model, i, θ, σ, η)
+    μ, v = observation_moments(model, i, θ, σ, η)
+    n = length(μ)
+    length(v) == n || throw(DimensionMismatch("subject $i has $n means but $(length(v)) variances"))
+    backend = _checked_backend(model, ad_backend(model), :observation_moments_and_jacobians)
+    T = promote_type(eltype(η), eltype(μ), eltype(v))
+    Jμ, Jv = zeros(T, n, length(η)), zeros(T, n, length(η))
+    contexts = _eta_contexts(model, i, θ, σ)
+    for j in 1:n
+        seed = zeros(T, 2n)
+        seed[j] = one(T)
+        Jμ[j, :] = only(DI.pullback(_single_moment_vector, backend, η, (seed,), contexts...))
+        seed = zeros(T, 2n)
+        seed[n + j] = one(T)
+        Jv[j, :] = only(DI.pullback(_single_moment_vector, backend, η, (seed,), contexts...))
+    end
+    return μ, v, Jμ, Jv
+end
+
+"""
+    observation_moments_and_jacobians(model, subjects, θ, σ, H)
+        -> Vector{Tuple{μ_i, v_i, Jμ_i, Jv_i}}
+
+Batched observation moments and first-order η Jacobians. Result entry `k`
+belongs to `subjects[k]`, with `H[:, k]` as its random effect. Each Jacobian has
+`length(observations(model, subjects)[k])` rows and `size(H, 1)` columns. A
+joint-program model provides this directly in one batched computation; a
+per-subject model uses the per-subject derivative method for each entry.
+"""
+_observation_moments_and_jacobians(::PerSubjectEvaluation, model, subjects, θ, σ, H) =
+    [observation_moments_and_jacobians(model, i, θ, σ, view(H, :, k))
+        for (k, i) in enumerate(subjects)]
+_observation_moments_and_jacobians(::BatchedEvaluation, model, subjects, θ, σ, H) =
+    throw(ArgumentError("$(typeof(model)) declares BatchedEvaluation with GaussianObservations " *
+        "but implements no `NLMEEstimation.observation_moments_and_jacobians` for a batch"))
+
+_single_moment_vector(η, model, i, θ, σ) =
+    vcat(observation_moments(model, i, θ, σ, η)...)

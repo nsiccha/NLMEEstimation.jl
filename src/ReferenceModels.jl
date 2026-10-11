@@ -9,6 +9,7 @@ module ReferenceModels
 using LinearAlgebra
 using Random
 import ..NLMEEstimation as NE
+import DifferentiationInterface as DI
 using ..NLMEEstimation: NLMELayout, MuReferencing, GaussianObservations
 
 export OneCompartmentOral, PKSubject, AdditiveError, CombinedError, simulate_one_compartment_oral
@@ -107,6 +108,30 @@ NE.observation_model(::OneCompartmentOral) = GaussianObservations()
 NE.observations(m::OneCompartmentOral, i::Integer) = m.subjects[i].concentrations
 NE.observation_moments(m::OneCompartmentOral, i::Integer, θ, σ, η) =
     subject_moments(m.error_model, m.reference_weight, m.subjects[i], θ, σ, η)
+
+# Differentiate the scalar observation kernel with Enzyme. This avoids placing
+# a returned array of mixed constant/active values inside one AD call.
+function NE.observation_moments_and_jacobians(m::OneCompartmentOral, i::Integer, θ, σ, η)
+    s = m.subjects[i]
+    μ, v = subject_moments(m.error_model, m.reference_weight, s, θ, σ, η)
+    T = promote_type(eltype(η), eltype(μ), eltype(v))
+    Jμ = zeros(T, length(s.times), length(η))
+    Jv = zeros(T, length(s.times), length(η))
+    ctx = (DI.Constant(m.error_model), DI.Constant(m.reference_weight),
+        DI.Constant(s), DI.Constant(θ), DI.Constant(σ))
+    for j in eachindex(s.times)
+        Jμ[j, :] = DI.gradient(_mean_at, m.backend, η, ctx..., DI.Constant(j))
+        Jv[j, :] = DI.gradient(_variance_at, m.backend, η, ctx..., DI.Constant(j))
+    end
+    return μ, v, Jμ, Jv
+end
+
+_mean_at(η, error_model, reference_weight, s, θ, σ, j) =
+    first(observation_moment(error_model, individual_parameters(reference_weight, s, θ, η),
+        s.dose, s.times[j], σ))
+_variance_at(η, error_model, reference_weight, s, θ, σ, j) =
+    last(observation_moment(error_model, individual_parameters(reference_weight, s, θ, η),
+        s.dose, s.times[j], σ))
 
 # One scalar per-observation kernel, `observation_moment`, defines the model: the
 # log-density accumulates it without allocating, `observation_moments` collects it

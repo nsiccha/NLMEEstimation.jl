@@ -34,6 +34,8 @@ subject):
 - a declared [`mu_referencing`](@ref) trait has one design per subject of the right
   size, and the density is invariant under the mu-referencing shift;
 - a declared [`observation_model`](@ref) reproduces the conditional log-density.
+- a declared Gaussian model's batched moments and first-order η Jacobians have
+  the promised per-subject shape and agree with its plain moments.
 
 With `reference_backend` (an AD backend), the model's η gradients are also compared
 against that backend, and its Hessian blocks (when provided) against
@@ -96,6 +98,8 @@ function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
         population_gradient &&
             _check_population_gradient(violation, agrees, reference, model, i, θ, σ, ηi, ℓ, layout)
     end
+    observation_model(model) isa GaussianObservations &&
+        _check_observation_batch(violation, agrees, model, subjects, θ, σ, H, m)
     return true
 end
 
@@ -195,6 +199,24 @@ function _check_observation_model(violation, agrees, ::GaussianObservations, mod
     ℓobs = sum(j -> -(log(2π * v[j]) + (y[j] - μ[j])^2 / v[j]) / 2, eachindex(y); init = zero(ℓ))
     agrees(ℓobs, ℓ) || violation(
         "subject $i: the declared Gaussian observation model gives log-density $ℓobs, conditional_loglikelihood gives $ℓ")
+    return nothing
+end
+
+function _check_observation_batch(violation, agrees, model, subjects, θ, σ, H, m)
+    ys = observations(model, subjects)
+    parts = observation_moments_and_jacobians(model, subjects, θ, σ, H)
+    length(ys) == length(subjects) || violation("batched observations returned $(length(ys)) entries for $(length(subjects)) subjects")
+    length(parts) == length(subjects) || violation("batched observation moments and Jacobians returned $(length(parts)) entries for $(length(subjects)) subjects")
+    for (k, i) in enumerate(subjects)
+        y = observations(model, i)
+        agrees(ys[k], y) || violation("subject $i: batched observations disagree with per-subject observations")
+        μ, v, Jμ, Jv = parts[k]
+        μi, vi = observation_moments(model, i, θ, σ, view(H, :, k))
+        agrees(μ, μi) && agrees(v, vi) || violation("subject $i: batched observation moments disagree with per-subject moments")
+        size(Jμ) == size(Jv) == (length(y), m) || violation(
+            "subject $i: observation Jacobians have sizes $(size(Jμ)) and $(size(Jv)); expected ($(length(y)), $m)")
+        all(isfinite, Jμ) && all(isfinite, Jv) || violation("subject $i: observation Jacobians contain non-finite entries")
+    end
     return nothing
 end
 

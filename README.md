@@ -6,7 +6,7 @@ A model is any Julia value that implements a small protocol: a conditional
 log-density of the observations given the random effects η, with its derivatives in
 η, and a parameter layout. The package owns the random-effect prior
 `η_i ~ N(0, Ω)` and builds estimators on top of the protocol. Posthoc / empirical
-Bayes estimates are implemented now; FOCEI and SAEM are next.
+Bayes and FOCE(I) population estimation are implemented; SAEM is next.
 
 Derivatives come from automatic differentiation. A model either implements its
 derivative methods itself, or declares an
@@ -46,7 +46,10 @@ independent.
 | `provides_eta_hessian(model)` | optional | whether Hessian blocks are available |
 | `conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)` | optional | `(ℓ, ∇θ ℓ, ∇σ ℓ)` |
 | `mu_referencing(model)` | optional trait | `MuReferencing`: θ coordinates entering as `ϕ_i = X_i θ + η_i` (SAEM) |
-| `observation_model(model)` | optional trait | `GaussianObservations()` plus `observations` / `observation_moments` (FOCE(I)) |
+| `observation_model(model)` | optional trait | `GaussianObservations()` for FOCE(I) |
+| `observations(model, subjects)` | required for batched Gaussian models | one observation vector per subject, in batch order |
+| `observation_moments(model, subjects, θ, σ, H)` | required for batched Gaussian models | one `(mean, variance)` pair per subject |
+| `observation_moments_and_jacobians(model, subjects, θ, σ, H)` | derived per subject or implemented for a batch | one `(μ, v, Jμ, Jv)` tuple per subject; Jacobian rows follow observations and columns follow η |
 | `parameter_names(model)` | optional | names for reporting |
 
 Coordinates:
@@ -74,8 +77,7 @@ model = OneCompartmentOral(subjects; backend = AutoEnzyme())
 ω = omega_parameters(nlme_layout(model), Ω)
 r = empirical_bayes(model, θ, σ, ω)   # or posthoc(...)
 r.modes        # η̂, one column per subject
-r.hessians     # ∇²η log p(y_i, η_i | θ, σ, Ω) at η̂_i (nothing for gradient-only models)
-ebe_covariances(r)
+r.hessians     # nothing for this gradient-only model
 ```
 
 `empirical_bayes` solves all subjects in lockstep. Each iteration makes one batched
@@ -88,3 +90,20 @@ gradient call, plus batched value calls for its line search.
 
 It throws an `EBEConvergenceError` naming any subject without a mode, unless
 `require_convergence = false`.
+
+## FOCE(I) population estimation
+
+```julia
+at_start = focei_evaluate(model, θ, σ, ω)
+fit = focei(model, θ, σ, ω; options = FOCEOptions(maxeval = 500))
+fit.theta, fit.sigma, fit.omega_matrix  # estimated model coordinates and Ω
+fit.ofv                                # -2 × approximate marginal log-likelihood
+fit.ebes.modes                         # η̂ at the optimum
+fit.converged, fit.evaluations
+```
+
+FOCE(I) uses only first η derivatives of the observation means and variances.
+The outer BOBYQA search uses no gradients. For a joint-program model, implement
+the three batched Gaussian methods in the table so one query can return the
+moments and η Jacobians of all subjects. `FOCEOptions(interaction = false)`
+omits the variance-Jacobian term for FOCE without interaction.
