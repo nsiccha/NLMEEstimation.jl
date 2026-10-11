@@ -213,3 +213,32 @@ For the nonlinear Theoph model, a separate run used six subjects, 60 SAEM iterat
 The Gaussian-selected Hessian MALA setting produced near-zero variance estimates in the shorter six-subject fit despite acceptance near its target; it did not transfer reliably to that changing-target setting. The prior-metric 0.05 setting was close to MH in time and fit medians in the longer run. These short fits do not establish estimator accuracy or convergence. The same no-MCMC-burn-in NUTS configuration had 49 divergent transitions across the six short fits, so this trial does not qualify a new NUTS comparison; the earlier qualified NUTS benchmark used a different setup.
 
 The Theoph reference model uses per-subject AD behind the batch protocol, whereas the Gaussian fixture supplies a fused batch value-and-gradient method. The tests also exercise default batched Enzyme AD. Throughput on a production joint-model backend still needs its own measurement. Continuous raw dual averaging under a changing target has no convergence guarantee from a Metropolis correction at each fixed target. The measured result supports keeping MH as the default while MALA remains available for model-specific trials.
+
+### What changes with more random effects?
+
+A [dimension-sweep reproducer](https://github.com/nsiccha/NLMEEstimation.jl/blob/b9e177875707af385aedd8670f56aaec705215d4/bench/saem_mala_dimension_sweep.jl) and its [complete 245-line output](https://github.com/nsiccha/NLMEEstimation.jl/blob/8f99b09b5619721dfb65d9497be548d8152b5303/bench/saem_mala_dimension_results.tsv) extend the fixed-target experiment to 2, 4, 8, 16, 32, and 64 effects per subject. Each of six Gaussian subject posteriors has a known mean, an identity prior covariance, and a deterministically rotated likelihood precision with base eigenvalues 0.5–20. The **informative** case uses that precision; the **weak-data** case multiplies it by 0.025. Every chain starts at zero and retains every draw. There is no initial MCMC burn-in or population-parameter update in this experiment.
+
+For each dimension and scenario, we screened five MH scales, proportional to `sqrt(2/d)`, and eight MALA settings: six initial-step-size/acceptance-target combinations with a Hessian metric and two with the prior metric. Seeds 301–308 selected settings by the observed `RMSE² × median wall time`; independent seeds 401–416 evaluated 400 transitions and seeds 701–708 evaluated 4,000 transitions. RMSE is the error of each chain's all-draw posterior mean against the analytic Gaussian mean, averaged over subjects, coordinates, and seeds. Time includes MH's initial likelihood call and MALA's initial Hessian setup, but excludes compilation and fixture construction. The fixture supplies a fused analytic batch gradient; it does not measure Enzyme AD cost. Measurements used AMD Ryzen 9 9950X, Julia 1.10.12, one Julia thread and one BLAS thread, with source `b9e1778`. We repeated the sweep on the same host; small timing changes did not change the efficiency direction below.
+
+The table reports `R = (RMSE_MH² × time_MH) / (RMSE_MALA² × time_MALA)` on held-out seeds. **Above 1 favors MALA; below 1 favors MH.** The prior-acceptance column is the MH prior-independence proposal's fraction accepted over 400 transitions. MALA's Metropolis acceptance and per-subject final step-size ranges for every row are in the complete output.
+
+| Scenario | Effects | MH prior accept | Hessian MALA / MH, 400 | Prior MALA / MH, 400 | Hessian MALA / MH, 4,000 | Prior MALA / MH, 4,000 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| informative | 2 | 0.175 | 1.18× | 0.10× | 1.50× | 0.11× |
+| informative | 4 | 0.079 | 1.56× | 0.27× | 2.45× | 0.29× |
+| informative | 8 | 0.014 | 2.83× | 0.53× | 3.95× | 0.75× |
+| informative | 16 | 0.000 | 5.91× | 1.45× | 10.69× | 1.91× |
+| informative | 32 | 0.000 | 5.98× | 1.48× | 15.28× | 3.34× |
+| informative | 64 | 0.000 | 5.89× | 1.64× | 25.01× | 5.67× |
+| weak data | 2 | 0.789 | 0.18× | 0.18× | 0.28× | 0.24× |
+| weak data | 4 | 0.818 | 0.14× | 0.14× | 0.18× | 0.19× |
+| weak data | 8 | 0.768 | 0.13× | 0.13× | 0.16× | 0.16× |
+| weak data | 16 | 0.688 | 0.13× | 0.12× | 0.16× | 0.16× |
+| weak data | 32 | 0.563 | 0.13× | 0.13× | 0.17× | 0.18× |
+| weak data | 64 | 0.413 | 0.17× | 0.19× | 0.24× | 0.24× |
+
+For example, at 32 informative effects and 400 transitions, MH had RMSE 0.314 in 3.3 ms, Hessian MALA 0.084 in 7.8 ms, and prior-metric MALA 0.175 in 7.2 ms. MH's prior proposal had no accepted moves in the held-out runs. At 32 weak-data effects, MH instead had RMSE 0.078 in 3.4 ms and accepted 56% of its prior proposals; both MALA metrics had RMSE about 0.146 in 7–8 ms. This explains why **dimension alone does not select the kernel**: the informativeness and geometry of each subject's likelihood relative to its prior matter greatly.
+
+The Gaussian target has a constant exact Hessian, so its one-time Hessian metric is an especially favorable case for MALA. In nonlinear models, the initial Hessian can become stale as η and population parameters move, and an AD gradient may cost more than the analytic gradient here. This sweep tests conditional-posterior error at a fixed target, **not SAEM population-estimator convergence**; changing-target adaptation and multimodality need separate checks. The implementation also now applies the covariance factor to gradient vectors without forming a dense covariance twice per proposal, which matters increasingly with effect dimension.
+
+For stationary product targets under optimal tuning, the classical diffusion-limit result predicts `O(d)` random-walk iterations versus `O(d^(1/3))` MALA iterations as dimension `d` grows ([Roberts and Rosenthal, 1998](https://onlinelibrary.wiley.com/doi/full/10.1111/1467-9868.00123)). Those assumptions do not cover the prior-independence half of this MH kernel, continuing dual averaging, or SAEM's changing target; the measured tables above are the relevant evidence for this implementation and fixture.
