@@ -13,6 +13,9 @@ The random-walk scale adapts toward 0.3 acceptance for the first
 `adapt_iterations` sweeps and is then frozen. With `WarmupHMCNUTS`, each round
 makes one fixed-kernel NUTS transition per subject. `omega_floor` is a
 covariance eigenvalue floor in the M-step.
+With `DualAveragingMALA`, each round makes one batched MALA proposal and
+updates a separate subject step size throughout the run. Set `mcmc_burnin=0`
+to omit a separate initial MCMC phase; `burnin` still controls the SA step sizes.
 """
 Base.@kwdef struct SAEMOptions
     iterations::Int = 300
@@ -36,6 +39,202 @@ The standard SAEM per-subject kernel: one prior-independence and one
 covariance-scaled random-walk Metropolis proposal per subject and MH round.
 """
 struct StandardSAEMMH <: AbstractSAEMKernel end
+
+"""
+    DualAveragingMALA(; metric=:prior, initial_stepsize=0.1,
+                        target_acceptance_rate=0.574,
+                        gamma=0.05, t0=10.0,
+                        min_stepsize=1e-5, max_stepsize=10.0,
+                        curvature_floor=1e-4)
+
+MALA with one independent dual-averaging step size per subject. `metric=:prior`
+uses the current Ω as proposal covariance. `metric=:hessian` obtains a fixed
+per-subject covariance from the initial regularized local posterior Hessian,
+falling back to Ω if the model has no Hessian. Gradients are evaluated in
+subject batches. The source gradient is reused after each accept or reject
+until a population M-step changes the target. Adaptation continues at every
+transition, including during population updates. This changing-target, continuously adapted mode is
+experimental; its transition is Metropolis corrected at each fixed population
+state, but a full SAEM convergence guarantee is not implied.
+"""
+Base.@kwdef struct DualAveragingMALA <: AbstractSAEMKernel
+    metric::Symbol = :prior
+    initial_stepsize::Float64 = 0.1
+    target_acceptance_rate::Float64 = 0.574
+    gamma::Float64 = 0.05
+    t0::Float64 = 10.0
+    min_stepsize::Float64 = 1.0e-5
+    max_stepsize::Float64 = 10.0
+    curvature_floor::Float64 = 1.0e-4
+end
+
+mutable struct _MALADAState
+    count::Int
+    hbar::Float64
+    log_stepsize::Float64
+    log_mu::Float64
+    accepted::Int
+end
+
+mutable struct _MALACache
+    f::Vector{Float64}
+    G::Matrix{Float64}
+    valid::Bool
+end
+
+_saem_mala_cache(H) = _MALACache(zeros(size(H, 2)), zeros(size(H)), false)
+
+function _saem_mala_refresh_prior!(cache::_MALACache, H, old_prior, new_prior)
+    cache.valid || return nothing
+    for j in axes(H, 2)
+        cache.f[j] += re_logprior(new_prior, view(H, :, j)) -
+            re_logprior(old_prior, view(H, :, j))
+    end
+    cache.G .+= (old_prior.precision - new_prior.precision) * H
+    return nothing
+end
+
+function _saem_check_mala(k::DualAveragingMALA)
+    k.metric in (:prior, :hessian) || throw(ArgumentError(
+        "MALA metric must be :prior or :hessian"))
+    isfinite(k.initial_stepsize) && k.initial_stepsize > 0 ||
+        throw(ArgumentError("initial_stepsize must be finite and positive"))
+    isfinite(k.target_acceptance_rate) && 0 < k.target_acceptance_rate < 1 ||
+        throw(ArgumentError("target_acceptance_rate must be strictly between 0 and 1"))
+    isfinite(k.gamma) && k.gamma > 0 || throw(ArgumentError("gamma must be finite and positive"))
+    isfinite(k.t0) && k.t0 > 0 || throw(ArgumentError("t0 must be finite and positive"))
+    isfinite(k.min_stepsize) && 0 < k.min_stepsize < k.max_stepsize &&
+        isfinite(k.max_stepsize) || throw(ArgumentError(
+        "require finite 0 < min_stepsize < max_stepsize"))
+    isfinite(k.curvature_floor) && k.curvature_floor > 0 || throw(ArgumentError(
+        "curvature_floor must be finite and positive"))
+    return nothing
+end
+
+function _saem_mala_states(k::DualAveragingMALA, n::Int)
+    e = clamp(k.initial_stepsize, k.min_stepsize, k.max_stepsize)
+    return [_MALADAState(0, 0.0, log(e), log(10 * e), 0) for _ in 1:n]
+end
+
+function _saem_mala_metrics(k::DualAveragingMALA, model, ids, θ, σ, prior, H)
+    k.metric == :prior && return nothing
+    return [cholesky(Symmetric(_saem_hessian_metric(model, i, θ, σ, prior,
+        copy(view(H, :, j)); curvature_floor=k.curvature_floor))).L
+        for (j, i) in enumerate(ids)]
+end
+
+function _saem_mala_adapt!(state::_MALADAState, k::DualAveragingMALA, alpha)
+    state.count += 1
+    t = state.count
+    state.hbar += (k.target_acceptance_rate - alpha - state.hbar) / (t + k.t0)
+    raw = clamp(state.log_mu - sqrt(t) * state.hbar / k.gamma,
+        log(k.min_stepsize), log(k.max_stepsize))
+    state.log_stepsize = raw
+    return nothing
+end
+
+function _saem_mala_logratio(f0, f1, η0, η1, g0, g1, L, stepsize)
+    M = L * L'
+    half_e2 = 0.5 * stepsize^2
+    forward = L \ (η1 - η0 - half_e2 * (M * g0))
+    reverse = L \ (η0 - η1 - half_e2 * (M * g1))
+    return f1 - f0 + (sum(abs2, forward) - sum(abs2, reverse)) /
+        (2 * stepsize^2)
+end
+
+function _saem_mala_proposal_gradients(model, subjects, θ, σ, prior, proposal, H)
+    n = size(H, 2)
+    rejected = falses(n)
+    for j in 1:n
+        if !all(isfinite, view(proposal, :, j))
+            rejected[j] = true
+            proposal[:, j] = H[:, j]
+        end
+    end
+    first_error = nothing
+    f1 = G1 = nothing
+    try
+        _, f1, G1 = _complete_gradients(model, subjects, θ, σ, prior, proposal)
+    catch err
+        first_error = err
+    end
+    if first_error !== nothing || f1 === nothing || length(f1) != n ||
+            size(G1) != size(H) || !all(isfinite, f1) || !all(isfinite, G1)
+        # Most proposals need only the two batched value/gradient calls. If one
+        # proposal leaves the model's domain, identify it with a value batch,
+        # replace it by its current position, then recompute the safe batch.
+        values = conditional_loglikelihoods(model, subjects, θ, σ, proposal)
+        length(values) == n || throw(DimensionMismatch(
+            "MALA proposal returned $(length(values)) values for $n subjects"))
+        for j in 1:n
+            invalid = !isfinite(values[j]) ||
+                !isfinite(re_logprior(prior, view(proposal, :, j)))
+            if !invalid && G1 !== nothing && size(G1) == size(H)
+                invalid = !all(isfinite, view(G1, :, j))
+            end
+            if invalid
+                rejected[j] = true
+                proposal[:, j] = H[:, j]
+            end
+        end
+        any(rejected) || (first_error === nothing ?
+            throw(DomainError(f1, "MALA proposed values or gradients are invalid")) :
+            throw(first_error))
+        _, f1, G1 = _complete_gradients(model, subjects, θ, σ, prior, proposal)
+    end
+    length(f1) == n && size(G1) == size(H) && all(isfinite, f1) &&
+        all(isfinite, G1) || throw(DomainError(f1,
+        "MALA proposed values or gradients remain invalid after rejection repair"))
+    return f1, G1, rejected
+end
+
+function _saem_mala_round!(rng, kernel::DualAveragingMALA, states,
+        model, subjects, θ, σ, prior, H; adapt::Bool=true,
+        metrics=nothing, cache=nothing)
+    m, n = size(H)
+    if cache !== nothing && cache.valid
+        f0, G0 = cache.f, cache.G
+    else
+        _, f0, G0 = _complete_gradients(model, subjects, θ, σ, prior, H)
+        if cache !== nothing
+            cache.f .= f0
+            cache.G .= G0
+            cache.valid = true
+            f0, G0 = cache.f, cache.G
+        end
+    end
+    size(G0) == size(H) && length(f0) == n && all(isfinite, f0) && all(isfinite, G0) ||
+        throw(DomainError(f0, "MALA current values or gradients are invalid"))
+    noise = randn(rng, m, n)
+    proposal = similar(H)
+    for j in 1:n
+        L = metrics === nothing ? prior.cholesky_factor : metrics[j]
+        M = L * L'
+        e = exp(states[j].log_stepsize)
+        proposal[:, j] = view(H, :, j) + 0.5 * e^2 * (M * view(G0, :, j)) +
+            e * (L * view(noise, :, j))
+    end
+    f1, G1, rejected = _saem_mala_proposal_gradients(model, subjects, θ, σ,
+        prior, proposal, H)
+    for j in 1:n
+        L = metrics === nothing ? prior.cholesky_factor : metrics[j]
+        e = exp(states[j].log_stepsize)
+        lr = rejected[j] ? -Inf : _saem_mala_logratio(f0[j], f1[j],
+            view(H, :, j), view(proposal, :, j), view(G0, :, j),
+            view(G1, :, j), L, e)
+        isnan(lr) && throw(DomainError(lr, "MALA log acceptance ratio is invalid"))
+        if log(rand(rng)) < min(0.0, lr)
+            H[:, j] = proposal[:, j]
+            states[j].accepted += 1
+            if cache !== nothing
+                cache.f[j] = f1[j]
+                cache.G[:, j] = G1[:, j]
+            end
+        end
+        adapt && _saem_mala_adapt!(states[j], kernel, exp(min(0.0, lr)))
+    end
+    return nothing
+end
 
 """
     WarmupHMCNUTS(; warmup_draws=20, warmup_evaluations=100,
@@ -69,8 +268,10 @@ end
 Population estimate from [`saem`](@ref). `eta` holds the final subject-chain
 states, one column per entry of `subjects`. `acceptance` gives prior and
 random-walk acceptance fractions; `rw_scale` is the final proposal scale.
-These MH-only fields are `missing` for `WarmupHMCNUTS`. `kernel` identifies the
+These MH-only fields are `missing` for other kernels. `kernel` identifies the
 method and `nuts_divergences` counts its fixed-kernel transitions that diverged.
+For MALA, `mala_stepsizes` and `mala_acceptance` hold per-subject final values;
+`mala_adaptation_steps` counts updates per subject.
 """
 struct SAEMResult{T, A, R}
     subjects::Vector{Int}
@@ -83,6 +284,9 @@ struct SAEMResult{T, A, R}
     rw_scale::R
     kernel::Symbol
     nuts_divergences::Int
+    mala_stepsizes::Union{Missing, Vector{Float64}}
+    mala_acceptance::Union{Missing, Vector{Float64}}
+    mala_adaptation_steps::Int
 end
 
 struct _SAEMSubjectTarget{M, P}
@@ -447,6 +651,7 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
         kernel::AbstractSAEMKernel = StandardSAEMMH())
     _saem_check_options(options)
     kernel isa WarmupHMCNUTS && _saem_check_nuts(kernel)
+    kernel isa DualAveragingMALA && _saem_check_mala(kernel)
     layout = nlme_layout(model)
     _check_length("θ", θ0, layout.ntheta)
     _check_length("σ", σ0, layout.nsigma)
@@ -472,6 +677,11 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
     nprior = nrw = sweeps = 0
     ndivergent = 0
     root = kernel isa WarmupHMCNUTS ? mktempdir() : nothing
+    mala_states = kernel isa DualAveragingMALA ?
+        _saem_mala_states(kernel, length(ids)) : nothing
+    mala_cache = kernel isa DualAveragingMALA ? _saem_mala_cache(H) : nothing
+    mala_metrics = kernel isa DualAveragingMALA ?
+        _saem_mala_metrics(kernel, model, ids, θ, σ, prior, H) : nothing
     try
         nuts_state = kernel isa WarmupHMCNUTS ? _saem_nuts_warmup!(rng, kernel,
             root, model, ids, θ, σ, prior, H) : nothing
@@ -491,6 +701,9 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
                     nrw += ar
                 elseif kernel isa WarmupHMCNUTS
                     ndivergent += _saem_nuts_round!(nuts_state, model, ids, θ, σ, prior, H)
+                elseif kernel isa DualAveragingMALA
+                    _saem_mala_round!(rng, kernel, mala_states, model, ids, θ, σ,
+                        prior, H; metrics=mala_metrics, cache=mala_cache)
                 else
                     throw(ArgumentError("unsupported SAEM kernel $(typeof(kernel))"))
                 end
@@ -507,11 +720,20 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
             _saem_moments!(mean_phi, second_phi, Φ, γ)
             _saem_record!(bank, weights, Φ, γ)
             if k % options.mstep_interval == 0 || k == options.iterations
+                θ_before, σ_before = θ, σ
                 θ, Ω = _saem_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
                     design, mean_phi, second_phi, options.omega_floor)
                 ω = omega_parameters(layout, Ω)
                 θ, σ = _saem_numeric_mstep(model, ids, θ, σ, free, indices,
                     design, bank, weights, options.numeric_maxiter)
+                if mala_cache !== nothing && mala_cache.valid
+                    if θ == θ_before && σ == σ_before
+                        _saem_mala_refresh_prior!(mala_cache, H, prior,
+                            re_prior(model, ω))
+                    else
+                        mala_cache.valid = false
+                    end
+                end
             end
         end
     finally
@@ -519,11 +741,16 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
     end
     denom = sweeps * length(ids)
     is_mh = kernel isa StandardSAEMMH
+    is_mala = kernel isa DualAveragingMALA
     return SAEMResult(ids, θ, σ, ω, omega_matrix(layout, ω), H,
         (prior = is_mh ? nprior / denom : missing,
             random_walk = is_mh ? nrw / denom : missing),
         is_mh ? exp(logscale) : missing,
-        is_mh ? :standard_mh : :warmuphmc_nuts, ndivergent)
+        is_mh ? :standard_mh : is_mala ? :dual_averaging_mala : :warmuphmc_nuts,
+        ndivergent,
+        is_mala ? exp.([s.log_stepsize for s in mala_states]) : missing,
+        is_mala ? [s.accepted / s.count for s in mala_states] : missing,
+        is_mala ? first(mala_states).count : 0)
 end
 
 function _saem_remove_nuts_tempdir(root::AbstractString)

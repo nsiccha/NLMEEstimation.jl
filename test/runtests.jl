@@ -7,5 +7,6 @@ using Test
 include("focei.jl")
 include("saem.jl")
 include("saem_nuts.jl")
+include("saem_mala.jl")
 include("saem_nuts_reference.jl")
 end
