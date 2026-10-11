@@ -157,3 +157,59 @@ julia --project=test bench/saem_kernel_final.jl
 ```
 
 For an exact source replay, check out the three SHAs above. Runtime scores vary with host load. The [earlier file-backed comparison](https://github.com/nsiccha/NLMEEstimation.jl/blob/d733d33b9f34e094efa2e669ada4e0c2baa2d7f9/docs/src/saem-benchmarks.md) is historical context: its NUTS fit reopened a checkpointed stream once per subject per SAEM round and therefore measured disk resume overhead. It should not be used as an estimate of in-memory NUTS efficiency.
+
+## Experimental batched MALA with ongoing adaptation
+
+This later trial tests `DualAveragingMALA()` with **one proposal per subject per SAEM iteration**, a separate step size for every subject, dual averaging after every proposal, and `mcmc_burnin=0`. The earlier MH/NUTS ESS results above used different settings and remain a separate experiment. MALA is available as an experimental kernel; the default is still `StandardSAEMMH()`.
+
+For subject `i`, let `fᵢ(η)` be its complete-data log density and `gᵢ(η) = ∇fᵢ(η)`. With proposal covariance `Mᵢ` and step size `εᵢ`, the proposal and correction are
+
+```math
+q_i(z\mid\eta)=\mathcal N\!\left(z;\eta+\frac{\varepsilon_i^2}{2}M_i g_i(\eta),\varepsilon_i^2 M_i\right),\qquad
+\log r_i=f_i(z)-f_i(\eta)+\log q_i(\eta\mid z)-\log q_i(z\mid\eta).
+```
+
+The Gaussian prior covariance supplies `Mᵢ` for `metric=:prior`. `metric=:hessian` takes a regularized inverse local posterior Hessian **once at initialization** for each subject; it does not update that matrix as population parameters move. The model protocol evaluates all current positions or all proposals together. The Metropolis accept/reject and dual-averaging step-size update remain per subject.
+
+```julia
+kernel = DualAveragingMALA(metric=:prior, initial_stepsize=0.05,
+    target_acceptance_rate=0.574)
+options = SAEMOptions(iterations=120, burnin=40, mcmc_burnin=0,
+    mh_rounds=1, mstep_interval=5, numeric_maxiter=3)
+fit = saem(model, θ_THEOPH, σ_THEOPH, ω;
+    rng=MersenneTwister(601), options, kernel)
+fit.mala_stepsizes      # final step size for each subject
+fit.mala_acceptance     # each subject's acceptance fraction
+```
+
+Within one unchanged target, an accepted proposal's log density and gradient become the next source values; rejection retains the old values. Thus, after the first sweep, the usual cost is **one new batched value-and-gradient call** per sweep. A θ or σ M-step invalidates the cache and requires one extra source batch on the next sweep. An Ω-only M-step updates the Gaussian-prior part of the cached value and gradient algebraically. A rare invalid proposal triggers a value screening batch and a repaired gradient batch so it can be rejected safely. The [implementation](https://github.com/nsiccha/NLMEEstimation.jl/blob/774edac644329cb1a5ec64429066103935d4f4d6/src/saem.jl) and [tests](https://github.com/nsiccha/NLMEEstimation.jl/blob/774edac644329cb1a5ec64429066103935d4f4d6/test/saem_mala.jl) show these paths.
+
+### Methods and measured results
+
+The [reproducer](https://github.com/nsiccha/NLMEEstimation.jl/blob/e3c323aa2eb53b0b53d3dd528db743306749e684/bench/saem_mala_trial.jl) and [complete 49-line output](https://github.com/nsiccha/NLMEEstimation.jl/blob/ad08a560397f59ce1652aea8c205e8b0f0b8de04/bench/saem_mala_trial_results.tsv) contain every tested configuration and fit row. Measurements used the AMD Ryzen 9 9950X host, Julia 1.10.12, one Julia and one BLAS thread, Enzyme 0.13.215, NLMEEstimation source `774edac` with benchmark timing fix `e3c323a`, WarmupHMC `d3d55e0`, and Treebars `7426b9c`. Timers exclude compilation and fixture construction; they include MALA's initial Hessian setup when requested and MH's initial likelihood evaluation. Shared-host millisecond timings are noisy.
+
+The fixed-target fixture has six independent **two-dimensional correlated Gaussian** subject posteriors with different curvatures and known posterior means. No draws were discarded. Four MH scales (0.25, 0.5, 0.8, 1.2) and 18 MALA combinations (prior or Hessian metric, initial step size 0.05/0.1/0.2, acceptance target 0.45/0.574/0.7) were screened on seeds 301–308. The lowest observed `RMSE² × median time` selected MH scale 0.8 and Hessian MALA with initial step size 0.1, target 0.574. Held-out seeds 401–416 used 400 transitions; seeds 701–716 used 4,000 transitions with the same selected settings. RMSE compares each run's all-draw subject-by-coordinate posterior mean with the analytic mean; it is **not ESS**.
+
+| Held-out transitions per subject | Kernel | Mean RMSE | Median wall time | Acceptance |
+| ---: | --- | ---: | ---: | ---: |
+| 400 | MH, scale 0.8 | 0.04648 | 0.001021 s | 0.300 random walk |
+| 400 | MALA, Hessian | **0.03425** | 0.002265 s | 0.574 |
+| 4,000 | MH, scale 0.8 | 0.01428 | 0.011188 s | 0.295 random walk |
+| 4,000 | MALA, Hessian | **0.01077** | 0.023757 s | 0.574 |
+
+MALA lowered the mean error by roughly 25% at both horizons but took about 2.2 times as long. The observed `RMSE² × time` was about 21% higher for MALA at both horizons, so the result does not show a compute-efficiency win for this low-dimensional fixture. The selected MH scale changed between repeated millisecond-scale timing runs; 0.5 and 0.8 are close contenders in the complete table.
+
+For the nonlinear Theoph model, a separate run used six subjects, 60 SAEM iterations, `burnin=20`, one kernel round and an M-step every five iterations on seeds 501–506. All runs used `mcmc_burnin=0`. The longer check used all 12 subjects, 120 iterations, `burnin=40` and seeds 601–603. Fit time includes kernel transitions and M-steps. The values below are medians across seeds; `diag(Ω)` is in random-effect variance units.
+
+| Fit | Kernel | Median time | Median acceptance | Median `σ[1]` | Median `diag(Ω)` |
+| --- | --- | ---: | ---: | ---: | --- |
+| 6 × 60 | MH, scale 0.8 | 0.007193 s | 0.310 random walk | −0.0999 | [0.0287, 0.0624, 0.0135] |
+| 6 × 60 | MALA, prior, initial 0.05, target 0.574 | 0.007733 s | 0.571 | −0.1167 | [0.0285, 0.0691, 0.0099] |
+| 6 × 60 | MALA, Hessian, initial 0.1, target 0.574 | 0.007489 s | 0.554 | 0.2707 | [0.0114, 0.0052, 0.0003] |
+| 12 × 120 | MH, scale 0.8 | 0.066519 s | 0.143 random walk | −0.3572 | [0.4239, 0.0710, 0.0166] |
+| 12 × 120 | MALA, prior, initial 0.05, target 0.574 | 0.068583 s | 0.579 | −0.3625 | [0.4444, 0.0774, 0.0139] |
+| 12 × 120 | MALA, Hessian, initial 0.1, target 0.574 | 0.067049 s | 0.579 | −0.2467 | [0.5071, 0.1194, 0.0367] |
+
+The Gaussian-selected Hessian MALA setting produced near-zero variance estimates in the shorter six-subject fit despite acceptance near its target; it did not transfer reliably to that changing-target setting. The prior-metric 0.05 setting was close to MH in time and fit medians in the longer run. These short fits do not establish estimator accuracy or convergence. The same no-MCMC-burn-in NUTS configuration had 49 divergent transitions across the six short fits, so this trial does not qualify a new NUTS comparison; the earlier qualified NUTS benchmark used a different setup.
+
+The Theoph reference model uses per-subject AD behind the batch protocol, whereas the Gaussian fixture supplies a fused batch value-and-gradient method. The tests also exercise default batched Enzyme AD. Throughput on a production joint-model backend still needs its own measurement. Continuous raw dual averaging under a changing target has no convergence guarantee from a Metropolis correction at each fixed target. The measured result supports keeping MH as the default while MALA remains available for model-specific trials.

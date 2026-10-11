@@ -643,7 +643,8 @@ generalized-least-squares fixed-effect M-step. Remaining θ and σ coordinates
 use a first-order AD numerical M-step over the running conditional-density
 mixture. The mixture retains one latent-effect matrix per SA iteration, so
 memory and numerical M-step cost grow with `iterations`. `kernel` selects the
-standard lockstep MH proposals or per-subject in-memory WarmupHMC NUTS transitions.
+standard lockstep MH proposals, batched continuously adapted MALA proposals,
+or per-subject in-memory WarmupHMC NUTS transitions.
 """
 function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVector;
         rng::AbstractRNG = Random.default_rng(), subjects = nothing, η0 = nothing,
