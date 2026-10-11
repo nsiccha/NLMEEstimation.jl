@@ -3,8 +3,11 @@
 include(joinpath(@__DIR__, "saem_kernel_tuning.jl"))
 
 const SELECTION_SEEDS = 2060:2069
-const QUALIFY_SEEDS = 2080:2084
-const FINAL_SEEDS = 2090:2099
+# The original five-seed changing-target gate missed divergences in an
+# eight-draw warmup setting on 2090:2099. Include those diagnostic seeds in
+# qualification and reserve a fresh, untouched final range.
+const QUALIFY_SEEDS = 2080:2099
+const FINAL_SEEDS = 2110:2119
 
 function nuts_kernel(cfg)
     return WarmupHMCNUTS(metric=cfg.metric == :hessian ? :diagonal : cfg.metric,
@@ -70,13 +73,15 @@ if abspath(PROGRAM_FILE) == @__FILE__
         (scale=0.45, adapt=false, target=0.3),
         (scale=0.5, adapt=true, target=0.2),
         (scale=0.5, adapt=true, target=0.3)]
+    # The six highest-scoring unique divergence-free settings in the new
+    # in-memory tune/rate_tune sweep; changing-target qualification follows.
     nuts_configs = [
+        (metric=:dense, draws=8, evaluations=100, depth=8, acceptance=0.7),
+        (metric=:dense, draws=8, evaluations=50, depth=8, acceptance=0.7),
         (metric=:dense, draws=8, evaluations=50, depth=8, acceptance=0.8),
         (metric=:dense, draws=8, evaluations=100, depth=8, acceptance=0.8),
-        (metric=:dense, draws=20, evaluations=50, depth=8, acceptance=0.8),
-        (metric=:dense, draws=20, evaluations=100, depth=8, acceptance=0.8),
-        (metric=:dense, draws=8, evaluations=50, depth=8, acceptance=0.9),
-        (metric=:hessian, draws=20, evaluations=100, depth=8, acceptance=0.8)]
+        (metric=:dense, draws=20, evaluations=50, depth=4, acceptance=0.8),
+        (metric=:dense, draws=20, evaluations=50, depth=8, acceptance=0.8)]
     measure_mh(model, ω, first(mh_configs), 1:1)
     measure_nuts(model, ω, first(nuts_configs), 1:1)
     println("Julia=$(VERSION); retained_draws=$(RETAINED_DRAWS); selection_seeds=$(collect(SELECTION_SEEDS)); qualification_seeds=$(collect(QUALIFY_SEEDS)); final_seeds=$(collect(FINAL_SEEDS))")

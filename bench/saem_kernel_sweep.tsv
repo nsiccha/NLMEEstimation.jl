@@ -1,46 +1,50 @@
 phase	kernel	config	median_ESS_per_second	median_seconds	median_ESS	rw_acceptance	final_scale	divergences
-tune	MH	(scale = 0.25, adapt = false, target = 0.3)	10719.7	0.010584	110.5	0.488	0.25	0
-tune	MH	(scale = 0.35, adapt = false, target = 0.3)	13407.3	0.010196	133.7	0.361	0.35	0
-tune	MH	(scale = 0.45, adapt = false, target = 0.3)	12733.1	0.010189	129.7	0.267	0.45	0
-tune	MH	(scale = 0.6, adapt = false, target = 0.3)	11283.4	0.010499	123.9	0.175	0.6	0
-tune	MH	(scale = 0.8, adapt = false, target = 0.3)	11839.7	0.01055	125.4	0.105	0.8	0
-tune	MH	(scale = 1.2, adapt = false, target = 0.3)	7829.2	0.009971	77.6	0.044	1.2	0
-tune	MH	(scale = 0.5, adapt = true, target = 0.2)	12187.4	0.010147	123.5	0.194	0.556	0
-tune	MH	(scale = 0.5, adapt = true, target = 0.3)	13351.6	0.010083	133.2	0.301	0.415	0
-tune	MH	(scale = 0.5, adapt = true, target = 0.4)	10884.7	0.010299	112.1	0.401	0.315	0
-tune	NUTS	(metric = :hessian, draws = 8, evaluations = 50, depth = 4, acceptance = 0.8)	7204.0	0.096603	750.6	NaN	NaN	0
-tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 4, acceptance = 0.8)	9506.9	0.165005	1533.8	NaN	NaN	0
-tune	NUTS	(metric = :prior, draws = 8, evaluations = 50, depth = 4, acceptance = 0.8)	4654.7	0.160336	729.2	NaN	NaN	0
-tune	NUTS	(metric = :hessian, draws = 20, evaluations = 50, depth = 4, acceptance = 0.8)	6569.7	0.114315	786.7	NaN	NaN	0
-tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.8)	10794.5	0.116572	1305.3	NaN	NaN	0
-tune	NUTS	(metric = :prior, draws = 20, evaluations = 50, depth = 4, acceptance = 0.8)	5875.9	0.117381	701.1	NaN	NaN	0
-tune	NUTS	(metric = :hessian, draws = 8, evaluations = 100, depth = 4, acceptance = 0.8)	7245.3	0.101417	734.8	NaN	NaN	0
-tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 4, acceptance = 0.8)	11641.4	0.111202	1389.9	NaN	NaN	17
-tune	NUTS	(metric = :prior, draws = 8, evaluations = 100, depth = 4, acceptance = 0.8)	6767.5	0.109036	722.5	NaN	NaN	0
-tune	NUTS	(metric = :hessian, draws = 20, evaluations = 100, depth = 4, acceptance = 0.8)	7017.1	0.109837	776.8	NaN	NaN	0
-tune	NUTS	(metric = :dense, draws = 20, evaluations = 100, depth = 4, acceptance = 0.8)	9970.9	0.12136	1257.9	NaN	NaN	0
-tune	NUTS	(metric = :prior, draws = 20, evaluations = 100, depth = 4, acceptance = 0.8)	5353.2	0.12334	673.0	NaN	NaN	0
-tune	NUTS	(metric = :hessian, draws = 8, evaluations = 50, depth = 8, acceptance = 0.8)	7115.6	0.09948	714.0	NaN	NaN	0
-tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.8)	12876.8	0.105866	1567.3	NaN	NaN	0
-tune	NUTS	(metric = :prior, draws = 8, evaluations = 50, depth = 8, acceptance = 0.8)	6350.7	0.120048	757.9	NaN	NaN	0
-tune	NUTS	(metric = :hessian, draws = 20, evaluations = 50, depth = 8, acceptance = 0.8)	6964.7	0.110462	777.0	NaN	NaN	0
-tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 8, acceptance = 0.8)	10600.7	0.119431	1274.3	NaN	NaN	0
-tune	NUTS	(metric = :prior, draws = 20, evaluations = 50, depth = 8, acceptance = 0.8)	6272.7	0.11215	723.2	NaN	NaN	0
-tune	NUTS	(metric = :hessian, draws = 8, evaluations = 100, depth = 8, acceptance = 0.8)	7125.4	0.101031	719.9	NaN	NaN	0
-tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.8)	12424.6	0.105481	1310.6	NaN	NaN	0
-tune	NUTS	(metric = :prior, draws = 8, evaluations = 100, depth = 8, acceptance = 0.8)	6543.6	0.115311	737.9	NaN	NaN	0
-tune	NUTS	(metric = :hessian, draws = 20, evaluations = 100, depth = 8, acceptance = 0.8)	7221.1	0.111371	779.0	NaN	NaN	0
-tune	NUTS	(metric = :dense, draws = 20, evaluations = 100, depth = 8, acceptance = 0.8)	7045.1	0.182713	1269.4	NaN	NaN	0
-tune	NUTS	(metric = :prior, draws = 20, evaluations = 100, depth = 8, acceptance = 0.8)	5729.2	0.121642	685.4	NaN	NaN	0
-rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.6)	12536.0	0.099241	1344.1	NaN	NaN	10
-rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.7)	13284.4	0.104323	1600.0	NaN	NaN	0
-rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.8)	13076.4	0.107438	1567.3	NaN	NaN	0
-rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.9)	7232.9	0.154344	1116.4	NaN	NaN	0
-rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.6)	13082.4	0.080258	1167.9	NaN	NaN	167
-rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.7)	16716.4	0.095714	1600.0	NaN	NaN	0
-rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.8)	12249.5	0.104857	1310.6	NaN	NaN	0
-rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.9)	7036.3	0.161764	1091.9	NaN	NaN	0
-rate_tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.6)	17983.9	0.088969	1600.0	NaN	NaN	4
-rate_tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.7)	9931.2	0.161108	1462.3	NaN	NaN	0
-rate_tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.8)	10876.2	0.110535	1305.3	NaN	NaN	0
-rate_tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.9)	10085.6	0.128077	1342.2	NaN	NaN	0
+tune	MH	(scale = 0.25, adapt = false, target = 0.3)	10839.5	0.010059	110.5	0.488	0.25	0
+tune	MH	(scale = 0.35, adapt = false, target = 0.3)	13587.7	0.010006	133.7	0.361	0.35	0
+tune	MH	(scale = 0.45, adapt = false, target = 0.3)	12439.4	0.010007	129.7	0.267	0.45	0
+tune	MH	(scale = 0.6, adapt = false, target = 0.3)	12727.2	0.009735	123.9	0.175	0.6	0
+tune	MH	(scale = 0.8, adapt = false, target = 0.3)	10937.3	0.009752	125.4	0.105	0.8	0
+tune	MH	(scale = 1.2, adapt = false, target = 0.3)	7997.3	0.009826	77.6	0.044	1.2	0
+tune	MH	(scale = 0.5, adapt = true, target = 0.2)	11944.7	0.009819	123.5	0.194	0.556	0
+tune	MH	(scale = 0.5, adapt = true, target = 0.3)	13503.3	0.009868	133.2	0.301	0.415	0
+tune	MH	(scale = 0.5, adapt = true, target = 0.4)	11039.4	0.009917	112.1	0.401	0.315	0
+tune	NUTS	(metric = :hessian, draws = 8, evaluations = 50, depth = 4, acceptance = 0.8)	11331.1	0.062514	744.5	NaN	NaN	0
+tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 4, acceptance = 0.8)	12512.8	0.12258	1533.8	NaN	NaN	0
+tune	NUTS	(metric = :prior, draws = 8, evaluations = 50, depth = 4, acceptance = 0.8)	5989.7	0.124601	729.2	NaN	NaN	0
+tune	NUTS	(metric = :hessian, draws = 20, evaluations = 50, depth = 4, acceptance = 0.8)	10197.4	0.075048	786.7	NaN	NaN	0
+tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.8)	16839.3	0.074313	1314.4	NaN	NaN	0
+tune	NUTS	(metric = :prior, draws = 20, evaluations = 50, depth = 4, acceptance = 0.8)	8567.4	0.078323	720.5	NaN	NaN	0
+tune	NUTS	(metric = :hessian, draws = 8, evaluations = 100, depth = 4, acceptance = 0.8)	12168.3	0.062284	754.8	NaN	NaN	0
+tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 4, acceptance = 0.8)	21098.0	0.072725	1389.9	NaN	NaN	14
+tune	NUTS	(metric = :prior, draws = 8, evaluations = 100, depth = 4, acceptance = 0.8)	10177.5	0.06967	722.5	NaN	NaN	0
+tune	NUTS	(metric = :hessian, draws = 20, evaluations = 100, depth = 4, acceptance = 0.8)	10984.1	0.071871	768.7	NaN	NaN	0
+tune	NUTS	(metric = :dense, draws = 20, evaluations = 100, depth = 4, acceptance = 0.8)	14835.7	0.079624	1269.3	NaN	NaN	0
+tune	NUTS	(metric = :prior, draws = 20, evaluations = 100, depth = 4, acceptance = 0.8)	8044.5	0.082484	685.2	NaN	NaN	0
+tune	NUTS	(metric = :hessian, draws = 8, evaluations = 50, depth = 8, acceptance = 0.8)	11559.4	0.06494	714.0	NaN	NaN	0
+tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.8)	17920.7	0.07119	1567.3	NaN	NaN	0
+tune	NUTS	(metric = :prior, draws = 8, evaluations = 50, depth = 8, acceptance = 0.8)	9554.7	0.079792	757.9	NaN	NaN	0
+tune	NUTS	(metric = :hessian, draws = 20, evaluations = 50, depth = 8, acceptance = 0.8)	10690.8	0.074334	777.0	NaN	NaN	0
+tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 8, acceptance = 0.8)	15212.7	0.083621	1274.3	NaN	NaN	0
+tune	NUTS	(metric = :prior, draws = 20, evaluations = 50, depth = 8, acceptance = 0.8)	8824.7	0.082329	723.2	NaN	NaN	0
+tune	NUTS	(metric = :hessian, draws = 8, evaluations = 100, depth = 8, acceptance = 0.8)	11284.9	0.063791	719.9	NaN	NaN	0
+tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.8)	17789.9	0.073669	1310.6	NaN	NaN	0
+tune	NUTS	(metric = :prior, draws = 8, evaluations = 100, depth = 8, acceptance = 0.8)	9842.6	0.07028	737.9	NaN	NaN	0
+tune	NUTS	(metric = :hessian, draws = 20, evaluations = 100, depth = 8, acceptance = 0.8)	9672.3	0.078947	779.0	NaN	NaN	0
+tune	NUTS	(metric = :dense, draws = 20, evaluations = 100, depth = 8, acceptance = 0.8)	13137.8	0.091159	1269.4	NaN	NaN	0
+tune	NUTS	(metric = :prior, draws = 20, evaluations = 100, depth = 8, acceptance = 0.8)	7887.4	0.088917	685.4	NaN	NaN	0
+rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.6)	17097.1	0.066027	1344.1	NaN	NaN	10
+rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.7)	21679.6	0.073802	1600.0	NaN	NaN	0
+rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.8)	18044.7	0.074883	1567.3	NaN	NaN	0
+rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.9)	9416.9	0.118549	1116.4	NaN	NaN	0
+rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.6)	20162.1	0.057925	1167.9	NaN	NaN	167
+rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.7)	23569.0	0.067886	1600.0	NaN	NaN	0
+rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.8)	18003.0	0.074377	1310.6	NaN	NaN	0
+rate_tune	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.9)	8536.1	0.13334	1091.9	NaN	NaN	0
+rate_tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.6)	27338.1	0.058526	1600.0	NaN	NaN	4
+rate_tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.7)	12159.5	0.127653	1462.3	NaN	NaN	0
+rate_tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.8)	15120.1	0.083147	1314.4	NaN	NaN	0
+rate_tune	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.9)	14171.8	0.094708	1342.2	NaN	NaN	0
+crosscheck	MH	(scale = 0.35, adapt = false, target = 0.3)	11244.4	0.010018	111.8	0.366	0.35	0
+crosscheck	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.7)	22794.6	0.069756	1600.0	NaN	NaN	0
+baseline	MH	(scale = 0.5, adapt = true, target = 0.3)	12521.8	0.010385	125.2	0.295	0.422	0
+baseline	NUTS	(metric = :hessian, draws = 20, evaluations = 100, depth = 8, acceptance = 0.8)	10408.4	0.076209	762.6	NaN	NaN	0

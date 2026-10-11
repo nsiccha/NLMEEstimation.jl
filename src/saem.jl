@@ -515,7 +515,7 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
             end
         end
     finally
-        root === nothing || _saem_remove_stream_dir(root)
+        root === nothing || _saem_remove_nuts_tempdir(root)
     end
     denom = sweeps * length(ids)
     is_mh = kernel isa StandardSAEMMH
@@ -526,14 +526,14 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
         is_mh ? :standard_mh : :warmuphmc_nuts, ndivergent)
 end
 
-function _saem_remove_stream_dir(root::AbstractString)
+function _saem_remove_nuts_tempdir(root::AbstractString)
     for attempt in 1:10
         try
             rm(root; recursive=true, force=true)
             return nothing
         catch err
-            # Windows can report ENOTEMPTY while a checkpoint file finishes
-            # closing. Retry only that transient error and preserve all others.
+            # Retry only ENOTEMPTY for a bounded interval; preserve all other
+            # cleanup failures and surface an ENOTEMPTY that persists.
             if !(err isa Base.IOError && err.code == Base.UV_ENOTEMPTY && attempt < 10)
                 rethrow()
             end
