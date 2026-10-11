@@ -33,22 +33,24 @@ function summarize_draws(draws)
 end
 
 function standard_mh_draws(rng, model, θ, σ, ω;
-        ids=collect(1:nsubjects(model)), burnin=200, n_draws=800)
+        ids=collect(1:nsubjects(model)), burnin=200, n_draws=800,
+        rw_scale=0.5, adapt_iterations=burnin, target_acceptance=0.3)
     prior = re_prior(model, ω)
     m, n = neta(nlme_layout(model)), length(ids)
     H = zeros(m, n)
     ℓ = conditional_loglikelihoods(model, ids, θ, σ, H)
     draws = Array{Float64}(undef, m, n, n_draws)
-    logscale = log(0.5)
+    logscale = log(rw_scale)
     accepted_prior = accepted_rw = 0
     for iteration in 1:(burnin + n_draws)
         ap, ar = NE._saem_mh_round!(rng, model, ids, θ, σ, prior, H, ℓ, exp(logscale))
         accepted_prior += ap
         accepted_rw += ar
-        if iteration <= burnin
-            logscale = clamp(logscale + (ar / n - 0.3) / sqrt(iteration),
+        if iteration <= adapt_iterations
+            logscale = clamp(logscale + (ar / n - target_acceptance) / sqrt(iteration),
                 log(1e-3), log(1e2))
-        else
+        end
+        if iteration > burnin
             draws[:, :, iteration - burnin] = H
         end
     end
@@ -57,8 +59,12 @@ function standard_mh_draws(rng, model, θ, σ, ω;
 end
 
 function nuts_draws(rng, model, θ, σ, ω;
-        ids=collect(1:nsubjects(model)), n_draws=800, init_metric=:hessian)
-    init_metric in (:hessian, :prior) || throw(ArgumentError("invalid init_metric"))
+        ids=collect(1:nsubjects(model)), n_draws=800, init_metric=:hessian,
+        warmup_draws=20, warmup_evaluations=100,
+        stepsize_adaptation_limit=20, max_tree_depth=8,
+        target_acceptance_rate=0.8, probe_steps=20)
+    init_metric in (:hessian, :dense, :prior) ||
+        throw(ArgumentError("invalid init_metric"))
     prior = re_prior(model, ω)
     m, n = neta(nlme_layout(model)), length(ids)
     draws = Array{Float64}(undef, m, n, n_draws)
@@ -68,15 +74,18 @@ function nuts_draws(rng, model, θ, σ, ω;
         for (k, i) in enumerate(ids)
             target = NE._saem_target(model, i, θ, σ, prior)
             warm_dir = joinpath(root, "warm_$(k)")
-            Σ = init_metric == :hessian ?
+            Σ = init_metric in (:hessian, :dense) ?
                 NE._saem_hessian_metric(model, i, θ, σ, prior, zeros(m);
-                    diagonal=true) :
+                    diagonal=init_metric == :hessian) :
                 [sum(abs2(prior.cholesky_factor[j, k]) for k in 1:j)
                     for j in 1:m]
             NE.WarmupHMC.adaptive_warmup_mcmc(Xoshiro(rand(rng, UInt64)), target;
                 init=(position=zeros(m), squared_scale=Σ), checkpoint_dir=warm_dir,
-                n_draws=20, n_evaluations=100, recording_target=20,
-                stepsize_adaptation_limit=20, max_tree_depth=8,
+                n_draws=warmup_draws, n_evaluations=warmup_evaluations,
+                recording_target=warmup_draws,
+                stepsize_adaptation_limit=stepsize_adaptation_limit,
+                max_tree_depth=max_tree_depth,
+                target_acceptance_rate=target_acceptance_rate,
                 nonlinear_adapt=false, monitor_ess=false)
             checkpoint = joinpath(warm_dir, "cp_latest.jls")
             stream = joinpath(root, "subject_$(k).stream")
@@ -86,7 +95,7 @@ function nuts_draws(rng, model, θ, σ, ω;
             divergences += result.n_divergent
             # A separate measure of the repeated one-transition file reopen
             # cost used by changing-target SAEM; same fixed target here.
-            stream_seconds += @elapsed for step in 1:20
+            stream_seconds += @elapsed for step in 1:probe_steps
                 NE.WarmupHMC.stream_mcmc(checkpoint, target;
                     path=stream, n_draws=n_draws + step)
             end
@@ -94,7 +103,8 @@ function nuts_draws(rng, model, θ, σ, ω;
     end
     return (draws=draws, divergences=divergences,
         stream_seconds=stream_seconds,
-        stream_ms_per_transition=1000 * stream_seconds / (20n))
+        stream_ms_per_transition=probe_steps > 0 ?
+            1000 * stream_seconds / (probe_steps * n) : NaN)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

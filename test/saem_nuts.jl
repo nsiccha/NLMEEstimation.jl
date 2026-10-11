@@ -50,4 +50,7 @@ end
     @test_throws ArgumentError saem(model, Float64[], Float64[], [log(0.7)];
         options=SAEMOptions(iterations=2, burnin=0),
         kernel=WarmupHMCNUTS(metric=:unsupported))
+    @test_throws ArgumentError saem(model, Float64[], Float64[], [log(0.7)];
+        options=SAEMOptions(iterations=2, burnin=0),
+        kernel=WarmupHMCNUTS(target_acceptance_rate=1.0))
 end

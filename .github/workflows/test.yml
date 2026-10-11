@@ -18,10 +18,23 @@ jobs:
         os: [ubuntu-latest, windows-latest, macOS-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Configure git for nsiccha dependencies
+        run: git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.julia-version }}
           arch: ${{ matrix.julia-arch }}
       - uses: julia-actions/cache@v2
+      - name: Develop unregistered dependencies
+        run: |
+          git clone --branch dev https://github.com/nsiccha/WarmupHMC.jl.git
+          git clone --branch main https://github.com/nsiccha/Treebars.jl.git
+          julia --project=. -e 'using Pkg; Pkg.develop([
+            PackageSpec(path="WarmupHMC.jl"),
+            PackageSpec(path="Treebars.jl"),
+          ]); Pkg.instantiate()'
       - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-runtest@v1
+      - name: Develop package test environment
+        run: julia --project=test -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="WarmupHMC.jl"), PackageSpec(path="Treebars.jl")]); Pkg.instantiate()'
+      - name: Run tests
+        run: julia --project=test -e 'include("test/runtests.jl")'
