@@ -599,14 +599,14 @@ function _saem_population_value_gradient(::BatchedEvaluation, model, subjects, �
         DI.Constant(model), DI.Constant(subjects), DI.Constant(H), DI.Constant(length(θ)))
 end
 
-function _saem_numeric_value_gradient(z, model, subjects, θ, σ, free, indices, design, bank, weights)
+function _saem_numeric_value_gradient(z, model, subjects, θ, σ, free, indices, design, bank, weights, mode::Val)
     x = vcat(θ, σ)
     x[free] = z
     θz = x[1:length(θ)]
     σz = x[length(θ)+1:end]
     value = 0.0
     gradient = zeros(Float64, length(x))
-    style = saem_population_gradient_style(model)
+    style = saem_population_gradient_style(model, mode)
     for (Φ, w) in zip(bank, weights)
         H = _saem_eta(Φ, θz, indices, design)
         v, g = _saem_population_value_gradient(style, model, subjects, θz, σz, H)
@@ -616,11 +616,11 @@ function _saem_numeric_value_gradient(z, model, subjects, θ, σ, free, indices,
     return value, gradient[free]
 end
 
-function _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design, bank, weights, maxiter)
+function _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design, bank, weights, maxiter, mode::Val)
     isempty(free) && return θ, σ
     z = vcat(θ, σ)[free]
     objective(z) = _saem_numeric_value_gradient(z, model, subjects, θ, σ,
-        free, indices, design, bank, weights)
+        free, indices, design, bank, weights, mode)
     value, gradient = objective(z)
     isfinite(value) && all(isfinite, gradient) || throw(DomainError(value,
         "SAEM numerical M-step has non-finite objective or gradient"))
@@ -663,13 +663,13 @@ end
 _saem_numeric_update(::Val{:mixture}, model, subjects, θ, σ, free, indices,
     design, bank, weights, maxiter, γ) =
     _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design,
-        bank, weights, maxiter)
+        bank, weights, maxiter, Val(:mixture))
 
 function _saem_numeric_update(::Val{:online}, model, subjects, θ, σ, free,
         indices, design, bank, weights, maxiter, γ)
     isempty(free) && return θ, σ
     θstar, σstar = _saem_numeric_mstep(model, subjects, θ, σ, free, indices,
-        design, bank, weights, maxiter)
+        design, bank, weights, maxiter, Val(:online))
     x = vcat(θ, σ)
     xstar = vcat(θstar, σstar)
     x[free] .+= γ .* (xstar[free] .- x[free])

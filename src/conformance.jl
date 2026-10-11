@@ -57,6 +57,10 @@ function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
         violation("evaluation_style returned $(repr(evaluation_style(model))); expected an EvaluationStyle")
     saem_population_gradient_style(model) isa EvaluationStyle ||
         violation("saem_population_gradient_style returned $(repr(saem_population_gradient_style(model))); expected an EvaluationStyle")
+    for mode in (Val(:online), Val(:mixture))
+        saem_population_gradient_style(model, mode) isa EvaluationStyle ||
+            violation("saem_population_gradient_style with $mode returned $(repr(saem_population_gradient_style(model, mode))); expected an EvaluationStyle")
+    end
     length(θ) == layout.ntheta || violation("θ has length $(length(θ)), the layout declares ntheta = $(layout.ntheta)")
     length(σ) == layout.nsigma || violation("σ has length $(length(σ)), the layout declares nsigma = $(layout.nsigma)")
     length(ω) == nomega(layout) || violation("ω has length $(length(ω)), the layout requires nomega = $(nomega(layout))")
