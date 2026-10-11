@@ -19,6 +19,12 @@ subject-level population gradients in SAEM. Implement
 declare `saem_population_gradient_style(model) = PerSubjectEvaluation()`. SAEM
 then sums those subject values and gradients for the numerical M-step. This
 choice does not change `evaluation_style(model)` or any other estimator step.
+For different routes in the two numerical M-step modes, define
+`saem_population_gradient_style(model, ::Val{:online})` or
+`saem_population_gradient_style(model, ::Val{:mixture})`. A missing mode-specific
+method uses the one-argument style. This lets a model use compact subject-cell
+gradients for the bounded-memory online update and a batched gradient for the
+retained-draw mixture.
 
 Run `check_protocol(model, θ, σ, ω)` while implementing a model. It checks dimensions, agreement between evaluation styles, subject separability, available derivatives, and declared observation and mu-referencing traits.
 

@@ -77,6 +77,8 @@ struct HybridBatchedSAEM
 end
 NE.evaluation_style(::HybridBatchedSAEM) = BatchedEvaluation()
 NE.saem_population_gradient_style(::HybridBatchedSAEM) = PerSubjectEvaluation()
+NE.saem_population_gradient_style(::HybridBatchedSAEM, ::Val{:mixture}) = BatchedEvaluation()
+NE.ad_backend(::HybridBatchedSAEM) = RUNTIME_REVERSE
 function NE.conditional_loglikelihoods(m::HybridBatchedSAEM, subjects, θ, σ, H)
     m.batch_calls[] += 1
     [-0.5 * (m.y[i] - θ[1] - σ[1] - H[1, k])^2 for (k, i) in enumerate(subjects)]
@@ -131,17 +133,25 @@ end
     model = HybridBatchedSAEM([1.0, 1.5], Ref(0), Ref(0))
     @test evaluation_style(model) isa BatchedEvaluation
     @test saem_population_gradient_style(model) isa PerSubjectEvaluation
+    @test saem_population_gradient_style(model, Val(:online)) isa PerSubjectEvaluation
+    @test saem_population_gradient_style(model, Val(:mixture)) isa BatchedEvaluation
     θ, σ = [0.2], [-0.1]
     Φ = reshape([0.3, 0.4], 1, 2)
     design = [zeros(1, 0) for _ in 1:2]
     value, gradient = NE._saem_numeric_value_gradient(vcat(θ, σ), model, 1:2,
-        θ, σ, [1, 2], Int[], design, [Φ], [1.0])
+        θ, σ, [1, 2], Int[], design, [Φ], [1.0], Val(:online))
     @test value ≈ -0.68
     @test gradient ≈ [1.6, 1.6]
     @test model.population_gradient_calls[] == 2
     @test model.batch_calls[] == 0
+    mixture_value, mixture_gradient = NE._saem_numeric_value_gradient(vcat(θ, σ),
+        model, 1:2, θ, σ, [1, 2], Int[], design, [Φ], [1.0], Val(:mixture))
+    @test mixture_value ≈ value
+    @test mixture_gradient ≈ gradient
+    @test model.population_gradient_calls[] == 2
+    @test model.batch_calls[] > 0
     @test conditional_loglikelihoods(model, 1:2, θ, σ, Φ) ≈ [-0.18, -0.5]
-    @test model.batch_calls[] == 1
+    @test model.batch_calls[] > 1
 end
 
 @testset "SAEM Gaussian M-step" begin
