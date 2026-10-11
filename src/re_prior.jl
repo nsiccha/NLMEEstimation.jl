@@ -71,7 +71,7 @@ complete_data_loglikelihood(model, i, θ, σ, ω::AbstractVector, η) =
 
 The conditional log-density `ℓ`, the complete-data log-density `f`, and the
 gradient and Hessian of `f` in η_i. The conditional part comes from
-[`conditional_loglikelihood_gradient_and_hessian`](@ref) (AD), the prior part in
+`conditional_loglikelihood_gradient_and_hessian` (AD), the prior part in
 closed form.
 """
 function complete_data_loglikelihood_gradient_and_hessian(model, i, θ, σ, prior::NormalREPrior, η)

@@ -68,7 +68,7 @@ subject `subjects[k]`.
 - `modes`: `neta × length(subjects)` matrix of empirical Bayes estimates η̂_i.
 - `hessians`: the `neta × neta` Hessian in η of the complete-data log-density
   `log p(y_i, η_i | θ, σ, Ω)` at η̂_i per subject, or `nothing` when the model
-  provides no second order (see [`ebe_covariances`](@ref)).
+  provides no second order (see `ebe_covariances`).
 - `conditional_loglikelihood`, `complete_data_loglikelihood`: the two log-densities
   at η̂_i.
 - `converged`, `iterations`: per-subject solver diagnostics.
