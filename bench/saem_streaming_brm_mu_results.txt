@@ -1,0 +1,46 @@
+SAEM default numerical M-step after BRM weight-slope MuReferencing
+Fixture: public BRM + RKPPL IV-bolus model, 80 independently simulated subjects,
+5 observations each, data seed Xoshiro(20261011), fit seed Xoshiro(5).
+NLMEEstimation implementation fbca2224af8c0f1df5d9f0b6468fee7dc16dda58.
+ReactiveKernels + RKPPL a2268e47b3a800df356ae6961c2caf863922a102.
+WarmupHMC 65354994484a9b84075fd82049df7b3df922b3a4.
+Julia 1.10.12, Enzyme 0.13.210, one Julia and one BLAS thread,
+shared AMD Ryzen 9 9950X Linux host.
+Driver: bench/saem_streaming_brm_mu.jl, based on the previous BRM reproducer.
+Options: one prior and one random-walk MH proposal per subject per SA iteration;
+15 initial MH sweeps; M-step at every iteration; 12 maximum numerical optimizer
+iterations; burnin and MH adaptation each half of the 100/200 SA iterations.
+Four-iteration compile calls precede the measured fits, with GC.gc() before
+all fits. Time includes the complete saem call and initial MH sweeps, but not
+model construction, compilation, protocol checking, or printing. All reported
+fit estimates and covariance diagonals were finite. Exact output follows.
+
+Implementation-tip check: BRM 444659b2d79cd0c2f753bfa9a692e6c897589255, 2026-10-11 19:35:27–19:40:39 UTC
+construction	seconds=55.639143	bytes=7539708376
+fit	mode=online	resolved=online	iterations=4	warmup=true	seconds=117.022569	bytes=990694580	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.317056429490422]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=mixture	resolved=mixture	iterations=4	warmup=true	seconds=0.010087	bytes=43462768	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.3169707902183408]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=auto	resolved=online	iterations=4	warmup=true	seconds=0.007051	bytes=40504080	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.317056429490422]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=auto	resolved=online	iterations=100	warmup=false	seconds=0.116702	bytes=847590544	accept_rw=0.2922	theta=[1.6378194688759249, 0.1562935350346748, 0.2692762428803375]	sigma=[-0.5813472677909481]	omega_diag=[0.08072934218034347, 0.020192642547145333]
+fit	mode=auto	resolved=online	iterations=200	warmup=false	seconds=0.214635	bytes=1616255920	accept_rw=0.2980	theta=[1.643083897768991, 0.15067098854144084, 0.276671195277079]	sigma=[-0.5656965294730484]	omega_diag=[0.08108580929113844, 0.019766235907942464]
+fit	mode=mixture	resolved=mixture	iterations=100	warmup=false	seconds=0.903377	bytes=3906246480	accept_rw=0.2922	theta=[1.6378194688759249, 0.1562935350346748, 0.2692762428803375]	sigma=[-0.5801548679240602]	omega_diag=[0.08072934218034347, 0.020192642547145333]
+fit	mode=mixture	resolved=mixture	iterations=200	warmup=false	seconds=3.475443	bytes=14205778496	accept_rw=0.2980	theta=[1.643083897768991, 0.15067098854144084, 0.276671195277079]	sigma=[-0.5647091648421481]	omega_diag=[0.08108580929113844, 0.019766235907942464]
+
+Final reviewed-tip check: BRM 1e7fbaa0d3e6f462e5ae4b2cc74056a7542f4c08, 2026-10-11 19:41:57–19:46:04 UTC
+construction	seconds=55.368974	bytes=7539985344
+fit	mode=online	resolved=online	iterations=4	warmup=true	seconds=115.456821	bytes=991233412	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.317056429490422]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=mixture	resolved=mixture	iterations=4	warmup=true	seconds=0.009927	bytes=43462768	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.3169707902183408]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=auto	resolved=online	iterations=4	warmup=true	seconds=0.007032	bytes=40504080	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.317056429490422]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=auto	resolved=online	iterations=100	warmup=false	seconds=0.120905	bytes=847590544	accept_rw=0.2922	theta=[1.6378194688759249, 0.1562935350346748, 0.2692762428803375]	sigma=[-0.5813472677909481]	omega_diag=[0.08072934218034347, 0.020192642547145333]
+fit	mode=auto	resolved=online	iterations=200	warmup=false	seconds=0.218647	bytes=1616255920	accept_rw=0.2980	theta=[1.643083897768991, 0.15067098854144084, 0.276671195277079]	sigma=[-0.5656965294730484]	omega_diag=[0.08108580929113844, 0.019766235907942464]
+fit	mode=mixture	resolved=mixture	iterations=100	warmup=false	seconds=0.892912	bytes=3906246480	accept_rw=0.2922	theta=[1.6378194688759249, 0.1562935350346748, 0.2692762428803375]	sigma=[-0.5801548679240602]	omega_diag=[0.08072934218034347, 0.020192642547145333]
+fit	mode=mixture	resolved=mixture	iterations=200	warmup=false	seconds=3.414459	bytes=14205778496	accept_rw=0.2980	theta=[1.643083897768991, 0.15067098854144084, 0.276671195277079]	sigma=[-0.5647091648421481]	omega_diag=[0.08108580929113844, 0.019766235907942464]
+
+The first/final tips have identical src/ and ext/ trees; the final tip adds
+only a density-invariance test. Both runs gave identical fitted coordinates,
+acceptance and allocations, with shared-host wall-time variation. At final
+BRM source, :auto resolved to :online for 4, 100 and 200 iterations; the
+4-iteration :auto and explicit :online estimates matched exactly. At 100/200
+iterations, the numerical part optimizes only residual sigma because all three
+fitted structural theta coordinates are MuReferenced. The 100/200 schedules
+also change burnin and adaptation lengths. These two seeds/runs are a scaling
+and finite-fit check, not a distributional convergence study.
