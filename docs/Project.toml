@@ -10,3 +10,11 @@ WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [sources.NLMEEstimation]
 path = ".."
+
+[sources.Treebars]
+url = "https://github.com/nsiccha/Treebars.jl"
+rev = "main"
+
+[sources.WarmupHMC]
+url = "https://github.com/nsiccha/WarmupHMC.jl"
+rev = "dev"
