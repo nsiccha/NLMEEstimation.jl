@@ -48,7 +48,7 @@ export check_protocol, ProtocolViolation
 export empirical_bayes, posthoc, EBEMethod, NewtonEBE, QuasiNewtonEBE, default_ebe_method,
     EBEOptions, EBEResult, EBEConvergenceError, ebe_covariances
 export focei, focei_evaluate, FOCEOptions, FOCEResult, FOCEEvaluation
-export saem, SAEMOptions, SAEMResult, StandardSAEMMH, WarmupHMCNUTS
+export saem, SAEMOptions, SAEMResult, StandardSAEMMH, WarmupHMCNUTS, DualAveragingMALA
 
 include("layout.jl")
 include("protocol.jl")
