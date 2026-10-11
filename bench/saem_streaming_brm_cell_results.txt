@@ -1,0 +1,42 @@
+SAEM mode-specific BRM subject-cell population-gradient benchmark
+Fixture: public BRM + RKPPL IV-bolus model, 80 independently simulated subjects,
+5 observations each; data seed Xoshiro(20261011), fit seed Xoshiro(5).
+NLMEEstimation implementation 50f8534b70b2e3feb5b2b7a9b5434111a00be260.
+BRM implementation b2101d2457362cbfd94e378744629238c2dd6a7a (run A),
+627dbddbadc0d806f95b0460a86ac98b627dd977 (run B, adds explicit online style).
+ReactiveKernels + RKPPL a2268e47b3a800df356ae6961c2caf863922a102.
+WarmupHMC 65354994484a9b84075fd82049df7b3df922b3a4.
+Julia 1.10.12, Enzyme 0.13.210, one Julia and one BLAS thread,
+shared AMD Ryzen 9 9950X Linux host.
+Both runs use bench/saem_streaming_brm_mu.jl. Run B includes the same driver
+then asserts the base, online, and mixture population-gradient styles.
+Each iteration makes one MH sweep across subjects and an M-step. Options:
+15 initial MH sweeps; 12 maximum numerical optimizer iterations; 100/200
+SA iterations with burnin and MH adaptation each half of that count.
+GC.gc() precedes each timed fit. The first explicit online and mixture
+four-iteration calls measure first-use compilation of their respective paths;
+subsequent :auto and :mixture calls are warm. Fit time includes initial MH
+sweeps and complete saem call, but excludes model construction, protocol
+checking, and printing. Reported bytes are cumulative allocation, not peak
+resident memory. Exact stdout lines follow.
+
+Run A — BRM b210, 2026-10-11 20:32:35–20:36:21 UTC
+construction	seconds=54.903949	bytes=7528879896
+fit	mode=online	resolved=online	iterations=4	warmup=true	seconds=4.358658	bytes=627262220	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.31705642949042195]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=mixture	resolved=mixture	iterations=4	warmup=true	seconds=114.256054	bytes=890337848	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.3169707902183408]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=auto	resolved=online	iterations=4	warmup=true	seconds=0.036368	bytes=245766224	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.31705642949042195]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=auto	resolved=online	iterations=100	warmup=false	seconds=0.568372	bytes=5912158224	accept_rw=0.2922	theta=[1.6378194688759249, 0.1562935350346748, 0.2692762428803375]	sigma=[-0.5813472668188956]	omega_diag=[0.08072934218034347, 0.020192642547145333]
+fit	mode=auto	resolved=online	iterations=200	warmup=false	seconds=1.116732	bytes=11594013296	accept_rw=0.2980	theta=[1.643083897768991, 0.15067098854144084, 0.276671195277079]	sigma=[-0.5656965294879726]	omega_diag=[0.08108580929113844, 0.019766235907942464]
+fit	mode=mixture	resolved=mixture	iterations=100	warmup=false	seconds=0.880031	bytes=3910040080	accept_rw=0.2922	theta=[1.6378194688759249, 0.1562935350346748, 0.2692762428803375]	sigma=[-0.5801548679240602]	omega_diag=[0.08072934218034347, 0.020192642547145333]
+fit	mode=mixture	resolved=mixture	iterations=200	warmup=false	seconds=3.397076	bytes=14213365696	accept_rw=0.2980	theta=[1.643083897768991, 0.15067098854144084, 0.276671195277079]	sigma=[-0.5647091648421481]	omega_diag=[0.08108580929113844, 0.019766235907942464]
+
+Run B — BRM 627, 2026-10-11 20:37:14–20:41:09 UTC
+construction	seconds=55.081238	bytes=7530594448
+fit	mode=online	resolved=online	iterations=4	warmup=true	seconds=4.342616	bytes=627253196	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.31705642949042195]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=mixture	resolved=mixture	iterations=4	warmup=true	seconds=115.602795	bytes=890431608	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.3169707902183408]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=auto	resolved=online	iterations=4	warmup=true	seconds=0.036937	bytes=245766224	accept_rw=0.3283	theta=[1.6805620654123927, 0.08779254674128115, 0.28609268586172293]	sigma=[-0.31705642949042195]	omega_diag=[0.0908174914099057, 0.01612426266111828]
+fit	mode=auto	resolved=online	iterations=100	warmup=false	seconds=0.629127	bytes=5912158224	accept_rw=0.2922	theta=[1.6378194688759249, 0.1562935350346748, 0.2692762428803375]	sigma=[-0.5813472668188956]	omega_diag=[0.08072934218034347, 0.020192642547145333]
+fit	mode=auto	resolved=online	iterations=200	warmup=false	seconds=1.235502	bytes=11594013296	accept_rw=0.2980	theta=[1.643083897768991, 0.15067098854144084, 0.276671195277079]	sigma=[-0.5656965294879726]	omega_diag=[0.08108580929113844, 0.019766235907942464]
+fit	mode=mixture	resolved=mixture	iterations=100	warmup=false	seconds=0.945812	bytes=3910040080	accept_rw=0.2922	theta=[1.6378194688759249, 0.1562935350346748, 0.2692762428803375]	sigma=[-0.5801548679240602]	omega_diag=[0.08072934218034347, 0.020192642547145333]
+fit	mode=mixture	resolved=mixture	iterations=200	warmup=false	seconds=3.573406	bytes=14213365696	accept_rw=0.2980	theta=[1.643083897768991, 0.15067098854144084, 0.276671195277079]	sigma=[-0.5647091648421481]	omega_diag=[0.08108580929113844, 0.019766235907942464]
+CHECK	mode-aware BRM styles pass
