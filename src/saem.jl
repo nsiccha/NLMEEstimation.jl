@@ -46,8 +46,8 @@ struct StandardSAEMMH <: AbstractSAEMKernel end
 Warm up a separate NUTS chain for each subject with WarmupHMC. Its initial
 covariance comes from the inverse local negative log-posterior Hessian when
 available, and otherwise from Ω. Subsequent SAEM rounds use fixed-kernel
-`stream_mcmc` transitions with the current population parameters. Warmup and
-stream files are temporary and removed when `saem` returns. The default
+in-memory NUTS transitions with the current population parameters. Warmup
+checkpoints are temporary and removed when `saem` returns. The default
 `:diagonal` metric uses Hessian diagonal curvatures; `metric=:dense` requests
 the inverse regularized Hessian as a full initial covariance.
 `target_acceptance_rate` controls WarmupHMC's step-size adaptation during
@@ -124,17 +124,13 @@ end
 
 function _saem_nuts_warmup!(rng, kernel::WarmupHMCNUTS,
         root, model, ids, θ, σ, prior, H)
-    checkpoints = String[]
-    streams = String[]
-    drawn = zeros(Int, length(ids))
-    for (k, i) in enumerate(ids)
+    return [begin
         target = _saem_target(model, i, θ, σ, prior)
         η = copy(view(H, :, k))
         Σ = _saem_hessian_metric(model, i, θ, σ, prior, η;
             curvature_floor=kernel.curvature_floor,
             diagonal=kernel.metric == :diagonal)
         warm_dir = joinpath(root, "warm_$(k)")
-        # stream_mcmc persists the RNG state in a fixed Xoshiro ring.
         subject_rng = Xoshiro(rand(rng, UInt64))
         WarmupHMC.adaptive_warmup_mcmc(subject_rng, target;
             init=(position=η, squared_scale=Σ),
@@ -147,21 +143,19 @@ function _saem_nuts_warmup!(rng, kernel::WarmupHMCNUTS,
             target_acceptance_rate=kernel.target_acceptance_rate,
             nonlinear_adapt=false,
             monitor_ess=false)
-        push!(checkpoints, joinpath(warm_dir, "cp_latest.jls"))
-        push!(streams, joinpath(root, "subject_$(k).stream"))
-    end
-    return (checkpoints=checkpoints, streams=streams, drawn=drawn)
+        WarmupHMC.FixedKernelNUTSState(joinpath(warm_dir, "cp_latest.jls");
+            max_tree_depth=kernel.max_tree_depth)
+    end for (k, i) in enumerate(ids)]
 end
 
-function _saem_nuts_round!(state, model, ids, θ, σ, prior, H)
+function _saem_nuts_round!(states, model, ids, θ, σ, prior, H)
     divergences = 0
     for (k, i) in enumerate(ids)
         target = _saem_target(model, i, θ, σ, prior)
-        result = WarmupHMC.stream_mcmc(state.checkpoints[k], target;
-            path=state.streams[k], n_draws=state.drawn[k] + 1)
-        state.drawn[k] = result.n_drawn
-        H[:, k] = result.position
-        divergences += result.n_divergent
+        step = WarmupHMC.fixed_kernel_nuts_step(states[k], target)
+        states[k] = step.state
+        H[:, k] = step.state.position
+        divergences += step.divergent
     end
     return divergences
 end
@@ -445,7 +439,7 @@ generalized-least-squares fixed-effect M-step. Remaining θ and σ coordinates
 use a first-order AD numerical M-step over the running conditional-density
 mixture. The mixture retains one latent-effect matrix per SA iteration, so
 memory and numerical M-step cost grow with `iterations`. `kernel` selects the
-standard lockstep MH proposals or per-subject WarmupHMC NUTS streams.
+standard lockstep MH proposals or per-subject in-memory WarmupHMC NUTS transitions.
 """
 function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVector;
         rng::AbstractRNG = Random.default_rng(), subjects = nothing, η0 = nothing,
