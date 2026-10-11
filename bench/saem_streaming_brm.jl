@@ -31,8 +31,8 @@ function fit(mode, iterations; warmup=false)
     result = measured.value
     all(isfinite, (result.theta..., result.sigma..., result.omega...)) ||
         error("non-finite SAEM estimate")
-    @printf("fit\tmode=%s\titerations=%d\twarmup=%s\tseconds=%.6f\tbytes=%d\taccept_rw=%.4f\ttheta=%s\tsigma=%s\tomega_diag=%s\n",
-        mode, iterations, warmup, measured.time, measured.bytes,
+    @printf("fit\tmode=%s\tresolved=%s\titerations=%d\twarmup=%s\tseconds=%.6f\tbytes=%d\taccept_rw=%.4f\ttheta=%s\tsigma=%s\tomega_diag=%s\n",
+        mode, result.numeric_mstep, iterations, warmup, measured.time, measured.bytes,
         result.acceptance.random_walk, repr(result.theta), repr(result.sigma),
         repr(diag(result.omega_matrix)))
     flush(stdout)
@@ -41,6 +41,7 @@ end
 
 fit(:online, 4; warmup=true)
 fit(:mixture, 4; warmup=true)
+@assert fit(:auto, 4; warmup=true).numeric_mstep == :mixture
 for mode in (:online, :mixture), iterations in (100, 200)
     fit(mode, iterations)
 end

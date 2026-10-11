@@ -245,18 +245,18 @@ The Gaussian random-effect M-step already keeps per-subject running first and se
 
 `SAEMOptions(numeric_mstep=:auto)` is the default. It selects bounded-memory `:online` only when every fitted structural `θ` coordinate has a declared `MuReferencing` update; otherwise it selects the historical `:mixture` objective. BRM currently declares the two intercepts in this example but leaves the weight slope undeclared, so **the default remains `:mixture` for this BRM model**. The benchmark explicitly requests `:online` to measure the fast path with an online weight-slope update; that structural update is a model-specific approximation. The BRM trait extension is tracked upstream. `SAEMResult.numeric_mstep` reports the mode actually used.
 
-The measurement used Julia 1.10.12, one Julia and one BLAS thread, a shared AMD Ryzen 9 9950X Linux host, BRM `a1ac62a`, ReactiveKernels/RKPPL `a2268e4`, WarmupHMC `6535499`, and the NLMEEstimation candidate based on `ba9c833`. Synthetic data used `Xoshiro(20261011)`; every fit used `Xoshiro(5)`. The options were `mcmc_burnin=15`, `mh_rounds=1`, `numeric_maxiter=12`, `mstep_interval=1`, and burn-in plus MH adaptation each set to half of the requested 100 or 200 SA iterations. After four-iteration compile calls, `GC.gc()` preceded each timed fit. Timings include the complete `saem` call and exclude model construction, compilation, protocol checking, and printing.
+The two measurements used Julia 1.10.12, one Julia and one BLAS thread, a shared AMD Ryzen 9 9950X Linux host, BRM `a1ac62ad4b2e0023a3d6c1dd6e8ce274c7619058`, ReactiveKernels/RKPPL `a2268e47b3a800df356ae6961c2caf863922a102`, WarmupHMC `65354994484a9b84075fd82049df7b3df922b3a4`, and NLMEEstimation implementation `304a349eb3fefc6e7606bdfff2c73b054d9d748d`. The first measurement used the same implementation just before that commit. Synthetic data used `Xoshiro(20261011)`; every fit used `Xoshiro(5)`. The options were `mcmc_burnin=15`, `mh_rounds=1`, `numeric_maxiter=12`, `mstep_interval=1`, and burn-in plus MH adaptation each set to half of the requested 100 or 200 SA iterations. After four-iteration compile calls, `GC.gc()` preceded each timed fit. Timings include the complete `saem` call and exclude model construction, compilation, protocol checking, and printing. The repeated driver also confirmed that `:auto` resolves to `:mixture` for this model.
 
-| Numerical M-step | SA iterations | Warm fit time | Cumulative allocation | Random-walk acceptance |
-| --- | ---: | ---: | ---: | ---: |
-| Online, including undeclared slope | 100 | 0.322 s | 0.927 GB | 29.2% |
-| Online, including undeclared slope | 200 | 0.475 s | 1.882 GB | 29.2% |
-| Historical running mixture | 100 | 1.908 s | 6.460 GB | 29.2% |
-| Historical running mixture | 200 | 7.203 s | 23.346 GB | 29.1% |
+| Numerical M-step | SA iterations | Warm time, run 1 | Warm time, run 2 | Allocation per run | Random-walk acceptance |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Online, including undeclared slope | 100 | 0.322 s | 0.186 s | 0.927 GB | 29.2% |
+| Online, including undeclared slope | 200 | 0.475 s | 0.369 s | 1.882 GB | 29.2% |
+| Historical running mixture | 100 | 1.908 s | 1.706 s | 6.460 GB | 29.2% |
+| Historical running mixture | 200 | 7.203 s | 6.069 s | 23.346 GB | 29.1% |
 
-The online mode cut warm fit time by 5.9× at 100 iterations and 15.2× at 200 iterations in this single run. Its cumulative allocations approximately doubled with the iteration count; the mixture's allocations rose by 3.6×. The 100- and 200-iteration settings have different burn-in and adaptation lengths, so the comparison shows work scaling for those schedules, not a convergence rate. Fitted coordinates were finite and close across modes in this synthetic run; this is not evidence that their estimators have the same bias or long-run behavior.
+The online mode cut warm fit time by 5.9× and 9.2× at 100 iterations, and by 15.2× and 16.4× at 200 iterations across the two runs. Its cumulative allocations approximately doubled with the iteration count; the mixture's allocations rose by 3.6×. The 100- and 200-iteration settings have different burn-in and adaptation lengths, so the comparison shows work scaling for those schedules, not a convergence rate. Fitted coordinates were finite and close across modes in this synthetic fixture; this is not evidence that their estimators have the same bias or long-run behavior.
 
-Cold costs were separate: constructing the 80-subject BRM model took 53.5 s and 7.48 GB cumulative allocation, and the first four-iteration online fit took 118 s with compilation. Those costs matter for one-off fits and are not included in the warm table. The benchmark does not yet establish that the default BRM path is both textbook-frequency and bounded-memory until its linear slope can use the exact `MuReferencing` update.
+Cold costs were separate: constructing the 80-subject BRM model took 53.5 and 56.9 s with 7.48 GB cumulative allocation, and the first four-iteration online fit took 118.0 and 117.1 s with compilation. Those costs matter for one-off fits and are not included in the warm table. The benchmark does not yet establish that the default BRM path is both textbook-frequency and bounded-memory until its linear slope can use the exact `MuReferencing` update.
 
 To reproduce from this repository root, use a fresh dependency directory. The existing example setup supplies the nested RK packages; update the two source revisions that differ from its pinned comparison and develop this checkout in one resolver call:
 
@@ -271,4 +271,4 @@ julia --project=docs/examples -e 'using Pkg; root=ENV["BENCH_DEPS"]; Pkg.develop
 julia --project=docs/examples bench/saem_streaming_brm.jl
 ```
 
-Use the NLMEEstimation revision linked by this page for an exact source replay. Timings vary with host load and compiler cache state.
+Use NLMEEstimation implementation commit `304a349eb3fefc6e7606bdfff2c73b054d9d748d` and the linked driver for an exact source replay. Timings vary with host load and compiler cache state.
