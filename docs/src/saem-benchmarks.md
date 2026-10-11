@@ -288,7 +288,7 @@ The [new driver](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/bench/
 
 At the final BRM tip, the default mode was 7.4× faster at 100 iterations and 15.6× faster at 200 iterations than the historical mixture. Its cumulative allocations grew roughly in proportion to iterations, whereas the retained-draw mixture grew from 3.906 to 14.206 GB. The fitted `θ` and `diag(Ω)` were identical between modes in these seeded fits; `σ` differed by about 0.001 in its unconstrained coordinate. Those close results are a sanity check, not an equivalence or convergence proof.
 
-Cold work remains material: construction took 55.6/55.4 s and the first four-iteration online fit took 117.0/115.5 s with compilation. BRM traced the latter mainly to the first batched Enzyme population-gradient compilation; its subject-cell gradient route is being integrated separately. These cold costs are excluded from the warm table, so a one-off 100-iteration fit is not a 0.12 s whole workflow.
+At that recorded revision, cold work was material: construction took 55.6/55.4 s and the first four-iteration online fit took 117.0/115.5 s with compilation. BRM traced the latter mainly to the first batched Enzyme population-gradient compilation. These cold costs are excluded from the warm table, so a one-off 100-iteration fit was not a 0.12 s whole workflow. The next section measures the subsequent subject-cell gradient route.
 
 To reproduce the default-path comparison after the dependency setup above, switch its BRM checkout to the final reviewed revision and run the new driver:
 
@@ -297,3 +297,98 @@ git -C "$BENCH_DEPS/BayesianRegressionModels" fetch origin 1e7fbaa0d3e6f462e5ae4
 git -C "$BENCH_DEPS/BayesianRegressionModels" checkout --detach 1e7fbaa0d3e6f462e5ae4b2cc74056a7542f4c08
 julia --project=docs/examples bench/saem_streaming_brm_mu.jl
 ```
+
+## Subject-cell gradients and first-use compilation
+
+The preceding table records BRM `1e7fbaa` and remains a useful baseline. With
+BRM [`627dbdd`](https://github.com/nsiccha/BayesianRegressionModels.jl/commit/627dbddbadc0d806f95b0460a86ac98b627dd977), the online residual-parameter
+M-step obtains the conditional population gradient by summing compact
+subject-cell evaluations. The retained-draw `:mixture` M-step still uses the
+batched gradient. NLMEEstimation [`50f8534`](https://github.com/nsiccha/NLMEEstimation.jl/commit/50f8534b70b2e3feb5b2b7a9b5434111a00be260) selects a mode-specific
+M-step callable once per fit, so Julia compiles the selected gradient path
+when it is first used. These changes leave the MCMC sweep, running Gaussian
+sufficient statistics, and the online residual update schedule intact.
+
+The model and the fitted call in the benchmark have this form. The complete
+synthetic [data generator and model source](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/docs/examples/brm_rkppl_pk_fixture.jl)
+and [benchmark driver](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/bench/saem_streaming_brm_mu.jl)
+provide the executable version.
+
+```julia
+using NLMEEstimation, BayesianRegressionModels, ReactiveKernelsPPL
+using Distributions, Enzyme, Random
+using DifferentiationInterface: AutoEnzyme
+include("docs/examples/brm_rkppl_pk_fixture.jl")
+
+data = pk_example_data(80; seed=20261011)
+brmi = @brm data begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + weight + (1 | pk | subject)
+    log_V ~ 1 + (1 | pk | subject)
+    effect(log_CL, Intercept) ~ Normal(0.2, 1)
+    effect(log_CL, weight) ~ Normal(0, 0.5)
+    effect(log_V, Intercept) ~ Normal(1.6, 1)
+    sd(:, pk) ~ Exponential(1)
+    @plate for i in eachindex(log_CL)
+        CL = exp(log_CL[i])
+        V = exp(log_V[i])
+        pred[i] = dose[i] / V .* exp.(-(CL / V) .* t[i])
+        dv[i] ~ normal(pred[i], sigma .+ 0.03 .* pred[i])
+    end
+end
+model = brm_nlme_model(RKBRMI(brmi);
+    ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+
+@assert saem_population_gradient_style(model, Val(:online)) isa PerSubjectEvaluation
+@assert saem_population_gradient_style(model, Val(:mixture)) isa BatchedEvaluation
+
+θ0 = [Dict("log_V_Intercept" => 1.6,
+    "pop_log_CL.beta_pop.1" => 0.2,
+    "pop_log_CL.beta_pop.2" => 0.25)[name]
+    for name in parameter_names(model).theta]
+σ0 = [log(0.6)]
+ω0 = omega_parameters(nlme_layout(model), [0.3^2 0.0; 0.0 0.15^2])
+options = SAEMOptions(; iterations=100, burnin=50, mcmc_burnin=15,
+    mh_rounds=1, adapt_iterations=50, numeric_maxiter=12,
+    mstep_interval=1, numeric_mstep=:auto)
+fit = saem(model, θ0, σ0, ω0; rng=Xoshiro(5), options,
+    kernel=StandardSAEMMH())
+@assert fit.numeric_mstep == :online
+```
+
+The first run used BRM `b2101d2`; the second used `627dbdd`, which additionally
+declares the online style explicitly. Both exact-tip runs used this 80-subject,
+five-observation IV-bolus fixture,
+data seed `Xoshiro(20261011)`, fit seed `Xoshiro(5)`, Julia 1.10.12, Enzyme
+0.13.210, one Julia and one BLAS thread, and the shared AMD Ryzen 9 9950X
+Linux host. ReactiveKernels and RKPPL were at `a2268e47`; WarmupHMC was at
+`6535499`. One MCMC sweep and one M-step ran per SA iteration. Before timing
+each fit, the driver called `GC.gc()`. The first explicit four-iteration fit
+of each mode includes its compilation. The later 100/200-iteration fits are
+warm. Fit timings include the 15 initial MH sweeps but exclude model
+construction, protocol checking, and printing. Allocations below are
+cumulative bytes allocated per fit, not retained memory. The
+[complete output for both runs](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/bench/saem_streaming_brm_cell_results.txt)
+contains every estimate and acceptance measurement.
+
+| Measurement | BRM `b2101d2` | BRM `627dbdd` |
+| --- | ---: | ---: |
+| Model construction | 54.904 s, 7.529 GB | 55.081 s, 7.531 GB |
+| First explicit online fit, 4 SA iterations | 4.359 s, 0.627 GB | 4.343 s, 0.627 GB |
+| First explicit mixture fit, 4 SA iterations | 114.256 s, 0.890 GB | 115.603 s, 0.890 GB |
+| Warm default online, 100 iterations | 0.568 s, 5.912 GB | 0.629 s, 5.912 GB |
+| Warm default online, 200 iterations | 1.117 s, 11.594 GB | 1.236 s, 11.594 GB |
+| Warm mixture, 100 iterations | 0.880 s, 3.910 GB | 0.946 s, 3.910 GB |
+| Warm mixture, 200 iterations | 3.397 s, 14.213 GB | 3.573 s, 14.213 GB |
+
+The old BRM `1e7fbaa` first online fit took 115.5 s, versus 4.34 s at the
+final subject-cell tip. Its warm online 100/200-iteration fits were faster,
+0.121/0.219 s with 0.848/1.616 GB allocated; the new cell route takes
+0.629/1.236 s and allocates 5.912/11.594 GB. The new route therefore favors
+the first fit, while the earlier batched route had lower steady online cost
+after its compilation. The mixture path's first compilation is now paid when
+mixture is selected; its warm time and allocation stay close to the older
+batched measurements. In both runs, seeded fits returned finite estimates;
+the online population coordinates agreed with the older route to the shown
+precision. These timings compare implementation costs, not statistical
+convergence or accuracy across different models.
