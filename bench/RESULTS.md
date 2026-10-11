@@ -1,5 +1,9 @@
 # SAEM kernel benchmark, 2026-10-11
 
+This file archives the initial exploratory comparison. The tuned-kernel
+selection, divergence qualification, and fresh-seed comparison are documented
+in [the SAEM benchmark docs page](../docs/src/saem-benchmarks.md).
+
 Run on gordito with Julia 1.10.12, one BLAS thread, the public Theoph model,
 six subjects, three sampler seeds (2026–2028), and WarmupHMC `dev` at
 `2b7b1549c5c91d99da42903110f15632db0b54ec`. These are local timing

@@ -88,10 +88,11 @@ if abspath(PROGRAM_FILE) == @__FILE__
         nuts_rate_results)
     isempty(clean_finalists) && error("no divergence-free NUTS finalist")
     nuts_best = argmax(item -> item.result.score, clean_finalists)
-    println("selected_MH=$(mh_best.cfg); selected_NUTS=$(nuts_best.cfg)")
-    print_row("heldout", "MH", mh_best.cfg,
+    println("provisional_fixed_target_MH=$(mh_best.cfg); provisional_fixed_target_NUTS=$(nuts_best.cfg)")
+    println("For changing-target divergence qualification and the final comparison, run bench/saem_kernel_final.jl.")
+    print_row("crosscheck", "MH", mh_best.cfg,
         measure_mh(model, ω, mh_best.cfg, CHECK_SEEDS))
-    print_row("heldout", "NUTS", nuts_best.cfg,
+    print_row("crosscheck", "NUTS", nuts_best.cfg,
         measure_nuts(model, ω, nuts_best.cfg, CHECK_SEEDS))
     println("baseline configs on held-out seeds:")
     mh_base = (scale=0.5, adapt=true, target=0.3)
