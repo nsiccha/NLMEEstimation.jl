@@ -606,7 +606,7 @@ function _saem_numeric_value_gradient(z, model, subjects, θ, σ, free, indices,
     σz = x[length(θ)+1:end]
     value = 0.0
     gradient = zeros(Float64, length(x))
-    style = evaluation_style(model)
+    style = saem_population_gradient_style(model)
     for (Φ, w) in zip(bank, weights)
         H = _saem_eta(Φ, θz, indices, design)
         v, g = _saem_population_value_gradient(style, model, subjects, θz, σz, H)

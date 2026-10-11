@@ -203,6 +203,20 @@ function conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)
     return ℓ, g[1:ntheta], g[(ntheta + 1):end]
 end
 
+"""
+    saem_population_gradient_style(model) -> EvaluationStyle
+
+**Optional.** Selects how SAEM computes the conditional-likelihood value and
+population-parameter gradient for its numerical M-step. Defaults to
+[`evaluation_style`](@ref). A model with [`BatchedEvaluation`](@ref) can return
+[`PerSubjectEvaluation`](@ref) here when it implements an efficient
+[`conditional_loglikelihood_and_population_gradient`](@ref) for one subject;
+SAEM sums those subject values and gradients. This choice affects only that
+M-step gradient. Likelihood, η-gradient, and η-Hessian evaluation continue to
+use `evaluation_style(model)`.
+"""
+saem_population_gradient_style(model) = evaluation_style(model)
+
 # Per-subject models: derivatives of the per-subject density.
 function _and_gradient(::PerSubjectEvaluation, model, i, θ, σ, η)
     backend = _checked_backend(model, ad_backend(model), :conditional_loglikelihood_and_gradient)

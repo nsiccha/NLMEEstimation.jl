@@ -243,7 +243,7 @@ The preceding short-fit comparisons used a numerical M-step every third or fifth
 
 The Gaussian random-effect M-step already keeps per-subject running first and second moments of `ϕᵢ = Xᵢβ + ηᵢ`; it does not need a draw history. For a non-exponential residual likelihood such as this model's `σ + 0.03 × prediction`, the online mode finds the conditional-likelihood optimizer `z*` for the current draw and updates the remaining model coordinates as `z ← z + γₖ(z* − z)`. The implementation works in NLMEEstimation's **unconstrained** parameter coordinates. This follows the practical optimizer-averaging pattern in the [saemix methodology guide, §2.1.1](https://saemixdevelopment.github.io/saemix_bookdown/pdfs/userguide.pdf), whose displayed residual-parameter updates are written on the natural scale. It is therefore an analogous coordinate-specific update, not an algebraically identical natural-scale update.
 
-`SAEMOptions(numeric_mstep=:auto)` is the default. It selects bounded-memory `:online` only when every fitted structural `θ` coordinate has a declared `MuReferencing` update; otherwise it selects the historical `:mixture` objective. BRM currently declares the two intercepts in this example but leaves the weight slope undeclared, so **the default remains `:mixture` for this BRM model**. The benchmark explicitly requests `:online` to measure the fast path with an online weight-slope update; that structural update is a model-specific approximation. The BRM trait extension is tracked upstream. `SAEMResult.numeric_mstep` reports the mode actually used.
+`SAEMOptions(numeric_mstep=:auto)` is the default. It selects bounded-memory `:online` only when every fitted structural `θ` coordinate has a declared `MuReferencing` update; otherwise it selects the historical `:mixture` objective. At the older BRM revision `a1ac62a` used for the first table, only the two intercepts are declared, so its default resolves to `:mixture`. That benchmark explicitly requests `:online` to measure an approximate weight-slope update. The later BRM revision `1e7fbaa` adds the subject-specific weight slope to `MuReferencing`; the default-mode check below uses that revision. `SAEMResult.numeric_mstep` reports the mode actually used.
 
 The two measurements used Julia 1.10.12, Enzyme 0.13.210, one Julia and one BLAS thread, a shared AMD Ryzen 9 9950X Linux host, BRM `a1ac62ad4b2e0023a3d6c1dd6e8ce274c7619058`, ReactiveKernels/RKPPL `a2268e47b3a800df356ae6961c2caf863922a102`, WarmupHMC `65354994484a9b84075fd82049df7b3df922b3a4`, and NLMEEstimation implementation `304a349eb3fefc6e7606bdfff2c73b054d9d748d`. The first measurement used the same implementation just before that commit. Synthetic data used `Xoshiro(20261011)`; every fit used `Xoshiro(5)`. The options were `mcmc_burnin=15`, `mh_rounds=1`, `numeric_maxiter=12`, `mstep_interval=1`, and burn-in plus MH adaptation each set to half of the requested 100 or 200 SA iterations. After four-iteration compile calls, `GC.gc()` preceded each timed fit. Timings include the complete `saem` call and exclude model construction, compilation, protocol checking, and printing. The repeated driver also confirmed that `:auto` resolves to `:mixture` for this model.
 
@@ -256,7 +256,7 @@ The two measurements used Julia 1.10.12, Enzyme 0.13.210, one Julia and one BLAS
 
 The online mode cut warm fit time by 5.9× and 9.2× at 100 iterations, and by 15.2× and 16.4× at 200 iterations across the two runs. Its cumulative allocations approximately doubled with the iteration count; the mixture's allocations rose by 3.6×. The 100- and 200-iteration settings have different burn-in and adaptation lengths, so the comparison shows work scaling for those schedules, not a convergence rate. Fitted coordinates were finite and close across modes in this synthetic fixture; this is not evidence that their estimators have the same bias or long-run behavior.
 
-Cold costs were separate: constructing the 80-subject BRM model took 53.5 and 56.9 s with 7.48 GB cumulative allocation, and the first four-iteration online fit took 118.0 and 117.1 s with compilation. Those costs matter for one-off fits and are not included in the warm table. The benchmark does not yet establish that the default BRM path is both textbook-frequency and bounded-memory until its linear slope can use the exact `MuReferencing` update.
+Cold costs were separate: constructing the 80-subject BRM model took 53.5 and 56.9 s with 7.48 GB cumulative allocation, and the first four-iteration online fit took 118.0 and 117.1 s with compilation. Those costs matter for one-off fits and are not included in the warm table. The older BRM revision could not select the bounded-memory mode by default; the updated trait and default-mode measurements appear below.
 
 To reproduce from this repository root, use a fresh dependency directory. The existing example setup supplies the nested RK packages; update the two source revisions that differ from its pinned comparison and develop this checkout in one resolver call:
 
@@ -272,3 +272,28 @@ julia --project=docs/examples bench/saem_streaming_brm.jl
 ```
 
 Use NLMEEstimation implementation commit `304a349eb3fefc6e7606bdfff2c73b054d9d748d` and the linked driver for an exact source replay. Timings vary with host load and compiler cache state.
+
+## Default SAEM after BRM weight-slope MuReferencing
+
+BRM revision [`1e7fbaa`](https://github.com/nsiccha/BayesianRegressionModels.jl/commit/1e7fbaa0d3e6f462e5ae4b2cc74056a7542f4c08) certifies that the weight slope is constant within each subject and can be absorbed through that subject's clearance intercept random effect. Its `MuReferencing` design contains the actual subject weight. On this same 80-subject IV-bolus fixture, all three fitted structural `θ` coordinates then use the Gaussian running-statistics M-step. The remaining residual `σ` uses the online current-draw optimizer. The benchmark asserts that `numeric_mstep=:auto` resolves to `:online`; this is the bounded-memory default path for this model.
+
+The [new driver](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/bench/saem_streaming_brm_mu.jl) and [complete output from both runs](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/bench/saem_streaming_brm_mu_results.txt) use NLMEEstimation implementation `fbca2224af8c0f1df5d9f0b6468fee7dc16dda58`, BRM implementation tip `444659b2d79cd0c2f753bfa9a692e6c897589255` in the first run, and final reviewed BRM tip `1e7fbaa0d3e6f462e5ae4b2cc74056a7542f4c08` in the second. The latter adds only a test; their `src/` and `ext/` trees are identical. ReactiveKernels/RKPPL remained at `a2268e47b3a800df356ae6961c2caf863922a102`, WarmupHMC at `65354994484a9b84075fd82049df7b3df922b3a4`, and Enzyme at 0.13.210. Julia 1.10.12 ran with one Julia and one BLAS thread on the shared AMD Ryzen 9 9950X Linux host. Data, fit seeds, MCMC proposals, iteration schedules, and timer boundaries are identical to the preceding experiment. The added four-iteration default check produced exactly the explicit online estimate in both runs.
+
+| Numerical M-step | SA iterations | Warm time, first/final BRM tip | Allocation per run | Random-walk acceptance |
+| --- | ---: | ---: | ---: | ---: |
+| Default `:auto → :online` | 100 | 0.117 / 0.121 s | 0.848 GB | 29.2% |
+| Default `:auto → :online` | 200 | 0.215 / 0.219 s | 1.616 GB | 29.8% |
+| Historical `:mixture` | 100 | 0.903 / 0.893 s | 3.906 GB | 29.2% |
+| Historical `:mixture` | 200 | 3.475 / 3.414 s | 14.206 GB | 29.8% |
+
+At the final BRM tip, the default mode was 7.4× faster at 100 iterations and 15.6× faster at 200 iterations than the historical mixture. Its cumulative allocations grew roughly in proportion to iterations, whereas the retained-draw mixture grew from 3.906 to 14.206 GB. The fitted `θ` and `diag(Ω)` were identical between modes in these seeded fits; `σ` differed by about 0.001 in its unconstrained coordinate. Those close results are a sanity check, not an equivalence or convergence proof.
+
+Cold work remains material: construction took 55.6/55.4 s and the first four-iteration online fit took 117.0/115.5 s with compilation. BRM traced the latter mainly to the first batched Enzyme population-gradient compilation; its subject-cell gradient route is being integrated separately. These cold costs are excluded from the warm table, so a one-off 100-iteration fit is not a 0.12 s whole workflow.
+
+To reproduce the default-path comparison after the dependency setup above, switch its BRM checkout to the final reviewed revision and run the new driver:
+
+```sh
+git -C "$BENCH_DEPS/BayesianRegressionModels" fetch origin 1e7fbaa0d3e6f462e5ae4b2cc74056a7542f4c08
+git -C "$BENCH_DEPS/BayesianRegressionModels" checkout --detach 1e7fbaa0d3e6f462e5ae4b2cc74056a7542f4c08
+julia --project=docs/examples bench/saem_streaming_brm_mu.jl
+```
