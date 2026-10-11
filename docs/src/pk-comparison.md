@@ -76,6 +76,38 @@ The [full emitted source](https://github.com/nsiccha/NLMEEstimation.jl/blob/mast
 
 The posthoc result is conditional on its supplied population parameters; it does not estimate them. FOCE, FOCEI, and SAEM estimate population parameters but use different approximations and sampling schedules. The full joint fit provides a posterior comparison on the same data. Population point estimates and subject effects are the useful quantities to compare across rows; the methods' raw objective values are not interchangeable.
 
+Here are the fitting calls from the [complete script](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/docs/examples/brm_rkppl_pk.jl). The initial `θ0`, `σ0`, and `ω0` encode the generating population point in the model's declared parameter order; `m`, `backend`, and `AD` come from the model setup above.
+
+```julia
+using Random, WarmupHMC
+
+θ0 = [Dict("log_V_Intercept" => 1.6, "pop_log_CL.beta_pop.1" => 0.2,
+    "pop_log_CL.beta_pop.2" => 0.25)[name] for name in parameter_names(m).theta]
+σ0 = [log(0.6)]
+ω0 = omega_parameters(nlme_layout(m), [0.3^2 0.0; 0.0 0.15^2])
+
+posthoc = empirical_bayes(m, θ0, σ0, ω0)
+foce = focei(m, θ0, σ0, ω0;
+    options=FOCEOptions(maxeval=400, interaction=false))
+focei_fit = focei(m, θ0, σ0, ω0;
+    options=FOCEOptions(maxeval=400, interaction=true))
+
+saem_mh = saem(m, θ0, σ0, ω0; rng=Xoshiro(5),
+    options=SAEMOptions(iterations=100, burnin=50, mcmc_burnin=15,
+        adapt_iterations=50, numeric_maxiter=8, mstep_interval=3),
+    kernel=StandardSAEMMH())
+saem_nuts = saem(m, θ0, σ0, ω0; rng=Xoshiro(6),
+    options=SAEMOptions(iterations=40, burnin=20, mcmc_burnin=0,
+        numeric_maxiter=8, mstep_interval=3),
+    kernel=WarmupHMCNUTS(warmup_draws=12, warmup_evaluations=50,
+        stepsize_adaptation_limit=10, max_tree_depth=5))
+
+problem = rk_logdensity_problem(backend; ad_backend=AD)
+chains = [WarmupHMC.adaptive_warmup_mcmc(Xoshiro(seed), problem;
+    n_draws=500, target_acceptance_rate=0.9,
+    nonlinear_adapt=false, monitor_ess=false) for seed in (7, 8)]
+```
+
 ## Reproduce the comparison
 
 Use Julia 1.10.12 from the repository root. The separate [example project](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/docs/examples/Project.toml) pins its registered direct dependencies; the setup script checks out the source packages at the exact revisions used for this run and develops the nested ReactiveKernels packages together. Choose a fresh directory for those clones:
