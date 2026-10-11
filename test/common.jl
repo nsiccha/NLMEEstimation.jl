@@ -1,21 +1,22 @@
 # Shared fixtures: the reference model on simulated data and on R's Theoph data, a
 # batched joint-program view of it, and the brute-force joint-optimization reference
-# for the EBEs. Every derivative comes from Enzyme.
+# for the EBEs. The large joint oracle uses ForwardDiff; production paths use Enzyme.
 module TestCommon
 
 using NLMEEstimation
 using NLMEEstimation.ReferenceModels
 import NLMEEstimation as NE
 import DifferentiationInterface as DI
-using DifferentiationInterface: AutoEnzyme
+using DifferentiationInterface: AutoEnzyme, AutoForwardDiff
 import Enzyme
+import ForwardDiff
 using DelimitedFiles
 using LinearAlgebra
 using Random
 import Optim
 
 export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH, theoph_model,
-    JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN
+    JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -28,6 +29,10 @@ const REVERSE = AutoEnzyme()
 # configured reference for the promised path.
 const RUNTIME_REVERSE = AutoEnzyme(; mode = Enzyme.set_runtime_activity(Enzyme.Reverse))
 const RUNTIME_HESSIAN = DI.SecondOrder(AutoEnzyme(; mode = Enzyme.set_runtime_activity(Enzyme.Forward)), RUNTIME_REVERSE)
+# An independent joint-Hessian oracle uses forward-mode AD over all subjects.
+# Enzyme's forward-over-reverse compiler on Julia prereleases can fail on this
+# large reference expression even when the package's per-subject Hessians work.
+const JOINT_HESSIAN = AutoForwardDiff()
 
 const θ_SIM = [log(1.5), log(2.8), log(32.0), 0.75]
 const σ_SIM = [log(0.3), log(0.1)]
@@ -76,8 +81,11 @@ NE.hessian_ad_backend(v::JointView) = v.hessian_backend
 function NE.conditional_loglikelihoods(v::JointView, subjects, θ, σ, H)
     v.calls[] += 1
     n = nsubjects(v.inner)
+    # Scalar scatter avoids Julia 1.13 Enzyme's unsupported indexed slice write.
     full = zeros(eltype(H), size(H, 1), n)
-    full[:, subjects] = H
+    for (k, i) in enumerate(subjects), r in axes(H, 1)
+        full[r, i] = H[r, k]
+    end
     all = [conditional_loglikelihood(v.inner, i, θ, σ, view(full, :, i)) for i in 1:n]
     return all[subjects]
 end

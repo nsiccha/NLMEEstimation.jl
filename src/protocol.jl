@@ -149,7 +149,7 @@ provides_eta_hessian(model) = hessian_ad_backend(model) !== nothing
     conditional_loglikelihood_and_gradient(model, i, θ, σ, η) -> (ℓ, ∇η ℓ)
 
 The conditional log-density of subject `i` and its gradient in η_i. Implement it,
-or let it derive from [`ad_backend`](@ref) (per-subject models) or from the batched
+or let it derive from `ad_backend` (per-subject models) or from the batched
 gradient (batched models).
 """
 conditional_loglikelihood_and_gradient(model, i, θ, σ, η) =
@@ -192,7 +192,7 @@ conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H) =
 
 **Optional, or provided by [`ad_backend`](@ref).** The conditional log-density of
 subject `i` with its gradients in θ and σ at fixed η_i. Used by population-level
-estimators, not by [`empirical_bayes`](@ref).
+estimators, not by `empirical_bayes`.
 """
 function conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)
     backend = _checked_backend(model, ad_backend(model), :conditional_loglikelihood_and_population_gradient)
