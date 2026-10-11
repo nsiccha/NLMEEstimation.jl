@@ -81,10 +81,11 @@ NE.hessian_ad_backend(v::JointView) = v.hessian_backend
 function NE.conditional_loglikelihoods(v::JointView, subjects, θ, σ, H)
     v.calls[] += 1
     n = nsubjects(v.inner)
-    # Build the full matrix functionally: Julia 1.13's Enzyme cannot
-    # differentiate the indexed `full[:, subjects] = H` scatter.
-    full = [sum(H[r, k] * (subjects[k] == i) for k in eachindex(subjects))
-        for r in axes(H, 1), i in 1:n]
+    # Scalar scatter avoids Julia 1.13 Enzyme's unsupported indexed slice write.
+    full = zeros(eltype(H), size(H, 1), n)
+    for (k, i) in enumerate(subjects), r in axes(H, 1)
+        full[r, i] = H[r, k]
+    end
     all = [conditional_loglikelihood(v.inner, i, θ, σ, view(full, :, i)) for i in 1:n]
     return all[subjects]
 end
