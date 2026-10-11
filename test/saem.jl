@@ -119,9 +119,13 @@ end
     scale = NE._saem_hessian_metric(model, 1, [0.0], [log(0.5)], prior, [0.0])
     @test size(scale) == (1, 1)
     @test scale[1, 1] ≈ 1 / (2 / 0.5^2 + 1 / 0.5^2)
+    @test NE._saem_hessian_metric(model, 1, [0.0], [log(0.5)], prior,
+        [0.0]; diagonal=true) ≈ [scale[1, 1]]
     no_hessian = FlatBatchedSAEM(1, Ref(0))
     @test NE._saem_hessian_metric(no_hessian, 1, Float64[], Float64[],
         re_prior(no_hessian, [log(0.5)]), [0.0]) ≈ fill(0.25, 1, 1)
+    @test NE._saem_hessian_metric(no_hessian, 1, Float64[], Float64[],
+        re_prior(no_hessian, [log(0.5)]), [0.0]; diagonal=true) ≈ [0.25]
 end
 
 @testset "SAEM linear Gaussian recovery" begin

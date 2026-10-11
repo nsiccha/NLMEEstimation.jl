@@ -122,6 +122,25 @@ saem_fit.eta                 # final subject-chain states
 saem_fit.acceptance          # prior and random-walk MH acceptance fractions
 ```
 
+For per-subject NUTS transitions, select `WarmupHMCNUTS()`:
+
+```julia
+nuts_fit = saem(model, θ, σ, ω; rng = Xoshiro(2026),
+    options = SAEMOptions(iterations = 300, burnin = 150),
+    kernel = WarmupHMCNUTS())
+nuts_fit.kernel, nuts_fit.nuts_divergences
+```
+
+WarmupHMC warms up each subject once, initialized with a covariance derived
+from the local η Hessian when the model provides one. The default uses its
+diagonal; `WarmupHMCNUTS(metric = :dense)` passes the inverse regularized
+Hessian. SAEM then advances each
+subject by fixed-kernel NUTS transitions as the population parameters change.
+The warmup and stream files are temporary for the duration of the fit. NUTS
+uses `Xoshiro` streams internally, seeded from the supplied RNG; its MH-only
+`acceptance` and `rw_scale` fields are `missing`. See
+[`bench/RESULTS.md`](bench/RESULTS.md) for MH/NUTS sampling and fit benchmarks.
+
 SAEM keeps one η chain per subject. Each MH round evaluates prior-independence
 and random-walk proposals in two model batches, with separate accept/reject
 decisions per subject. The random-walk scale adapts for a finite initial period.

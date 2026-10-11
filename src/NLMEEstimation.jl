@@ -30,6 +30,8 @@ using Random
 import ADTypes
 import DifferentiationInterface as DI
 import NLopt
+import LogDensityProblems as LDP
+import WarmupHMC
 
 export NLMELayout, neta, nomega, omega_cholesky, omega_matrix, omega_parameters
 export nsubjects, nlme_layout, EvaluationStyle, PerSubjectEvaluation, BatchedEvaluation,
@@ -46,7 +48,7 @@ export check_protocol, ProtocolViolation
 export empirical_bayes, posthoc, EBEMethod, NewtonEBE, QuasiNewtonEBE, default_ebe_method,
     EBEOptions, EBEResult, EBEConvergenceError, ebe_covariances
 export focei, focei_evaluate, FOCEOptions, FOCEResult, FOCEEvaluation
-export saem, SAEMOptions, SAEMResult
+export saem, SAEMOptions, SAEMResult, StandardSAEMMH, WarmupHMCNUTS
 
 include("layout.jl")
 include("protocol.jl")
