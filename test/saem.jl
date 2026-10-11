@@ -70,6 +70,23 @@ function NE.conditional_loglikelihoods(m::FlatBatchedSAEM, subjects, θ, σ, H)
     return zeros(length(subjects))
 end
 
+struct HybridBatchedSAEM
+    y::Vector{Float64}
+    batch_calls::Base.RefValue{Int}
+    population_gradient_calls::Base.RefValue{Int}
+end
+NE.evaluation_style(::HybridBatchedSAEM) = BatchedEvaluation()
+NE.saem_population_gradient_style(::HybridBatchedSAEM) = PerSubjectEvaluation()
+function NE.conditional_loglikelihoods(m::HybridBatchedSAEM, subjects, θ, σ, H)
+    m.batch_calls[] += 1
+    [-0.5 * (m.y[i] - θ[1] - σ[1] - H[1, k])^2 for (k, i) in enumerate(subjects)]
+end
+function NE.conditional_loglikelihood_and_population_gradient(m::HybridBatchedSAEM, i, θ, σ, η)
+    m.population_gradient_calls[] += 1
+    residual = m.y[i] - θ[1] - σ[1] - η[1]
+    return -0.5 * residual^2, [residual], [residual]
+end
+
 function NE.conditional_loglikelihood(m::LinearSAEM, i, θ, σ, η)
     v = exp(2σ[1])
     μ = θ[1] + η[1]
@@ -108,6 +125,23 @@ end
             numeric_maxiter = 2, mstep_interval = 2, numeric_mstep = :mixture))
     @test all(isfinite, (historical.theta..., historical.sigma..., historical.omega...))
     @test historical.numeric_mstep == :mixture
+end
+
+@testset "SAEM population gradient style is operation-specific" begin
+    model = HybridBatchedSAEM([1.0, 1.5], Ref(0), Ref(0))
+    @test evaluation_style(model) isa BatchedEvaluation
+    @test saem_population_gradient_style(model) isa PerSubjectEvaluation
+    θ, σ = [0.2], [-0.1]
+    Φ = reshape([0.3, 0.4], 1, 2)
+    design = [zeros(1, 0) for _ in 1:2]
+    value, gradient = NE._saem_numeric_value_gradient(vcat(θ, σ), model, 1:2,
+        θ, σ, [1, 2], Int[], design, [Φ], [1.0])
+    @test value ≈ -0.68
+    @test gradient ≈ [1.6, 1.6]
+    @test model.population_gradient_calls[] == 2
+    @test model.batch_calls[] == 0
+    @test conditional_loglikelihoods(model, 1:2, θ, σ, Φ) ≈ [-0.18, -0.5]
+    @test model.batch_calls[] == 1
 end
 
 @testset "SAEM Gaussian M-step" begin

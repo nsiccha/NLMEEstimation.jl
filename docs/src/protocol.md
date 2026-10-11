@@ -13,6 +13,13 @@ The likelihood excludes the η prior. Derivatives may be provided directly or ob
 
 FOCE and FOCEI require `observation_model(model) = GaussianObservations()` and observation means, variances, and first η Jacobians. SAEM can use `mu_referencing(model)` for a closed-form update of the corresponding fixed effects and Ω; remaining population coordinates use a numerical M-step.
 
+A batched model may keep its batched likelihood and η derivatives while using
+subject-level population gradients in SAEM. Implement
+`conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)` and
+declare `saem_population_gradient_style(model) = PerSubjectEvaluation()`. SAEM
+then sums those subject values and gradients for the numerical M-step. This
+choice does not change `evaluation_style(model)` or any other estimator step.
+
 Run `check_protocol(model, θ, σ, ω)` while implementing a model. It checks dimensions, agreement between evaluation styles, subject separability, available derivatives, and declared observation and mu-referencing traits.
 
 The [PK comparison](pk-comparison.md) shows a complete batched BRM+RKPPL model and the calls used to fit it. The [API reference](api.md) lists every protocol entry point.
