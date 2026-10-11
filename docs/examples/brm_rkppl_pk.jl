@@ -8,38 +8,9 @@ import Enzyme
 
 const AD = AutoEnzyme(; mode=Enzyme.Reverse)
 report(args...) = (println(args...); flush(stdout))
-rng = Xoshiro(20261011)
+include("brm_rkppl_pk_fixture.jl")
 n = 8
-weight = collect(range(-0.8, 0.8; length=n))
-dose = fill(100.0, n)
-t = [Float64[0.5, 1, 2, 4, 8] for _ in 1:n]
-eta_cl_true = 0.3 .* randn(rng, n)
-eta_v_true = 0.15 .* randn(rng, n)
-dv = map(1:n) do i
-    cl = exp(0.2 + 0.25weight[i] + eta_cl_true[i])
-    v = exp(1.6 + eta_v_true[i])
-    pred = dose[i] / v .* exp.(-(cl / v) .* t[i])
-    pred .+ (0.6 .+ 0.03 .* pred) .* randn(rng, length(t[i]))
-end
-data = (; subject=["s$i" for i in 1:n], weight, dose, t, dv)
-
-function pk_brmi(data)
-    @brm data begin
-        sigma ~ Exponential(1)
-        log_CL ~ 1 + weight + (1 | pk | subject)
-        log_V ~ 1 + (1 | pk | subject)
-        effect(log_CL, Intercept) ~ Normal(0.2, 1)
-        effect(log_CL, weight) ~ Normal(0, 0.5)
-        effect(log_V, Intercept) ~ Normal(1.6, 1)
-        sd(:, pk) ~ Exponential(1)
-        @plate for i in eachindex(log_CL)
-            CL = exp(log_CL[i])
-            V = exp(log_V[i])
-            pred[i] = dose[i] / V .* exp.(-(CL / V) .* t[i])
-            dv[i] ~ normal(pred[i], sigma .+ 0.03 .* pred[i])
-        end
-    end
-end
+data = pk_example_data(n)
 brmi = pk_brmi(data)
 artifact = BayesianRegressionModels.emit_rk_artifact(brmi; case_id="nlmee-pk")
 # This is the exact production RKPPL emission, including submodel definitions.
@@ -73,12 +44,13 @@ report("FOCEI: converged=", focei_fit.converged, " evaluations=", focei_fit.eval
 
 saem_mh = saem(m, θ0, σ0, ω0; rng=Xoshiro(5),
     options=SAEMOptions(iterations=100, burnin=50, mcmc_burnin=15,
-        adapt_iterations=50, numeric_maxiter=8, mstep_interval=3),
+        adapt_iterations=50, numeric_maxiter=8, mstep_interval=3,
+        numeric_mstep=:mixture),
     kernel=StandardSAEMMH())
 report("SAEM MH: acceptance=", saem_mh.acceptance)
 saem_nuts = saem(m, θ0, σ0, ω0; rng=Xoshiro(6),
     options=SAEMOptions(iterations=40, burnin=20, mcmc_burnin=0,
-        numeric_maxiter=8, mstep_interval=3),
+        numeric_maxiter=8, mstep_interval=3, numeric_mstep=:mixture),
     kernel=WarmupHMCNUTS(warmup_draws=12, warmup_evaluations=50,
         stepsize_adaptation_limit=10, max_tree_depth=5))
 report("SAEM NUTS: divergences=", saem_nuts.nuts_divergences)

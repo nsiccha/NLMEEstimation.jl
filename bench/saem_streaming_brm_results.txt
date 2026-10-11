@@ -1,0 +1,56 @@
+SAEM numerical M-step scaling on the public BRM + RKPPL IV-bolus fixture
+Run: 2026-10-11 19:13:59–19:18:11 UTC, shared AMD Ryzen 9 9950X Linux host
+Julia 1.10.12, Enzyme 0.13.210, one Julia thread, one BLAS thread
+Input: 80 independently simulated subjects, five observations each, seed 20261011
+NLMEEstimation candidate based on ba9c833f93a1b3a33fb96c4ae0eaceb79528f127
+BRM a1ac62ad4b2e0023a3d6c1dd6e8ce274c7619058
+ReactiveKernels + RKPPL a2268e47b3a800df356ae6961c2caf863922a102
+WarmupHMC 65354994484a9b84075fd82049df7b3df922b3a4
+Command: julia --project=<developed BRM/RKPPL/NLME project> bench/saem_streaming_brm.jl
+Options: one prior-independence and one random-walk MH proposal per subject
+per SA iteration; 15 initial MH sweeps; M-step every iteration; 12 maximum
+numerical optimizer iterations; burnin and MH adaptation each half of the
+requested SA iterations; Xoshiro(5) for every fit. Explicit :online updates
+all free theta/sigma coordinates, including the currently undeclared weight
+slope; :mixture uses the historical retained-draw objective. Compile calls
+of four iterations precede the measured 100/200 iteration runs. GC is invoked
+before each timed fit. Times exclude construction, protocol check, compilation,
+and printing but include the complete saem call and initial MH sweeps.
+
+construction seconds=53.495225 bytes=7483436640 (includes first-use compilation)
+warmup online 4 iterations seconds=118.003166 bytes=989882764 (includes compilation)
+warmup mixture 4 iterations seconds=0.019505 bytes=43950928
+
+mode     iterations  seconds   bytes        RW acceptance  theta                                                    sigma                  diag(Omega)
+online   100         0.321885  927412400    0.2923         [1.637479477393038,0.15274695062178056,0.3646861276605956]  [-0.5493299813959418]  [0.08622685500665254,0.020277765372340755]
+online   200         0.474778  1881758400   0.2915         [1.6421997979943064,0.15152401846188612,0.3216479728888793]  [-0.5638869482692093]  [0.0787335164683007,0.020308688196280424]
+mixture  100         1.908215  6460013344   0.2923         [1.637479477393038,0.15274695062178056,0.3646772754846718]  [-0.5475762161381359]  [0.08622685500665254,0.020277765372340755]
+mixture  200         7.202517  23346471840  0.2914         [1.6425973705803902,0.15122387358703515,0.322274994449923]   [-0.5686201309424247]  [0.07921646002011,0.02048191173548545]
+
+Single-run shared-host timings and cumulative allocations. The 100/200
+options also change burnin/adaptation lengths, so this isolates scaling over
+the stated schedules, not estimator convergence. The close estimates are a
+sanity check, not a distributional or accuracy validation.
+
+Repeat: 2026-10-11 19:24:44–19:29:07 UTC, same hardware, Julia, dependencies,
+fixture, and fitted-source commit 304a349eb3fefc6e7606bdfff2c73b054d9d748d.
+The driver additionally prints the resolved numerical M-step and makes a
+four-iteration :auto check. It confirms the current BRM model resolves :auto
+to :mixture because its fitted weight slope is not MuReferenced. The two
+longer fits per mode use identical options and seeds to the first run.
+
+construction seconds=56.947740 bytes=7483228824 (includes first-use compilation)
+warmup online 4 iterations seconds=117.078541 bytes=990017980 (includes compilation)
+warmup mixture 4 iterations seconds=0.012615 bytes=43951056
+warmup auto -> mixture 4 iterations seconds=0.009973 bytes=43950960
+
+mode     resolved iterations seconds  bytes        RW acceptance  theta                                                    sigma                  diag(Omega)
+online   online   100        0.186326 927412432    0.2923         [1.637479477393038,0.15274695062178056,0.3646861276605956]  [-0.5493299813959418]  [0.08622685500665254,0.020277765372340755]
+online   online   200        0.369166 1881758432   0.2915         [1.6421997979943064,0.15152401846188612,0.3216479728888793]  [-0.5638869482692093]  [0.0787335164683007,0.020308688196280424]
+mixture  mixture  100        1.706383 6460013376   0.2923         [1.637479477393038,0.15274695062178056,0.3646772754846718]  [-0.5475762161381359]  [0.08622685500665254,0.020277765372340755]
+mixture  mixture  200        6.068752 23346471872  0.2914         [1.6425973705803902,0.15122387358703515,0.322274994449923]   [-0.5686201309424247]  [0.07921646002011,0.02048191173548545]
+
+The two warm runs agree on allocations and fitted coordinates but differ in
+wall time on the shared host. In the repeat, online/mixture warm time ratios
+were 1:9.2 at 100 iterations and 1:16.4 at 200 iterations. Neither run tests
+long-run estimator accuracy or convergence.

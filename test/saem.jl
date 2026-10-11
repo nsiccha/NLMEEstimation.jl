@@ -98,9 +98,16 @@ end
     model = JointView(LinearSAEM(y); backend = RUNTIME_REVERSE, hessian_backend = nothing)
     result = saem(model, [0.0], [log(0.4)], [log(0.5)]; rng = MersenneTwister(23),
         options = SAEMOptions(iterations = 8, burnin = 3, mcmc_burnin = 2,
-            numeric_maxiter = 2, mstep_interval = 2))
+            numeric_maxiter = 2, mstep_interval = 2, numeric_mstep = :online))
     @test all(isfinite, (result.theta..., result.sigma..., result.omega...))
     @test model.calls[] > 0
+    @test result.numeric_mstep == :online
+    historical = saem(model, [0.0], [log(0.4)], [log(0.5)];
+        rng = MersenneTwister(23),
+        options = SAEMOptions(iterations = 8, burnin = 3, mcmc_burnin = 2,
+            numeric_maxiter = 2, mstep_interval = 2, numeric_mstep = :mixture))
+    @test all(isfinite, (historical.theta..., historical.sigma..., historical.omega...))
+    @test historical.numeric_mstep == :mixture
 end
 
 @testset "SAEM Gaussian M-step" begin
@@ -111,6 +118,37 @@ end
         [ones(1, 1), ones(1, 1)], mean_phi, second_phi, 1e-8)
     @test θ ≈ [2.0]
     @test Ω ≈ ones(1, 1)
+end
+
+@testset "SAEM online numerical M-step" begin
+    model = LinearSAEM([[0.2, 0.5], [1.0, 1.3]])
+    θ = [0.6]
+    σ = [log(0.5)]
+    Φ = reshape([0.1, -0.2], 1, 2)
+    bank = Matrix{Float64}[]
+    weights = Float64[]
+    NE._saem_record!(Val(:online), bank, weights, Φ, 0.25)
+    @test length(bank) == 1
+    @test weights == [1.0]
+    θnext, σnext = NE._saem_numeric_update(Val(:online), model, 1:2,
+        θ, σ, [2], [1], [ones(1, 1), ones(1, 1)], bank, weights, 25, 0.25)
+    residuals = [0.2 - 0.1, 0.5 - 0.1, 1.0 + 0.2, 1.3 + 0.2]
+    optimum = log(sqrt(sum(abs2, residuals) / length(residuals)))
+    @test θnext == θ
+    @test σnext[1] ≈ 0.75σ[1] + 0.25optimum atol=1e-5
+    NE._saem_record!(Val(:online), bank, weights, Φ .+ 1, 0.1)
+    @test length(bank) == 1
+    @test bank[1] ≈ Φ .+ 1
+
+    historical = Matrix{Float64}[]
+    historical_weights = Float64[]
+    NE._saem_record!(Val(:mixture), historical, historical_weights, Φ, 1.0)
+    NE._saem_record!(Val(:mixture), historical, historical_weights, Φ .+ 1, 0.25)
+    @test length(historical) == 2
+    @test historical_weights ≈ [0.75, 0.25]
+    @test NE._saem_mode_name(NE._saem_numeric_mode(:auto, [2], 1)) == :online
+    @test NE._saem_mode_name(NE._saem_numeric_mode(:auto, [1, 2], 1)) == :mixture
+    @test_throws ArgumentError NE._saem_check_options(SAEMOptions(numeric_mstep=:other))
 end
 
 @testset "SAEM Hessian warmup metric" begin

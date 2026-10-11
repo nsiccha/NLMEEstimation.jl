@@ -2,6 +2,7 @@
     SAEMOptions(; iterations=300, burnin=150, mcmc_burnin=20,
                  mh_rounds=1, rw_scale=0.5, adapt_iterations=150,
                  step_exponent=0.8, numeric_maxiter=12, mstep_interval=1,
+                 numeric_mstep=:auto,
                  omega_floor=1e-8)
 
 Settings for [`saem`](@ref). The first `burnin` stochastic-approximation
@@ -13,6 +14,17 @@ The random-walk scale adapts toward 0.3 acceptance for the first
 `adapt_iterations` sweeps and is then frozen. With `WarmupHMCNUTS`, each round
 makes one fixed-kernel NUTS transition per subject. `omega_floor` is a
 covariance eigenvalue floor in the M-step.
+`numeric_mstep=:auto` uses an online update for remaining σ coordinates when
+all θ coordinates have a closed-form `MuReferencing` update; otherwise it uses
+the historical running-mixture objective. `:online` explicitly applies the
+online update to every remaining θ and σ coordinate: it optimizes the current
+complete-data conditional likelihood, then moves toward that optimizer by
+the SA step size, retaining one sampled latent-effect matrix. Its use for a
+structural θ without a declared sufficient statistic is an approximation.
+`:mixture` optimizes the exact running conditional-density mixture and retains
+every sampled matrix. The default
+`mstep_interval=1` updates population parameters every SA iteration; a larger
+interval is an approximate, lower-frequency variant in `:online` mode.
 With `DualAveragingMALA`, each round makes one batched MALA proposal and
 updates a separate subject step size throughout the run. Set `mcmc_burnin=0`
 to omit a separate initial MCMC phase; `burnin` still controls the SA step sizes.
@@ -27,6 +39,7 @@ Base.@kwdef struct SAEMOptions
     step_exponent::Float64 = 0.8
     numeric_maxiter::Int = 12
     mstep_interval::Int = 1
+    numeric_mstep::Symbol = :auto
     omega_floor::Float64 = 1.0e-8
 end
 
@@ -270,7 +283,8 @@ random-walk acceptance fractions; `rw_scale` is the final proposal scale.
 These MH-only fields are `missing` for other kernels. `kernel` identifies the
 method and `nuts_divergences` counts its fixed-kernel transitions that diverged.
 For MALA, `mala_stepsizes` and `mala_acceptance` hold per-subject final values;
-`mala_adaptation_steps` counts updates per subject.
+`mala_adaptation_steps` counts updates per subject. `numeric_mstep` records
+the resolved numerical M-step mode (`:online` or `:mixture`).
 """
 struct SAEMResult{T, A, R}
     subjects::Vector{Int}
@@ -286,6 +300,7 @@ struct SAEMResult{T, A, R}
     mala_stepsizes::Union{Missing, Vector{Float64}}
     mala_acceptance::Union{Missing, Vector{Float64}}
     mala_adaptation_steps::Int
+    numeric_mstep::Symbol
 end
 
 struct _SAEMSubjectTarget{M, P}
@@ -393,6 +408,8 @@ function _saem_check_options(o::SAEMOptions)
     0.5 < o.step_exponent <= 1 || throw(ArgumentError("require 0.5 < step_exponent ≤ 1"))
     o.numeric_maxiter > 0 || throw(ArgumentError("numeric_maxiter must be positive"))
     o.mstep_interval > 0 || throw(ArgumentError("mstep_interval must be positive"))
+    o.numeric_mstep in (:auto, :online, :mixture) ||
+        throw(ArgumentError("numeric_mstep must be :auto, :online, or :mixture"))
     isfinite(o.omega_floor) && o.omega_floor > 0 || throw(ArgumentError("omega_floor must be finite and positive"))
     return nothing
 end
@@ -519,10 +536,8 @@ function _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_
     return θnew, Ωnew
 end
 
-# The conditional density need not have finite-dimensional sufficient statistics.
-# Retain the stochastic-approximation mixture of sampled latent effects so its
-# numerical M-step optimizes the same running Q function as the Gaussian step.
-function _saem_record!(bank, weights, Φ, γ)
+# The historical mixture optimizes the running conditional-density objective.
+function _saem_record!(::Val{:mixture}, bank, weights, Φ, γ)
     if γ == 1
         empty!(bank)
         empty!(weights)
@@ -533,6 +548,20 @@ function _saem_record!(bank, weights, Φ, γ)
     push!(weights, γ)
     return nothing
 end
+
+# Practical SAEM stores only the current latent draw. The optimizer itself is
+# updated stochastically when the M-step is due.
+function _saem_record!(::Val{:online}, bank, weights, Φ, γ)
+    empty!(bank)
+    empty!(weights)
+    push!(bank, copy(Φ))
+    push!(weights, 1.0)
+    return nothing
+end
+
+_saem_numeric_mode(mode::Symbol, free, ntheta) =
+    Val(mode === :auto ? (any(i -> i <= ntheta, free) ? :mixture : :online) : mode)
+_saem_mode_name(::Val{M}) where {M} = M
 
 function _saem_numeric_objective(z, model, subjects, θ, σ, free, indices, design, bank, weights)
     x = vcat(θ, σ)
@@ -631,6 +660,22 @@ function _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design, ban
     return x[1:length(θ)], x[length(θ)+1:end]
 end
 
+_saem_numeric_update(::Val{:mixture}, model, subjects, θ, σ, free, indices,
+    design, bank, weights, maxiter, γ) =
+    _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design,
+        bank, weights, maxiter)
+
+function _saem_numeric_update(::Val{:online}, model, subjects, θ, σ, free,
+        indices, design, bank, weights, maxiter, γ)
+    isempty(free) && return θ, σ
+    θstar, σstar = _saem_numeric_mstep(model, subjects, θ, σ, free, indices,
+        design, bank, weights, maxiter)
+    x = vcat(θ, σ)
+    xstar = vcat(θstar, σstar)
+    x[free] .+= γ .* (xstar[free] .- x[free])
+    return x[1:length(θ)], x[length(θ)+1:end]
+end
+
 """
     saem(model, θ0, σ0, ω0; rng=Random.default_rng(), subjects=nothing,
          η0=nothing, options=SAEMOptions(), kernel=StandardSAEMMH()) -> SAEMResult
@@ -639,9 +684,13 @@ Estimate population parameters using MCMC stochastic approximation. Subject
 chains persist across iterations. The Gaussian random-effect prior supplies a
 closed-form covariance M-step; [`MuReferencing`](@ref) also supplies the
 generalized-least-squares fixed-effect M-step. Remaining θ and σ coordinates
-use a first-order AD numerical M-step over the running conditional-density
-mixture. The mixture retains one latent-effect matrix per SA iteration, so
-memory and numerical M-step cost grow with `iterations`. `kernel` selects the
+use a first-order AD numerical M-step. By default, σ coordinates are updated
+online only when all structural θ coordinates have a `MuReferencing`
+sufficient-statistic update. Otherwise the historical running
+conditional-density objective is used and retains one latent-effect matrix
+per SA iteration. Set `numeric_mstep=:online` to force an online update for
+undeclared structural θ as a model-specific approximation.
+`SAEMResult.numeric_mstep` records the selected mode. `kernel` selects the
 standard lockstep MH proposals, batched continuously adapted MALA proposals,
 or per-subject in-memory WarmupHMC NUTS transitions.
 """
@@ -671,6 +720,7 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
         "SAEM initial conditional log densities must be finite and one per subject"))
     bank = Matrix{Float64}[]
     weights = Float64[]
+    numeric_mode = _saem_numeric_mode(options.numeric_mstep, free, layout.ntheta)
     mean_phi = zeros(neta(layout), length(ids))
     second_phi = zeros(neta(layout), neta(layout), length(ids))
     logscale = log(options.rw_scale)
@@ -718,14 +768,14 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
             γ = k <= options.burnin ? 1.0 : (k - options.burnin)^(-options.step_exponent)
             Φ = _saem_phi(H, θ, indices, design)
             _saem_moments!(mean_phi, second_phi, Φ, γ)
-            _saem_record!(bank, weights, Φ, γ)
+            _saem_record!(numeric_mode, bank, weights, Φ, γ)
             if k % options.mstep_interval == 0 || k == options.iterations
                 θ_before, σ_before = θ, σ
                 θ, Ω = _saem_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
                     design, mean_phi, second_phi, options.omega_floor)
                 ω = omega_parameters(layout, Ω)
-                θ, σ = _saem_numeric_mstep(model, ids, θ, σ, free, indices,
-                    design, bank, weights, options.numeric_maxiter)
+                θ, σ = _saem_numeric_update(numeric_mode, model, ids, θ, σ,
+                    free, indices, design, bank, weights, options.numeric_maxiter, γ)
                 if mala_cache !== nothing && mala_cache.valid
                     if θ == θ_before && σ == σ_before
                         _saem_mala_refresh_prior!(mala_cache, H, prior,
@@ -750,7 +800,8 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
         ndivergent,
         is_mala ? exp.([s.log_stepsize for s in mala_states]) : missing,
         is_mala ? [s.accepted / s.count for s in mala_states] : missing,
-        is_mala ? first(mala_states).count : 0)
+        is_mala ? first(mala_states).count : 0,
+        _saem_mode_name(numeric_mode))
 end
 
 function _saem_remove_nuts_tempdir(root::AbstractString)

@@ -11,5 +11,7 @@
 
 Empirical Bayes is a conditional calculation at supplied population parameters. FOCE(I) and SAEM estimate population parameters. Their objectives and approximations differ, so compare estimates and predictions on the same data rather than treating objective values as interchangeable. Full joint MCMC can provide a posterior comparison but is not an NLMEEstimation estimator.
 
+SAEM updates the population parameters every iteration by default. Its Gaussian random-effect mean and covariance use running sufficient statistics. For other coordinates, `SAEMOptions(numeric_mstep=:auto)` chooses a bounded-memory online optimizer update when all fitted structural `θ` coordinates have a declared `MuReferencing` update; otherwise it preserves the historical running-mixture objective. `SAEMResult.numeric_mstep` reports the selected mode. Explicit `:online` for undeclared structural `θ` is a model-specific approximation; the [BRM benchmark](saem-benchmarks.md) measures that case separately.
+
 See the [PK comparison](pk-comparison.md) for one reproducible model, dataset, seeds, and all method calls.
 The [SAEM kernel benchmarks](saem-benchmarks.md) compare MH, NUTS, and an experimental batched MALA trial, including their implementation and measurement scripts.
