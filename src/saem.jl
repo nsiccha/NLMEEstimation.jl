@@ -134,10 +134,9 @@ function _saem_mala_adapt!(state::_MALADAState, k::DualAveragingMALA, alpha)
 end
 
 function _saem_mala_logratio(f0, f1, η0, η1, g0, g1, L, stepsize)
-    M = L * L'
     half_e2 = 0.5 * stepsize^2
-    forward = L \ (η1 - η0 - half_e2 * (M * g0))
-    reverse = L \ (η0 - η1 - half_e2 * (M * g1))
+    forward = L \ (η1 - η0 - half_e2 * (L * (L' * g0)))
+    reverse = L \ (η0 - η1 - half_e2 * (L * (L' * g1)))
     return f1 - f0 + (sum(abs2, forward) - sum(abs2, reverse)) /
         (2 * stepsize^2)
 end
@@ -209,9 +208,9 @@ function _saem_mala_round!(rng, kernel::DualAveragingMALA, states,
     proposal = similar(H)
     for j in 1:n
         L = metrics === nothing ? prior.cholesky_factor : metrics[j]
-        M = L * L'
         e = exp(states[j].log_stepsize)
-        proposal[:, j] = view(H, :, j) + 0.5 * e^2 * (M * view(G0, :, j)) +
+        proposal[:, j] = view(H, :, j) + 0.5 * e^2 *
+            (L * (L' * view(G0, :, j))) +
             e * (L * view(noise, :, j))
     end
     f1, G1, rejected = _saem_mala_proposal_gradients(model, subjects, θ, σ,
