@@ -43,6 +43,21 @@ struct SAEMResult{T}
     rw_scale::Float64
 end
 
+# Initial covariance for a per-subject HMC warmup. The Hessian is taken only in
+# η_i; an indefinite local negative Hessian is regularized before inversion.
+function _saem_hessian_metric(model, i, θ, σ, prior::NormalREPrior, η;
+        curvature_floor::Real = 1e-4)
+    isfinite(curvature_floor) && curvature_floor > 0 || throw(ArgumentError(
+        "curvature_floor must be finite and positive"))
+    provides_eta_hessian(model) ||
+        return Matrix(prior.cholesky_factor * prior.cholesky_factor')
+    _, _, _, H = complete_data_loglikelihood_gradient_and_hessian(
+        model, i, θ, σ, prior, η)
+    eig = eigen(Symmetric(-Matrix(H)))
+    scale = eig.vectors * Diagonal(inv.(max.(eig.values, curvature_floor))) * eig.vectors'
+    return Matrix(Symmetric(scale))
+end
+
 function _saem_check_options(o::SAEMOptions)
     o.iterations > 0 || throw(ArgumentError("iterations must be positive"))
     0 <= o.burnin < o.iterations || throw(ArgumentError("require 0 ≤ burnin < iterations"))

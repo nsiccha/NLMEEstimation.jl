@@ -113,6 +113,17 @@ end
     @test Ω ≈ ones(1, 1)
 end
 
+@testset "SAEM Hessian warmup metric" begin
+    model = LinearSAEM([[1.0, 2.0]])
+    prior = re_prior(model, [log(0.5)])
+    scale = NE._saem_hessian_metric(model, 1, [0.0], [log(0.5)], prior, [0.0])
+    @test size(scale) == (1, 1)
+    @test scale[1, 1] ≈ 1 / (2 / 0.5^2 + 1 / 0.5^2)
+    no_hessian = FlatBatchedSAEM(1, Ref(0))
+    @test NE._saem_hessian_metric(no_hessian, 1, Float64[], Float64[],
+        re_prior(no_hessian, [log(0.5)]), [0.0]) ≈ fill(0.25, 1, 1)
+end
+
 @testset "SAEM linear Gaussian recovery" begin
     rng = MersenneTwister(44)
     y = [[0.7 + 0.6randn(rng) + 0.2randn(rng) for _ in 1:4] for _ in 1:18]
