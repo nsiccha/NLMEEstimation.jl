@@ -13,6 +13,7 @@ makedocs(
         "Model protocol" => "protocol.md",
         "Estimators" => "estimators.md",
         "PK comparison" => "pk-comparison.md",
+        "SAEM benchmarks" => "saem-benchmarks.md",
         "API" => "api.md",
     ],
     checkdocs = :none,

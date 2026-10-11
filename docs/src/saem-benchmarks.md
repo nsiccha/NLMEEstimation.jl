@@ -22,10 +22,10 @@ subjects are sampled at fixed starting population parameters
 `σ = [log(0.7)]`, and
 `Ω = diag(0.6², 0.26², 0.14²)`. Each subject's MCMC target is
 
-$$
+```math
 p(\eta_i \mid y_i, \theta, \sigma, \Omega) \propto
 p(y_i \mid \theta, \sigma, \eta_i)\,\mathcal N(\eta_i; 0, \Omega).
-$$
+```
 
 Measurements ran on a shared Linux x86-64 host with an AMD Ryzen 9 9950X
 (16 cores, 32 threads), Julia 1.10.12, one BLAS thread, Enzyme 0.13.215,
@@ -228,7 +228,7 @@ reported divergence counts come from sampler results, not those logs.
 ## Reproduce
 
 The source is
-[`bench/saem_kernel_tuning.jl`](https://github.com/nsiccha/NLMEEstimation.jl/blob/767effa54dfeb45bf636a5182d51f4648d3d3066/bench/saem_kernel_tuning.jl)
+[`bench/saem_kernel_tuning.jl`](https://github.com/nsiccha/NLMEEstimation.jl/blob/d733d33b9f34e094efa2e669ada4e0c2baa2d7f9/bench/saem_kernel_tuning.jl)
 and
 [`bench/saem_kernel_final.jl`](https://github.com/nsiccha/NLMEEstimation.jl/blob/767effa54dfeb45bf636a5182d51f4648d3d3066/bench/saem_kernel_final.jl).
 From a clone of NLMEEstimation.jl, develop the package and the two

@@ -11,3 +11,4 @@
 Empirical Bayes is a conditional calculation at supplied population parameters. FOCE(I) and SAEM estimate population parameters. Their objectives and approximations differ, so compare estimates and predictions on the same data rather than treating objective values as interchangeable. Full joint MCMC can provide a posterior comparison but is not an NLMEEstimation estimator.
 
 See the [PK comparison](pk-comparison.md) for one reproducible model, dataset, seeds, and all method calls.
+The [SAEM kernel benchmarks](saem-benchmarks.md) compare tuned MH and per-subject NUTS transitions, including their actual implementation and measurement scripts.
