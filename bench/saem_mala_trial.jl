@@ -73,13 +73,15 @@ function fixed_trial(method, cfg, seed; steps=400)
         acceptance = mean(s.accepted / s.count for s in states)
         final_steps = [exp(s.log_stepsize) for s in states]
     else
-        ℓ = NE.conditional_loglikelihoods(model, ids, Float64[], Float64[], H)
         accepted = 0
-        elapsed = @elapsed for _ in 1:steps
-            _, ar = NE._saem_mh_round!(rng, model, ids, Float64[],
-                Float64[], prior, H, ℓ, cfg.scale)
-            accepted += ar
-            sumH .+= H
+        elapsed = @elapsed begin
+            ℓ = NE.conditional_loglikelihoods(model, ids, Float64[], Float64[], H)
+            for _ in 1:steps
+                _, ar = NE._saem_mh_round!(rng, model, ids, Float64[],
+                    Float64[], prior, H, ℓ, cfg.scale)
+                accepted += ar
+                sumH .+= H
+            end
         end
         acceptance = accepted / (steps * 6)
         final_steps = fill(cfg.scale, 6)
