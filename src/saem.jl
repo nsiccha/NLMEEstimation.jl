@@ -40,6 +40,7 @@ struct StandardSAEMMH <: AbstractSAEMKernel end
 """
     WarmupHMCNUTS(; warmup_draws=20, warmup_evaluations=100,
                    stepsize_adaptation_limit=20, max_tree_depth=8,
+                   target_acceptance_rate=0.8,
                    curvature_floor=1e-4, metric=:diagonal)
 
 Warm up a separate NUTS chain for each subject with WarmupHMC. Its initial
@@ -49,12 +50,15 @@ available, and otherwise from Ω. Subsequent SAEM rounds use fixed-kernel
 stream files are temporary and removed when `saem` returns. The default
 `:diagonal` metric uses Hessian diagonal curvatures; `metric=:dense` requests
 the inverse regularized Hessian as a full initial covariance.
+`target_acceptance_rate` controls WarmupHMC's step-size adaptation during
+the one-time subject warmup; it must be strictly between zero and one.
 """
 Base.@kwdef struct WarmupHMCNUTS <: AbstractSAEMKernel
     warmup_draws::Int = 20
     warmup_evaluations::Int = 100
     stepsize_adaptation_limit::Int = 20
     max_tree_depth::Int = 8
+    target_acceptance_rate::Float64 = 0.8
     curvature_floor::Float64 = 1e-4
     metric::Symbol = :diagonal
 end
@@ -109,6 +113,8 @@ function _saem_check_nuts(o::WarmupHMCNUTS)
     o.stepsize_adaptation_limit > 0 || throw(ArgumentError(
         "stepsize_adaptation_limit must be positive"))
     o.max_tree_depth > 0 || throw(ArgumentError("max_tree_depth must be positive"))
+    isfinite(o.target_acceptance_rate) && 0 < o.target_acceptance_rate < 1 ||
+        throw(ArgumentError("target_acceptance_rate must be strictly between 0 and 1"))
     isfinite(o.curvature_floor) && o.curvature_floor > 0 || throw(ArgumentError(
         "curvature_floor must be finite and positive"))
     o.metric in (:diagonal, :dense) || throw(ArgumentError(
@@ -138,6 +144,7 @@ function _saem_nuts_warmup!(rng, kernel::WarmupHMCNUTS,
             recording_target=kernel.warmup_draws,
             stepsize_adaptation_limit=kernel.stepsize_adaptation_limit,
             max_tree_depth=kernel.max_tree_depth,
+            target_acceptance_rate=kernel.target_acceptance_rate,
             nonlinear_adapt=false,
             monitor_ess=false)
         push!(checkpoints, joinpath(warm_dir, "cp_latest.jls"))
