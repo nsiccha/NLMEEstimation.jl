@@ -6,7 +6,7 @@ A model is any Julia value that implements a small protocol: a conditional
 log-density of the observations given the random effects η, with its derivatives in
 η, and a parameter layout. The package owns the random-effect prior
 `η_i ~ N(0, Ω)` and builds estimators on top of the protocol. Posthoc / empirical
-Bayes and FOCE(I) population estimation are implemented; SAEM is next.
+Empirical Bayes, FOCE(I), and SAEM population estimation are implemented.
 
 Derivatives come from automatic differentiation. A model either implements its
 derivative methods itself, or declares an
@@ -28,10 +28,12 @@ A model declares how it evaluates, by setting `evaluation_style`:
   `conditional_loglikelihoods(model, subjects, θ, σ, H)`, a joint program that
   evaluates many subjects in one pass. `H` holds one column of η per subject.
 
-Estimators always call the batched entry points. Each style derives the other
-style's methods. A batched model's η gradients come from one AD pass over the
-batch's summed log-density, which works because subjects are conditionally
-independent.
+Estimator likelihood queries call the batched entry points. Each style derives
+the other style's methods. A batched model's η gradients come from one AD pass
+over the batch's summed log-density, which works because subjects are
+conditionally independent. SAEM's numerical population M-step uses the
+per-subject population-gradient method for per-subject models and one batched
+AD pass for batched models.
 
 | Function | Status | Meaning |
 |---|---|---|
@@ -107,3 +109,48 @@ The outer BOBYQA search uses no gradients. For a joint-program model, implement
 the three batched Gaussian methods in the table so one query can return the
 moments and η Jacobians of all subjects. `FOCEOptions(interaction = false)`
 omits the variance-Jacobian term for FOCE without interaction.
+
+## SAEM population estimation
+
+```julia
+using Random
+
+saem_fit = saem(model, θ, σ, ω; rng = Xoshiro(2026),
+    options = SAEMOptions(iterations = 300, burnin = 150))
+saem_fit.theta, saem_fit.sigma, saem_fit.omega_matrix
+saem_fit.eta                 # final subject-chain states
+saem_fit.acceptance          # prior and random-walk MH acceptance fractions
+```
+
+For per-subject NUTS transitions, select `WarmupHMCNUTS()`:
+
+```julia
+nuts_fit = saem(model, θ, σ, ω; rng = Xoshiro(2026),
+    options = SAEMOptions(iterations = 300, burnin = 150),
+    kernel = WarmupHMCNUTS())
+nuts_fit.kernel, nuts_fit.nuts_divergences
+```
+
+WarmupHMC warms up each subject once, initialized with a covariance derived
+from the local η Hessian when the model provides one. The default uses its
+diagonal; `WarmupHMCNUTS(metric = :dense)` passes the inverse regularized
+Hessian. SAEM then advances each
+subject by fixed-kernel NUTS transitions as the population parameters change.
+The warmup and stream files are temporary for the duration of the fit. NUTS
+uses `Xoshiro` streams internally, seeded from the supplied RNG; its MH-only
+`acceptance` and `rw_scale` fields are `missing`. See
+[`bench/RESULTS.md`](bench/RESULTS.md) for MH/NUTS sampling and fit benchmarks.
+
+SAEM keeps one η chain per subject. Each MH round evaluates prior-independence
+and random-walk proposals in two model batches, with separate accept/reject
+decisions per subject. The random-walk scale adapts for a finite initial period.
+After an optional MCMC burn-in, stochastic approximation averages latent-effect
+statistics with unit steps during exploration and decreasing steps thereafter.
+
+With `mu_referencing(model)`, the M-step updates those θ coordinates by
+generalized least squares and Ω within `eta_blocks`. Other θ coordinates and σ
+use first-order AD. The numerical M-step retains the weighted history of latent
+samples because an arbitrary conditional model need not have finite sufficient
+statistics. Its memory and evaluation cost grow with the number of iterations;
+`mstep_interval` can reduce evaluation frequency. SAEM estimates depend on the
+RNG stream and run length, so assess recovery across starts for a new model.

@@ -21,6 +21,7 @@ Estimators:
   parameters.
 - [`focei`](@ref): population estimation using first-order conditional curvature
   and a derivative-free outer optimizer.
+- [`saem`](@ref): population estimation by MCMC stochastic approximation.
 """
 module NLMEEstimation
 
@@ -29,6 +30,8 @@ using Random
 import ADTypes
 import DifferentiationInterface as DI
 import NLopt
+import LogDensityProblems as LDP
+import WarmupHMC
 
 export NLMELayout, neta, nomega, omega_cholesky, omega_matrix, omega_parameters
 export nsubjects, nlme_layout, EvaluationStyle, PerSubjectEvaluation, BatchedEvaluation,
@@ -45,6 +48,7 @@ export check_protocol, ProtocolViolation
 export empirical_bayes, posthoc, EBEMethod, NewtonEBE, QuasiNewtonEBE, default_ebe_method,
     EBEOptions, EBEResult, EBEConvergenceError, ebe_covariances
 export focei, focei_evaluate, FOCEOptions, FOCEResult, FOCEEvaluation
+export saem, SAEMOptions, SAEMResult, StandardSAEMMH, WarmupHMCNUTS
 
 include("layout.jl")
 include("protocol.jl")
@@ -52,6 +56,7 @@ include("re_prior.jl")
 include("conformance.jl")
 include("empirical_bayes.jl")
 include("focei.jl")
+include("saem.jl")
 include("ReferenceModels.jl")
 
 end
