@@ -61,10 +61,12 @@ if abspath(PROGRAM_FILE) == @__FILE__
         end
         mh_best = argmin(x -> x.s.rmse^2 * x.s.seconds, mh_tune)
         mala_best = argmin(x -> x.s.rmse^2 * x.s.seconds, mala_tune)
+        mala_hessian_best = argmin(x -> x.s.rmse^2 * x.s.seconds,
+            filter(x -> x.cfg.metric == :hessian, mala_tune))
         mala_prior_best = argmin(x -> x.s.rmse^2 * x.s.seconds,
             filter(x -> x.cfg.metric == :prior, mala_tune))
-        println("selected_scenario=$scenario dimension=$d MH=$(mh_best.cfg) MALA=$(mala_best.cfg) MALA_prior=$(mala_prior_best.cfg)")
-        for (method, cfg) in ((:MH, mh_best.cfg), (:MALA, mala_best.cfg),
+        println("selected_scenario=$scenario dimension=$d MH=$(mh_best.cfg) MALA_overall=$(mala_best.cfg) MALA_hessian=$(mala_hessian_best.cfg) MALA_prior=$(mala_prior_best.cfg)")
+        for (method, cfg) in ((:MH, mh_best.cfg), (:MALA, mala_hessian_best.cfg),
                 (:MALA, mala_prior_best.cfg))
             print_row("heldout400", scenario, d, method, cfg,
                 summarize_dimension(method, cfg, 401:416; fixture))
