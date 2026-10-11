@@ -22,8 +22,8 @@ end
 
 function configs(d)
     mh = [(scale=s * sqrt(2 / d),) for s in (0.3, 0.5, 0.8, 1.2, 1.8)]
-    mala = [(metric=:hessian, eps=e, target=a)
-        for e in (0.05, 0.1), a in (0.45, 0.574, 0.7)]
+    mala = vec([(metric=:hessian, eps=e, target=a)
+        for e in (0.05, 0.1), a in (0.45, 0.574, 0.7)])
     append!(mala, [(metric=:prior, eps=0.05, target=0.574),
         (metric=:prior, eps=0.1, target=0.574)])
     return mh, mala
