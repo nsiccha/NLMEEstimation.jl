@@ -1,0 +1,23 @@
+Julia=1.10.12; retained_draws=1600; selection_seeds=[2060, 2061, 2062, 2063, 2064, 2065, 2066, 2067, 2068, 2069]; qualification_seeds=[2080, 2081, 2082, 2083, 2084]; final_seeds=[2090, 2091, 2092, 2093, 2094, 2095, 2096, 2097, 2098, 2099]
+phase	kernel	config	median_ESS_per_second	median_seconds	median_ESS	rw_acceptance	final_scale	divergences
+selection	MH	(scale = 0.35, adapt = false, target = 0.3)	11883.6	0.010027	117.9	0.363	0.35	0
+selection	MH	(scale = 0.45, adapt = false, target = 0.3)	12901.9	0.009942	130.4	0.27	0.45	0
+selection	MH	(scale = 0.5, adapt = true, target = 0.2)	12189.2	0.010027	123.9	0.198	0.554	0
+selection	MH	(scale = 0.5, adapt = true, target = 0.3)	12667.7	0.009889	130.0	0.302	0.413	0
+selection	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.7)	20335.7	0.067958	1551.6	NaN	NaN	24
+qualification	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.7)	0.008647	0	true
+selection	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.7)	21925.6	0.067822	1599.3	NaN	NaN	0
+qualification	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.7)	0.008675	0	true
+selection	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.8)	21798.7	0.067566	1553.0	NaN	NaN	0
+qualification	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.8)	0.008791	14	true
+selection	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.8)	20768.7	0.070153	1479.8	NaN	NaN	0
+qualification	NUTS	(metric = :dense, draws = 8, evaluations = 100, depth = 8, acceptance = 0.8)	0.008702	55	true
+selection	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.8)	15583.8	0.078326	1283.1	NaN	NaN	0
+qualification	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 4, acceptance = 0.8)	0.014012	0	true
+selection	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 8, acceptance = 0.8)	15907.5	0.078454	1280.8	NaN	NaN	0
+qualification	NUTS	(metric = :dense, draws = 20, evaluations = 50, depth = 8, acceptance = 0.8)	0.011571	0	true
+selected_MH=(scale = 0.45, adapt = false, target = 0.3); selected_NUTS=(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.7)
+final	MH	(scale = 0.45, adapt = false, target = 0.3)	12267.9	0.009917	126.3	0.269	0.45	0
+final	NUTS	(metric = :dense, draws = 8, evaluations = 50, depth = 8, acceptance = 0.7)	20360.2	0.062779	1439.2	NaN	NaN	0
+fit	MH	40 SAEM iterations + 5 MCMC burn-in	0.003086	0	true
+fit	NUTS	40 SAEM iterations + 5 MCMC burn-in	0.009246	28	true

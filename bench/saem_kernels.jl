@@ -62,14 +62,13 @@ function nuts_draws(rng, model, θ, σ, ω;
         ids=collect(1:nsubjects(model)), n_draws=800, init_metric=:hessian,
         warmup_draws=20, warmup_evaluations=100,
         stepsize_adaptation_limit=20, max_tree_depth=8,
-        target_acceptance_rate=0.8, probe_steps=20)
+        target_acceptance_rate=0.8)
     init_metric in (:hessian, :dense, :prior) ||
         throw(ArgumentError("invalid init_metric"))
     prior = re_prior(model, ω)
     m, n = neta(nlme_layout(model)), length(ids)
     draws = Array{Float64}(undef, m, n, n_draws)
     divergences = 0
-    stream_seconds = 0.0
     mktempdir() do root
         for (k, i) in enumerate(ids)
             target = NE._saem_target(model, i, θ, σ, prior)
@@ -88,23 +87,17 @@ function nuts_draws(rng, model, θ, σ, ω;
                 target_acceptance_rate=target_acceptance_rate,
                 nonlinear_adapt=false, monitor_ess=false)
             checkpoint = joinpath(warm_dir, "cp_latest.jls")
-            stream = joinpath(root, "subject_$(k).stream")
-            result = NE.WarmupHMC.stream_mcmc(checkpoint, target;
-                path=stream, n_draws=n_draws)
-            draws[:, k, :] = result.draws
-            divergences += result.n_divergent
-            # A separate measure of the repeated one-transition file reopen
-            # cost used by changing-target SAEM; same fixed target here.
-            stream_seconds += @elapsed for step in 1:probe_steps
-                NE.WarmupHMC.stream_mcmc(checkpoint, target;
-                    path=stream, n_draws=n_draws + step)
+            state = NE.WarmupHMC.FixedKernelNUTSState(checkpoint;
+                max_tree_depth=max_tree_depth)
+            for draw in 1:n_draws
+                step = NE.WarmupHMC.fixed_kernel_nuts_step(state, target)
+                state = step.state
+                draws[:, k, draw] = state.position
+                divergences += step.divergent
             end
         end
     end
-    return (draws=draws, divergences=divergences,
-        stream_seconds=stream_seconds,
-        stream_ms_per_transition=probe_steps > 0 ?
-            1000 * stream_seconds / (probe_steps * n) : NaN)
+    return (draws=draws, divergences=divergences)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
@@ -120,19 +113,18 @@ if abspath(PROGRAM_FILE) == @__FILE__
     mh_prior = median([t.value.acceptance.prior for t in mh_trials])
     mh_rw = median([t.value.acceptance.random_walk for t in mh_trials])
     println("subjects=$(length(ids)); retained_draws=800; replicates=3; Julia=$(VERSION)")
-    println("kernel\tseconds\tmedian_ess\tmedian_ess_per_second\tprior_acceptance\trw_acceptance\tdivergences\tstream_ms_per_transition")
+    println("kernel\tseconds\tmedian_ess\tmedian_ess_per_second\tprior_acceptance\trw_acceptance\tdivergences")
     println(join(("standard_MH", mh_time, mh_ess, mh_ess / mh_time,
-        mh_prior, mh_rw, 0, NaN), '\t'))
+        mh_prior, mh_rw, 0), '\t'))
     nuts_draws(MersenneTwister(1), model, θ_THEOPH, σ_THEOPH, ω;
         ids=ids[1:1], n_draws=5) # compile
     for (label, metric) in (("NUTS_Hessian", :hessian), ("NUTS_prior", :prior))
         nuts_trials = [@timed nuts_draws(MersenneTwister(seed), model,
             θ_THEOPH, σ_THEOPH, ω; ids, init_metric=metric) for seed in 2026:2028]
-        nuts_time = median([t.time - t.value.stream_seconds for t in nuts_trials])
+        nuts_time = median([t.time for t in nuts_trials])
         nuts_ess = median([summarize_draws(t.value.draws) for t in nuts_trials])
         divergences = sum(t.value.divergences for t in nuts_trials)
-        stream_ms = median([t.value.stream_ms_per_transition for t in nuts_trials])
         println(join((label, nuts_time, nuts_ess, nuts_ess / nuts_time,
-            NaN, NaN, divergences, stream_ms), '\t'))
+            NaN, NaN, divergences), '\t'))
     end
 end

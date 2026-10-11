@@ -1,49 +1,25 @@
 # SAEM subject-kernel benchmarks
 
-This page compares tuned **per-subject** Metropolis–Hastings (MH) and
-WarmupHMC NUTS kernels in `NLMEEstimation.jl`. Each of six subjects has a
-three-dimensional random effect `ηᵢ`. Neither kernel proposes an
-18-dimensional state for all subjects: MH evaluates six independent proposals
-in a batch, and NUTS advances six separate chains.
+This page compares tuned **per-subject** Metropolis–Hastings (MH) and WarmupHMC NUTS kernels. Six subjects each have a three-dimensional random effect `ηᵢ`. MH batches six independent proposals per model query; NUTS advances six separate three-dimensional chains. Neither proposes a joint 18-dimensional state.
 
-The final comparison uses only configurations selected by the procedure below.
-“Best” means the best observed median effective sample size (ESS) per elapsed
-second in the tested grid, subject to zero observed NUTS divergences in both
-fixed-target and changing-target qualification runs. It is not a global
-optimum or an estimator-accuracy claim.
+With in-memory NUTS transitions, the selected NUTS setting delivered **15,081 median ESS/s**, versus **12,376 median ESS/s** for the selected MH setting on untouched fixed-target seeds. A separate 40-iteration SAEM fit took 0.012675 s with NUTS and 0.003113 s with MH. ESS/s describes a stationary target; the short fit measures changing-target cost and does not establish estimator accuracy.
 
-## Model, target, and environment
+“Best” means the best observed ESS/s in the tested grid, subject to zero observed NUTS divergences in fixed-target and changing-target screens. It is not a global optimum or a guarantee of zero future divergences.
 
-The [Theoph fixture](https://github.com/nsiccha/NLMEEstimation.jl/blob/767effa54dfeb45bf636a5182d51f4648d3d3066/test/common.jl)
-uses the public theophylline concentration data, an oral one-compartment
-model, additive observation error, and Enzyme derivatives. The first six
-subjects are sampled at fixed starting population parameters
-`θ = [log(1.57), log(2.75), log(31.5), 0]`,
-`σ = [log(0.7)]`, and
-`Ω = diag(0.6², 0.26², 0.14²)`. Each subject's MCMC target is
+## Model and environment
+
+The [Theoph fixture](https://github.com/nsiccha/NLMEEstimation.jl/blob/7502db02681b184cc153be41f99fb548cf166f02/test/common.jl) uses public theophylline concentrations, an oral one-compartment model, additive observation error, and Enzyme derivatives. The first six subjects start at `θ = [log(1.57), log(2.75), log(31.5), 0]`, `σ = [log(0.7)]`, and `Ω = diag(0.6², 0.26², 0.14²)`. At fixed population parameters, each subject has target
 
 ```math
 p(\eta_i \mid y_i, \theta, \sigma, \Omega) \propto
 p(y_i \mid \theta, \sigma, \eta_i)\,\mathcal N(\eta_i; 0, \Omega).
 ```
 
-Measurements ran on a shared Linux x86-64 host with an AMD Ryzen 9 9950X
-(16 cores, 32 threads), Julia 1.10.12, one BLAS thread, Enzyme 0.13.215,
-[NLMEEstimation benchmark revision `767effa`](https://github.com/nsiccha/NLMEEstimation.jl/commit/767effa54dfeb45bf636a5182d51f4648d3d3066),
-WarmupHMC `6cd665de7591dc3024893106f64e72f9e90ad49c`
-(version 0.2.1), and Treebars
-`7426b9c8dc914d767c28ff22f1f75631f3afc41d`.
-The host is shared, so short wall-clock timings can vary with other work.
+Measurements ran on a shared Linux x86-64 AMD Ryzen 9 9950X host (16 cores, 32 threads), Julia 1.10.12, one BLAS thread, Enzyme 0.13.215, [NLMEEstimation `f82ea8d`](https://github.com/nsiccha/NLMEEstimation.jl/commit/f82ea8d0115e4f5a9fc32f3136708c0b57d8964e), WarmupHMC [`d3d55e0`](https://github.com/nsiccha/WarmupHMC.jl/commit/d3d55e048aeafe4516daba0dc5f9e8550c8f8e9e) (version 0.2.1), and Treebars [`7426b9c`](https://github.com/nsiccha/Treebars.jl/commit/7426b9c8dc914d767c28ff22f1f75631f3afc41d). Timings can vary on a shared host; the two final-script runs below illustrate this.
 
-## What the two kernels do
+## What executes
 
-The real [MH transition](https://github.com/nsiccha/NLMEEstimation.jl/blob/767effa54dfeb45bf636a5182d51f4648d3d3066/src/saem.jl)
-first proposes from each subject's Gaussian prior. The prior proposal density
-cancels from its acceptance ratio. It then proposes a covariance-scaled
-random walk and uses the complete-data log density. The package makes each
-likelihood query for all requested subjects in one batch; acceptance remains
-subject by subject. These are the proposal and acceptance lines from the
-transition; the full source also validates model outputs:
+The [MH transition](https://github.com/nsiccha/NLMEEstimation.jl/blob/6c0010311a30b694d83cbda1852cdcd3d18a9aaa/src/saem.jl) uses a prior proposal and then a covariance-scaled random walk. Prior proposal density cancels from its acceptance ratio; the random-walk ratio includes the Gaussian prior. Likelihood queries are batched, with a separate acceptance decision per subject. These are its essential operations:
 
 ```julia
 proposal = Matrix(prior.cholesky_factor * randn(rng, m, n))
@@ -54,7 +30,6 @@ for k in 1:n
         ℓ[k] = proposed_ℓ[k]
     end
 end
-
 proposal = H + scale * (prior.cholesky_factor * randn(rng, m, n))
 proposed_ℓ = conditional_loglikelihoods(model, subjects, θ, σ, proposal)
 for k in 1:n
@@ -68,13 +43,7 @@ for k in 1:n
 end
 ```
 
-The real [NUTS target and transition](https://github.com/nsiccha/NLMEEstimation.jl/blob/767effa54dfeb45bf636a5182d51f4648d3d3066/src/saem.jl)
-combine the model's conditional η gradient with the analytic Gaussian-prior
-gradient. Each subject warms once from an initial covariance obtained by
-inverting its local negative log-posterior Hessian. The selected setting uses
-the full three-by-three covariance; the default public kernel uses its
-diagonal. A checkpoint-seeded `stream_mcmc` call resumes the subject under
-the *current* SAEM target:
+The [NUTS integration](https://github.com/nsiccha/NLMEEstimation.jl/blob/6c0010311a30b694d83cbda1852cdcd3d18a9aaa/src/saem.jl) adds the analytic Gaussian-prior gradient to the model's conditional η gradient. Per subject, it inverts a regularized local negative log-posterior Hessian for the initial covariance, adapts once, and loads a fixed-kernel state. The selected setting uses the full three-by-three covariance; the public default uses its diagonal.
 
 ```julia
 function LDP.logdensity_and_gradient(target::_SAEMSubjectTarget, η)
@@ -90,8 +59,7 @@ target = _saem_target(model, i, θ, σ, prior)
     diagonal=kernel.metric == :diagonal)
 warm_dir = joinpath(root, "warm_$(k)")
 WarmupHMC.adaptive_warmup_mcmc(Xoshiro(rand(rng, UInt64)), target;
-    init=(position=η, squared_scale=Σ),
-    checkpoint_dir=warm_dir,
+    init=(position=η, squared_scale=Σ), checkpoint_dir=warm_dir,
     n_draws=kernel.warmup_draws,
     n_evaluations=kernel.warmup_evaluations,
     recording_target=kernel.warmup_draws,
@@ -99,25 +67,25 @@ WarmupHMC.adaptive_warmup_mcmc(Xoshiro(rand(rng, UInt64)), target;
     max_tree_depth=kernel.max_tree_depth,
     target_acceptance_rate=kernel.target_acceptance_rate,
     nonlinear_adapt=false, monitor_ess=false)
-push!(checkpoints, joinpath(warm_dir, "cp_latest.jls"))
-push!(streams, joinpath(root, "subject_$(k).stream"))
+state = WarmupHMC.FixedKernelNUTSState(joinpath(warm_dir, "cp_latest.jls");
+    max_tree_depth=kernel.max_tree_depth)
 
-# At each later SAEM round, construct target from current θ, σ, and Ω.
+# Once per later SAEM round, with current population parameters:
 target = _saem_target(model, i, θ, σ, prior)
-result = WarmupHMC.stream_mcmc(state.checkpoints[k], target;
-    path=state.streams[k], n_draws=state.drawn[k] + 1)
-state.drawn[k] = result.n_drawn
-H[:, k] = result.position
-divergences += result.n_divergent
+step = WarmupHMC.fixed_kernel_nuts_step(state, target)
+state = step.state
+H[:, k] = state.position
+divergences += step.divergent
 ```
 
-The public interaction for the selected configurations is:
+Warmup writes one checkpoint per subject. Subsequent transitions, including those under changed population parameters, happen in memory. Each transition reevaluates its saved position under the current target; there is no file resume per draw. The [fixed-target benchmark driver](https://github.com/nsiccha/NLMEEstimation.jl/blob/6c0010311a30b694d83cbda1852cdcd3d18a9aaa/bench/saem_kernels.jl) uses the same step API and collects draws for ESS.
+
+The public interaction for the selected settings is:
 
 ```julia
 using NLMEEstimation, Random
 include("test/common.jl")
 using .TestCommon
-
 model = theoph_model()
 ω = omega_parameters(nlme_layout(model), Ω_THEOPH)
 mh = StandardSAEMMH()
@@ -129,110 +97,56 @@ base = (; iterations=40, burnin=15, mcmc_burnin=5,
 mh_options = SAEMOptions(; base..., rw_scale=0.45, adapt_iterations=0)
 nuts_options = SAEMOptions(; base..., adapt_iterations=0)
 mh_fit = saem(model, θ_THEOPH, σ_THEOPH, ω;
-    rng=MersenneTwister(2090), subjects=collect(1:6),
+    rng=MersenneTwister(2110), subjects=collect(1:6),
     options=mh_options, kernel=mh)
 nuts_fit = saem(model, θ_THEOPH, σ_THEOPH, ω;
-    rng=MersenneTwister(2090), subjects=collect(1:6),
+    rng=MersenneTwister(2110), subjects=collect(1:6),
     options=nuts_options, kernel=nuts)
 ```
 
-The fixed-target scripts use the same kernel operations but collect every
-subject draw for ESS. The SAEM fit consumes one transition per subject per
-outer iteration; each NUTS transition reopens its stream file.
-
 ## Tuning and measurement
 
-All fixed-target candidates retain **1,600 draws per subject**. MH first
-runs 200 burn-in sweeps and tries six fixed proposal scales
-(0.25, 0.35, 0.45, 0.6, 0.8, 1.2), plus adaptation to acceptance targets
-0.2, 0.3, or 0.4. The broad NUTS grid tries three initial metrics
-(diagonal Hessian, dense Hessian, prior covariance), warmup draw floors
-8 or 20, initial gradient-evaluation budgets 50 or 100, and maximum tree
-depths 4 or 8, with acceptance target 0.8. Twelve follow-up runs vary the
-acceptance target over 0.6–0.9 for the top fixed-target NUTS settings.
-The [complete 45-row sweep](https://github.com/nsiccha/NLMEEstimation.jl/blob/767effa54dfeb45bf636a5182d51f4648d3d3066/bench/saem_kernel_sweep.tsv)
-records every setting and measured score.
+Every fixed-target candidate retains **1,600 draws per subject**. MH runs 200 burn-in sweeps and tries six fixed proposal scales (0.25, 0.35, 0.45, 0.6, 0.8, 1.2), plus adaptation to acceptance targets 0.2, 0.3, or 0.4. The broad NUTS grid tries three initial metrics (diagonal Hessian, dense Hessian, prior covariance), warmup draw floors 8 or 20, initial gradient-evaluation budgets 50 or 100, and maximum tree depths 4 or 8, with acceptance target 0.8. Twelve follow-up runs vary acceptance target over 0.6–0.9 for top fixed-target NUTS settings. The [complete sweep and crosscheck table](https://github.com/nsiccha/NLMEEstimation.jl/blob/f82ea8d0115e4f5a9fc32f3136708c0b57d8964e/bench/saem_kernel_sweep.tsv) records all 49 measured rows.
 
-The broad sweep uses seeds 2026–2030; seeds 2050–2054 check its provisional
-choices. An aggressive 0.7 NUTS acceptance target initially scored well,
-but yielded divergences on later seeds and was not selected. Four MH
-finalists and six NUTS finalists were then measured on seeds 2060–2069.
-NUTS finalists also ran a 40-iteration, changing-target SAEM fit on seeds
-2080–2084. A NUTS finalist qualified only with **zero fixed-target and
-changing-target divergences** and finite fit estimates. The highest-scoring
-qualified NUTS finalist and highest-scoring MH finalist were compared on
-untouched seeds **2090–2099**.
+The broad sweep uses seeds 2026–2030; seeds 2050–2054 check provisional choices. Four MH and six NUTS finalists were measured on seeds 2060–2069. NUTS finalists also ran 40-iteration changing-target SAEM fits on seeds **2080–2099**. A NUTS finalist qualified only with zero fixed-target and changing-target divergences and finite fit estimates. Final measurements use untouched seeds **2110–2119**.
 
-ESS is the initial-positive-pair estimate in
-[`bench/saem_kernels.jl`](https://github.com/nsiccha/NLMEEstimation.jl/blob/767effa54dfeb45bf636a5182d51f4648d3d3066/bench/saem_kernels.jl).
-Each seed's ESS is the median over the 18 subject-by-coordinate traces.
-The reported ESS and wall time are medians over seeds; ESS/second is the
-median of each seed's ESS divided by its sampling wall time. ESS is capped
-at the 1,600 retained draws by this estimator. Wall time includes MH burn-in
-or NUTS warmup and all retained draws, but excludes Julia compilation,
-model construction, and ESS calculation. NUTS takes the 1,600 retained
-draws in one `stream_mcmc` call per subject for this fixed-target test.
+The first five-seed screen (2080–2084) let an eight-draw NUTS candidate through, but its next ten fits (2090–2099) had 28 divergences. We preserved this [diagnostic output](https://github.com/nsiccha/NLMEEstimation.jl/blob/f82ea8d0115e4f5a9fc32f3136708c0b57d8964e/bench/saem_kernel_gate_diagnostic.txt), included those seeds in qualification, and reserved new final seeds.
+
+ESS uses the initial-positive-pair estimate in the benchmark driver. Each seed's ESS is the median of 18 subject-by-coordinate traces. Reported ESS and wall time are medians across seeds; ESS/s is the median of each seed's ESS divided by its own sampling wall time. This estimator caps ESS at 1,600. Wall time includes MH burn-in or NUTS warmup/checkpoint and retained draws, but excludes Julia compilation, model construction, and ESS calculation. Fit time includes the complete `saem` call, five MCMC burn-in sweeps, and the same M-step settings.
 
 ### Divergence qualification
 
-The NUTS fixed-target scores below use ten selection seeds; fit divergences
-sum over five changing-target SAEM seeds. All fixed-target runs in this
-table had zero divergences. The selected safe configuration is bold.
+All six NUTS finalists used a dense Hessian metric. Fixed-target results use ten seeds; changing-target divergences sum over twenty fits. Warmup is draw floor / initial gradient evaluations. Only the bold row passed both zero-divergence screens.
 
-| Initial metric | Draw floor | Initial gradient evaluations | Acceptance target | Fixed-target ESS/s | Changing-target divergences |
+| Warmup | Tree depth | Acceptance target | Fixed-target ESS/s | Fixed divergences | Changing-target divergences |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Dense Hessian | 8 | 50 | 0.8 | 13,556 | 14 |
-| Dense Hessian | 8 | 100 | 0.8 | 13,553 | 55 |
-| **Dense Hessian** | **20** | **50** | **0.8** | **11,213** | **0** |
-| Dense Hessian | 20 | 100 | 0.8 | 10,852 | 0 |
-| Dense Hessian | 8 | 50 | 0.9 | 7,417 | 1 |
-| Diagonal Hessian | 20 | 100 | 0.8 | 6,961 | 0 |
+| 8 / 100 | 8 | 0.7 | 20,344 | 24 | 29 |
+| 8 / 50 | 8 | 0.7 | 20,531 | 0 | 60 |
+| 8 / 50 | 8 | 0.8 | 21,523 | 0 | 26 |
+| 8 / 100 | 8 | 0.8 | 19,905 | 0 | 68 |
+| 20 / 50 | 4 | 0.8 | 14,671 | 0 | 1 |
+| **20 / 50** | **8** | **0.8** | **15,732** | **0** | **0** |
 
-MH's four stability finalists scored 11,405, **12,959**, 12,259, and
-12,857 ESS/s respectively for fixed scale 0.35, **fixed scale 0.45**,
-adaptation target 0.2, and adaptation target 0.3. The fixed 0.45 and
-adaptive 0.3 settings are close at this resolution; fixed 0.45 won the
-declared selection rule.
+MH finalists scored 11,547, **13,161**, 12,228, and 12,957 ESS/s for fixed scale 0.35, **fixed scale 0.45**, adaptation target 0.2, and adaptation target 0.3. A repeat scored 12,955 for fixed 0.45 and 13,049 for adaptive 0.3. Their order is sensitive to shared-host timing noise; they are a practical tie.
 
-### Fresh-seed comparison of the selected kernels
+### Fresh-seed comparison
 
-Both rows use seeds 2090–2099 and 1,600 retained fixed-target draws per
-subject. “Fit seconds” measures a separate 40-iteration SAEM run with
-five MCMC burn-in sweeps, one kernel round per iteration, and the same
-M-step settings. All ten fits returned finite estimates.
+The [primary run](https://github.com/nsiccha/NLMEEstimation.jl/blob/f82ea8d0115e4f5a9fc32f3136708c0b57d8964e/bench/saem_kernel_final_results.txt) and its [repeat](https://github.com/nsiccha/NLMEEstimation.jl/blob/f82ea8d0115e4f5a9fc32f3136708c0b57d8964e/bench/saem_kernel_final_repeat.txt) contain every selection, qualification, and final measurement. In both, all ten short fits returned finite population estimates. The repeat selected adaptive MH target 0.3 in the near-tied tuning stage, so its MH row is a sensitivity check, not a replicate of fixed-scale MH.
 
-| Tuned kernel | Fixed-target seconds | Median ESS per coordinate | Median ESS/s | Random-walk acceptance | Fixed-target divergences | Fit seconds | Maximum fit divergences |
+| Run and kernel | Fixed seconds | Median ESS/coordinate | Median ESS/s | RW acceptance | Fixed divergences | Fit seconds | Maximum fit divergences |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| MH, fixed scale 0.45 | 0.010342 | 126.3 | **12,225** | 26.9% | — | **0.003332** | — |
-| NUTS, dense Hessian, 20/50 warmup, target 0.8 | 0.114005 | **1,282.9** | 11,014 | — | 0 | 0.718908 | 0 |
+| Primary: MH, fixed scale 0.45 | **0.010001** | 125.7 | 12,376 | 26.9% | — | **0.003113** | — |
+| Primary: NUTS, dense Hessian, 20/50, target 0.8 | 0.085022 | **1,294.5** | **15,081** | — | 0 | 0.012675 | 0 |
+| Repeat: MH, adaptive target 0.3 | **0.009939** | 123.5 | 11,827 | 30.1% | — | **0.003106** | — |
+| Repeat: NUTS, same setting | 0.085151 | **1,294.5** | **15,372** | — | 0 | 0.011577 | 0 |
 
-NUTS produced about 10 times the ESS per draw, while MH's observed
-ESS per second was about 11% higher in the fixed-target experiment.
-The short SAEM fit was about 216 times faster with MH. NUTS does more work
-per transition, and this implementation reopens a stream file for every
-subject at every outer iteration.
-The fit is a cost and integration check, not an accuracy comparison:
-40 SAEM iterations do not establish parameter recovery.
+NUTS yielded about 10.3 times the ESS per retained draw and 22% more ESS per second than fixed-scale MH in the primary stationary experiment. In the short changing-target fit, MH finished about four times faster. The fit is a cost check: 40 SAEM iterations do not establish parameter recovery. NUTS still needs more work per transition, even without per-draw disk resume.
 
-These ESS values apply **only to stationary, fixed-population targets**.
-SAEM changes its target across outer iterations, so pooling those
-positions into one chain and reporting an ESS would be invalid. Also,
-the fixed-target NUTS script collects draws in one stream call, whereas
-the actual SAEM fit pays the repeated one-transition resume cost. The
-comparison is specific to this six-subject, three-effect Theoph model;
-different dimensions, posterior geometry, models, and longer fits may
-favor different settings. Some WarmupHMC candidate runs logged a TSVD
-failure with a successful power-iteration fallback during warmup; the
-reported divergence counts come from sampler results, not those logs.
+These ESS values apply **only to stationary targets**. SAEM changes its target across outer iterations, so positions from different targets cannot be pooled for one ESS. The result is specific to six subjects and three effects; posterior geometry, dimension, model cost, and fit length can change the preferred kernel. Some warmups logged a TSVD failure with a successful power-iteration fallback; divergence counts above come from sampler results.
 
 ## Reproduce
 
-The source is
-[`bench/saem_kernel_tuning.jl`](https://github.com/nsiccha/NLMEEstimation.jl/blob/d733d33b9f34e094efa2e669ada4e0c2baa2d7f9/bench/saem_kernel_tuning.jl)
-and
-[`bench/saem_kernel_final.jl`](https://github.com/nsiccha/NLMEEstimation.jl/blob/767effa54dfeb45bf636a5182d51f4648d3d3066/bench/saem_kernel_final.jl).
-From a clone of NLMEEstimation.jl, develop the package and the two
-unregistered dependencies in one resolver call, then run the scripts:
+The scripts are [`bench/saem_kernel_tuning.jl`](https://github.com/nsiccha/NLMEEstimation.jl/blob/f82ea8d0115e4f5a9fc32f3136708c0b57d8964e/bench/saem_kernel_tuning.jl), [`bench/saem_kernel_final.jl`](https://github.com/nsiccha/NLMEEstimation.jl/blob/f82ea8d0115e4f5a9fc32f3136708c0b57d8964e/bench/saem_kernel_final.jl), and the driver linked above. From a clone, develop this package and both unregistered dependencies in one resolver call, then run:
 
 ```sh
 git clone --branch dev https://github.com/nsiccha/WarmupHMC.jl.git ../WarmupHMC.jl
@@ -242,10 +156,4 @@ julia --project=test bench/saem_kernel_tuning.jl
 julia --project=test bench/saem_kernel_final.jl
 ```
 
-For an exact replay, check out the package and dependency SHAs listed
-above. The scripts print individual candidate scores, the selected
-settings, final fixed-target results, fit timing, and divergences.
-
-The [initial 800-draw exploratory run](https://github.com/nsiccha/NLMEEstimation.jl/blob/800ad51cccc43ebce74e854c33fa81c1a904a823/bench/RESULTS.md)
-is retained as historical context. Its untuned settings and three-seed
-sample do not replace the tuned-kernel comparison above.
+For an exact source replay, check out the three SHAs above. Runtime scores vary with host load. The [earlier file-backed comparison](https://github.com/nsiccha/NLMEEstimation.jl/blob/d733d33b9f34e094efa2e669ada4e0c2baa2d7f9/docs/src/saem-benchmarks.md) is historical context: its NUTS fit reopened a checkpointed stream once per subject per SAEM round and therefore measured disk resume overhead. It should not be used as an estimate of in-memory NUTS efficiency.

@@ -27,7 +27,7 @@ function measure_nuts(model, ω, cfg, seeds)
         warmup_evaluations=cfg.evaluations,
         stepsize_adaptation_limit=cfg.draws,
         max_tree_depth=cfg.depth,
-        target_acceptance_rate=cfg.acceptance, probe_steps=0) for seed in seeds]
+        target_acceptance_rate=cfg.acceptance) for seed in seeds]
     ess = [summarize_draws(t.value.draws) for t in trials]
     return (score=median([ess[i] / trials[i].time for i in eachindex(trials)]),
         seconds=median([t.time for t in trials]), ess=median(ess),
