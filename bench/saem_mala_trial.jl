@@ -13,7 +13,7 @@ struct CorrelatedGaussianBatch
     Q::Vector{Matrix{Float64}}
 end
 NE.nsubjects(m::CorrelatedGaussianBatch) = size(m.y, 2)
-NE.nlme_layout(::CorrelatedGaussianBatch) = NLMELayout(0, 0, [2])
+NE.nlme_layout(m::CorrelatedGaussianBatch) = NLMELayout(0, 0, [size(m.y, 1)])
 NE.evaluation_style(::CorrelatedGaussianBatch) = BatchedEvaluation()
 NE.provides_eta_hessian(::CorrelatedGaussianBatch) = true
 function NE.conditional_loglikelihoods_and_gradients(m::CorrelatedGaussianBatch,
@@ -50,12 +50,12 @@ function gaussian_fixture()
     return model, prior, truth
 end
 
-function fixed_trial(method, cfg, seed; steps=400)
-    model, prior, truth = gaussian_fixture()
+function fixed_trial(method, cfg, seed; steps=400, fixture=gaussian_fixture)
+    model, prior, truth = fixture()
     ids = collect(1:6)
     rng = MersenneTwister(seed)
-    H = zeros(2, 6)
-    sumH = zeros(2, 6)
+    H = zeros(size(truth))
+    sumH = zeros(size(truth))
     if method == :MALA
         kernel = DualAveragingMALA(metric=cfg.metric, initial_stepsize=cfg.eps,
             target_acceptance_rate=cfg.target)
@@ -71,30 +71,36 @@ function fixed_trial(method, cfg, seed; steps=400)
             end
         end
         acceptance = mean(s.accepted / s.count for s in states)
+        independence_acceptance = NaN
         final_steps = [exp(s.log_stepsize) for s in states]
     else
         accepted = 0
+        independence_accepted = 0
         elapsed = @elapsed begin
             ℓ = NE.conditional_loglikelihoods(model, ids, Float64[], Float64[], H)
             for _ in 1:steps
-                _, ar = NE._saem_mh_round!(rng, model, ids, Float64[],
+                ai, ar = NE._saem_mh_round!(rng, model, ids, Float64[],
                     Float64[], prior, H, ℓ, cfg.scale)
+                independence_accepted += ai
                 accepted += ar
                 sumH .+= H
             end
         end
         acceptance = accepted / (steps * 6)
+        independence_acceptance = independence_accepted / (steps * 6)
         final_steps = fill(cfg.scale, 6)
     end
     return (mse=mean(abs2, sumH / steps - truth), seconds=elapsed,
-        acceptance=acceptance, steps=final_steps)
+        acceptance=acceptance, independence_acceptance=independence_acceptance,
+        steps=final_steps)
 end
 
-function summarize_fixed(method, cfg, seeds; steps=400)
-    trials = [fixed_trial(method, cfg, seed; steps) for seed in seeds]
+function summarize_fixed(method, cfg, seeds; steps=400, fixture=gaussian_fixture)
+    trials = [fixed_trial(method, cfg, seed; steps, fixture) for seed in seeds]
     return (rmse=sqrt(mean(t.mse for t in trials)),
         seconds=median(t.seconds for t in trials),
         acceptance=median(t.acceptance for t in trials),
+        independence_acceptance=median(t.independence_acceptance for t in trials),
         min_step=median(minimum(t.steps) for t in trials),
         max_step=median(maximum(t.steps) for t in trials))
 end
