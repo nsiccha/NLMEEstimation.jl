@@ -8,7 +8,7 @@ Parameter layout of an NLME model, returned by [`nlme_layout`](@ref).
   depends on (residual-error parameters, for example).
 - `eta_blocks`: sizes of the mutually independent blocks of the per-subject
   random-effect vector η_i, in η order. `sum(eta_blocks)` is the η dimension
-  ([`neta`](@ref)). A diagonal Ω is `ones(Int, neta)`; one dense Ω is `[neta]`.
+  (`neta`). A diagonal Ω is `ones(Int, neta)`; one dense Ω is `[neta]`.
 
 θ and σ are in the model's own *unconstrained* coordinates: every real vector of
 the right length is a valid input to [`conditional_loglikelihood`](@ref).

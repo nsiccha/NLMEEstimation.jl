@@ -1,12 +1,14 @@
 # NLMEEstimation.jl
 
+[![Dev Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://nsiccha.github.io/NLMEEstimation.jl/dev/)
+
 Model-agnostic estimators for nonlinear mixed-effects (NLME) models.
 
 A model is any Julia value that implements a small protocol: a conditional
 log-density of the observations given the random effects η, with its derivatives in
 η, and a parameter layout. The package owns the random-effect prior
-`η_i ~ N(0, Ω)` and builds estimators on top of the protocol. Posthoc / empirical
-Empirical Bayes, FOCE(I), and SAEM population estimation are implemented.
+`η_i ~ N(0, Ω)` and builds estimators on top of the protocol. Posthoc empirical
+Bayes, FOCE(I), and SAEM population estimation are implemented.
 
 Derivatives come from automatic differentiation. A model either implements its
 derivative methods itself, or declares an
