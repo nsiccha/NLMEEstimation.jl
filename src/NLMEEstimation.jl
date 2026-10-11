@@ -19,6 +19,8 @@ Estimators:
 - [`empirical_bayes`](@ref) (alias [`posthoc`](@ref)): per-subject posterior modes
   (EBEs), by Newton on Hessian blocks or by gradient-only BFGS, at fixed population
   parameters.
+- [`focei`](@ref): population estimation using first-order conditional curvature
+  and a derivative-free outer optimizer.
 """
 module NLMEEstimation
 
@@ -26,6 +28,7 @@ using LinearAlgebra
 using Random
 import ADTypes
 import DifferentiationInterface as DI
+import NLopt
 
 export NLMELayout, neta, nomega, omega_cholesky, omega_matrix, omega_parameters
 export nsubjects, nlme_layout, EvaluationStyle, PerSubjectEvaluation, BatchedEvaluation,
@@ -35,18 +38,20 @@ export nsubjects, nlme_layout, EvaluationStyle, PerSubjectEvaluation, BatchedEva
     conditional_loglikelihood_and_population_gradient,
     ad_backend, hessian_ad_backend, provides_eta_hessian, parameter_names
 export mu_referencing, MuReferencing, observation_model, GaussianObservations,
-    observations, observation_moments
+    observations, observation_moments, observation_moments_and_jacobians
 export NormalREPrior, re_prior, re_logprior, re_logprior_gradient_and_hessian,
     complete_data_loglikelihood, complete_data_loglikelihood_gradient_and_hessian
 export check_protocol, ProtocolViolation
 export empirical_bayes, posthoc, EBEMethod, NewtonEBE, QuasiNewtonEBE, default_ebe_method,
     EBEOptions, EBEResult, EBEConvergenceError, ebe_covariances
+export focei, focei_evaluate, FOCEOptions, FOCEResult, FOCEEvaluation
 
 include("layout.jl")
 include("protocol.jl")
 include("re_prior.jl")
 include("conformance.jl")
 include("empirical_bayes.jl")
+include("focei.jl")
 include("ReferenceModels.jl")
 
 end
