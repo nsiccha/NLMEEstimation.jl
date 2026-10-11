@@ -1,6 +1,6 @@
 SAEM numerical M-step scaling on the public BRM + RKPPL IV-bolus fixture
 Run: 2026-10-11 19:13:59–19:18:11 UTC, shared AMD Ryzen 9 9950X Linux host
-Julia 1.10.12, one Julia thread, one BLAS thread
+Julia 1.10.12, Enzyme 0.13.210, one Julia thread, one BLAS thread
 Input: 80 independently simulated subjects, five observations each, seed 20261011
 NLMEEstimation candidate based on ba9c833f93a1b3a33fb96c4ae0eaceb79528f127
 BRM a1ac62ad4b2e0023a3d6c1dd6e8ce274c7619058
