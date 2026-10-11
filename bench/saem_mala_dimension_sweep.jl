@@ -44,9 +44,9 @@ if abspath(PROGRAM_FILE) == @__FILE__
     println("Julia=$(VERSION) threads=$(Threads.nthreads()) BLAS_threads=$(BLAS.get_num_threads())")
     println("repo_sha=$(readchomp(`git rev-parse HEAD`)) host=$(readchomp(`hostname`))")
     println("fixture=6 independent d-dimensional Gaussian subjects; prior N(0,I); likelihood eigenvalues 0.5..20 with deterministic subject rotations; H initialized at zero; all draws retained")
-    println("dimensions=2,4,8,16,32 selection_seeds=301:308 heldout_seeds=401:416 longheldout_seeds=701:708")
+    println("dimensions=2,4,8,16,32,64 selection_seeds=301:308 heldout_seeds=401:416 longheldout_seeds=701:708")
     println("phase\tdimension\tmethod\tconfig\trmse\tmedian_seconds\trmse2_times_seconds\trw_or_mala_acceptance\tprior_independence_acceptance\tmin_final_step\tmax_final_step")
-    for d in (2, 4, 8, 16, 32)
+    for d in (2, 4, 8, 16, 32, 64)
         payload = dimension_fixture(d)
         fixture = () -> payload
         mh_cfgs, mala_cfgs = configs(d)
@@ -59,8 +59,11 @@ if abspath(PROGRAM_FILE) == @__FILE__
         end
         mh_best = argmin(x -> x.s.rmse^2 * x.s.seconds, mh_tune)
         mala_best = argmin(x -> x.s.rmse^2 * x.s.seconds, mala_tune)
-        println("selected_dimension=$d MH=$(mh_best.cfg) MALA=$(mala_best.cfg)")
-        for (method, cfg) in ((:MH, mh_best.cfg), (:MALA, mala_best.cfg))
+        mala_prior_best = argmin(x -> x.s.rmse^2 * x.s.seconds,
+            filter(x -> x.cfg.metric == :prior, mala_tune))
+        println("selected_dimension=$d MH=$(mh_best.cfg) MALA=$(mala_best.cfg) MALA_prior=$(mala_prior_best.cfg)")
+        for (method, cfg) in ((:MH, mh_best.cfg), (:MALA, mala_best.cfg),
+                (:MALA, mala_prior_best.cfg))
             print_row("heldout400", d, method, cfg,
                 summarize_dimension(method, cfg, 401:416; fixture))
             print_row("heldout4000", d, method, cfg,
