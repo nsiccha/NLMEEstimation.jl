@@ -109,7 +109,8 @@ function theoph_fit(method, cfg, seed, model, ω;
         iterations=60, burnin=20, ids=1:6, numeric_maxiter=2)
     options = SAEMOptions(; iterations, burnin, mcmc_burnin=0,
         mh_rounds=1, rw_scale=method == :MH ? cfg.scale : 0.5,
-        adapt_iterations=0, numeric_maxiter, mstep_interval=5)
+        adapt_iterations=0, numeric_maxiter, mstep_interval=5,
+        numeric_mstep=:mixture)
     kernel = method == :MALA ? DualAveragingMALA(metric=cfg.metric,
         initial_stepsize=cfg.eps,
         target_acceptance_rate=cfg.target) : method == :MH ?

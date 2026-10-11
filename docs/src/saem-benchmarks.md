@@ -4,7 +4,9 @@ This page compares tuned **per-subject** Metropolis–Hastings (MH) and WarmupHM
 
 With in-memory NUTS transitions, the selected NUTS setting delivered **15,081 median ESS/s**, versus **12,376 median ESS/s** for the selected MH setting on untouched fixed-target seeds. A separate 40-iteration SAEM fit took 0.012675 s with NUTS and 0.003113 s with MH. ESS/s describes a stationary target; the short fit measures changing-target cost and does not establish estimator accuracy.
 
-“Best” means the best observed ESS/s in the tested grid, subject to zero observed NUTS divergences in fixed-target and changing-target screens. It is not a global optimum or a guarantee of zero future divergences.
+Those short fits used the historical `numeric_mstep=:mixture` and an M-step every five iterations. They compare kernel overhead under that recorded setup; they are not a benchmark of the current default every-iteration M-step. The default chooses the online numerical update only when all structural θ coordinates have a declared sufficient-statistic update.
+
+"Best" means the best observed ESS/s in the tested grid, subject to zero observed NUTS divergences in fixed-target and changing-target screens. It is not a global optimum or a guarantee of zero future divergences.
 
 ## Model and environment
 
@@ -93,7 +95,8 @@ nuts = WarmupHMCNUTS(metric=:dense, warmup_draws=20,
     warmup_evaluations=50, stepsize_adaptation_limit=20,
     max_tree_depth=8, target_acceptance_rate=0.8)
 base = (; iterations=40, burnin=15, mcmc_burnin=5,
-    mh_rounds=1, numeric_maxiter=2, mstep_interval=5)
+    mh_rounds=1, numeric_maxiter=2, mstep_interval=5,
+    numeric_mstep=:mixture)
 mh_options = SAEMOptions(; base..., rw_scale=0.45, adapt_iterations=0)
 nuts_options = SAEMOptions(; base..., adapt_iterations=0)
 mh_fit = saem(model, θ_THEOPH, σ_THEOPH, ω;
@@ -175,7 +178,8 @@ The Gaussian prior covariance supplies `Mᵢ` for `metric=:prior`. `metric=:hess
 kernel = DualAveragingMALA(metric=:prior, initial_stepsize=0.05,
     target_acceptance_rate=0.574)
 options = SAEMOptions(iterations=120, burnin=40, mcmc_burnin=0,
-    mh_rounds=1, mstep_interval=5, numeric_maxiter=3)
+    mh_rounds=1, mstep_interval=5, numeric_maxiter=3,
+    numeric_mstep=:mixture)
 fit = saem(model, θ_THEOPH, σ_THEOPH, ω;
     rng=MersenneTwister(601), options, kernel)
 fit.mala_stepsizes      # final step size for each subject
@@ -232,3 +236,39 @@ For each dimension, eight selection seeds (`301:308`) screen five MH random-walk
 **Lower `RMSE² × time` is better.** At four effects, the selected MH scale was 0.849; MALA used the prior metric, initial step 0.05, and target 0.574. At eight effects, the selected MH scale was 0.4; MALA used the prior metric, initial step 0.2, and target 0.574. The prior-independence half of MH accepted only 3.7% and 1.1% of proposals at 400 transitions, respectively. The tuned random-walk half still made MH more efficient on this fixture, though the eight-effect 400-transition difference is small and shared-host millisecond timing varies. A repeated run chose a different, near-tied MH scale at four effects without changing this direction.
 
 This experiment answers a narrower question than SAEM convergence. It compares **fixed conditional targets** in a plausible four-to-eight-effect nonlinear model; it does not include population M-steps, continuous target changes, multimodal posteriors, or a costly joint-model AD backend. The two-endpoint eight-effect target has genuine cross-endpoint prior coupling, but it is only one geometry. The result does not support replacing the MH default with MALA on dimension alone. MALA remains an experimental option for models where a model-specific benchmark shows an advantage.
+
+## Every-iteration SAEM M-step on BRM + RKPPL
+
+The preceding short-fit comparisons used a numerical M-step every third or fifth SA iteration. The [80-subject BRM reproducer](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/bench/saem_streaming_brm.jl) instead runs the M-step **at every iteration**, with one batched prior proposal and one batched random-walk MH proposal per subject. It uses the [same public IV-bolus model](pk-comparison.md), with 80 independently simulated subjects and five observations each. The [complete recorded output](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/bench/saem_streaming_brm_results.txt) includes estimates, acceptance, allocations, and cold-start costs.
+
+The Gaussian random-effect M-step already keeps per-subject running first and second moments of `ϕᵢ = Xᵢβ + ηᵢ`; it does not need a draw history. For a non-exponential residual likelihood such as this model's `σ + 0.03 × prediction`, the online mode finds the conditional-likelihood optimizer `z*` for the current draw and updates the remaining model coordinates as `z ← z + γₖ(z* − z)`. The implementation works in NLMEEstimation's **unconstrained** parameter coordinates. This follows the practical optimizer-averaging pattern in the [saemix methodology guide, §2.1.1](https://saemixdevelopment.github.io/saemix_bookdown/pdfs/userguide.pdf), whose displayed residual-parameter updates are written on the natural scale. It is therefore an analogous coordinate-specific update, not an algebraically identical natural-scale update.
+
+`SAEMOptions(numeric_mstep=:auto)` is the default. It selects bounded-memory `:online` only when every fitted structural `θ` coordinate has a declared `MuReferencing` update; otherwise it selects the historical `:mixture` objective. BRM currently declares the two intercepts in this example but leaves the weight slope undeclared, so **the default remains `:mixture` for this BRM model**. The benchmark explicitly requests `:online` to measure the fast path with an online weight-slope update; that structural update is a model-specific approximation. The BRM trait extension is tracked upstream. `SAEMResult.numeric_mstep` reports the mode actually used.
+
+The measurement used Julia 1.10.12, one Julia and one BLAS thread, a shared AMD Ryzen 9 9950X Linux host, BRM `a1ac62a`, ReactiveKernels/RKPPL `a2268e4`, WarmupHMC `6535499`, and the NLMEEstimation candidate based on `ba9c833`. Synthetic data used `Xoshiro(20261011)`; every fit used `Xoshiro(5)`. The options were `mcmc_burnin=15`, `mh_rounds=1`, `numeric_maxiter=12`, `mstep_interval=1`, and burn-in plus MH adaptation each set to half of the requested 100 or 200 SA iterations. After four-iteration compile calls, `GC.gc()` preceded each timed fit. Timings include the complete `saem` call and exclude model construction, compilation, protocol checking, and printing.
+
+| Numerical M-step | SA iterations | Warm fit time | Cumulative allocation | Random-walk acceptance |
+| --- | ---: | ---: | ---: | ---: |
+| Online, including undeclared slope | 100 | 0.322 s | 0.927 GB | 29.2% |
+| Online, including undeclared slope | 200 | 0.475 s | 1.882 GB | 29.2% |
+| Historical running mixture | 100 | 1.908 s | 6.460 GB | 29.2% |
+| Historical running mixture | 200 | 7.203 s | 23.346 GB | 29.1% |
+
+The online mode cut warm fit time by 5.9× at 100 iterations and 15.2× at 200 iterations in this single run. Its cumulative allocations approximately doubled with the iteration count; the mixture's allocations rose by 3.6×. The 100- and 200-iteration settings have different burn-in and adaptation lengths, so the comparison shows work scaling for those schedules, not a convergence rate. Fitted coordinates were finite and close across modes in this synthetic run; this is not evidence that their estimators have the same bias or long-run behavior.
+
+Cold costs were separate: constructing the 80-subject BRM model took 53.5 s and 7.48 GB cumulative allocation, and the first four-iteration online fit took 118 s with compilation. Those costs matter for one-off fits and are not included in the warm table. The benchmark does not yet establish that the default BRM path is both textbook-frequency and bounded-memory until its linear slope can use the exact `MuReferencing` update.
+
+To reproduce from this repository root, use a fresh dependency directory. The existing example setup supplies the nested RK packages; update the two source revisions that differ from its pinned comparison and develop this checkout in one resolver call:
+
+```sh
+export BENCH_DEPS=/path/to/empty/benchmark-deps
+julia --project=docs/examples docs/examples/setup_env.jl "$BENCH_DEPS"
+git -C "$BENCH_DEPS/BayesianRegressionModels" fetch origin a1ac62ad4b2e0023a3d6c1dd6e8ce274c7619058
+git -C "$BENCH_DEPS/BayesianRegressionModels" checkout --detach a1ac62ad4b2e0023a3d6c1dd6e8ce274c7619058
+git -C "$BENCH_DEPS/WarmupHMC" fetch origin 65354994484a9b84075fd82049df7b3df922b3a4
+git -C "$BENCH_DEPS/WarmupHMC" checkout --detach 65354994484a9b84075fd82049df7b3df922b3a4
+julia --project=docs/examples -e 'using Pkg; root=ENV["BENCH_DEPS"]; Pkg.develop(Pkg.PackageSpec[Pkg.PackageSpec(path=pwd()), Pkg.PackageSpec(path=joinpath(root,"BayesianRegressionModels")), Pkg.PackageSpec(path=joinpath(root,"WarmupHMC"))]); Pkg.instantiate()'
+julia --project=docs/examples bench/saem_streaming_brm.jl
+```
+
+Use the NLMEEstimation revision linked by this page for an exact source replay. Timings vary with host load and compiler cache state.

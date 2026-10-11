@@ -12,10 +12,10 @@ BLAS.set_num_threads(1)
 
 const OPTIONS = SAEMOptions(iterations = 120, burnin = 40, mcmc_burnin = 20,
     mh_rounds = 2, adapt_iterations = 80, numeric_maxiter = 4,
-    mstep_interval = 5)
+    mstep_interval = 5, numeric_mstep = :mixture)
 const WARMUP = SAEMOptions(iterations = 8, burnin = 3, mcmc_burnin = 2,
     mh_rounds = 2, adapt_iterations = 5, numeric_maxiter = 2,
-    mstep_interval = 4)
+    mstep_interval = 4, numeric_mstep = :mixture)
 
 function run_case(label, model, θ0, σ0, ω0, data_seed, sampler_seed)
     trial = @timed saem(model, θ0, σ0, ω0;

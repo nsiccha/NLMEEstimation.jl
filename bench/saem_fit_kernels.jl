@@ -10,9 +10,11 @@ using .TestCommon
 BLAS.set_num_threads(1)
 const IDS = collect(1:6)
 const FIT_OPTIONS = SAEMOptions(iterations=40, burnin=15, mcmc_burnin=5,
-    mh_rounds=1, adapt_iterations=20, numeric_maxiter=2, mstep_interval=5)
+    mh_rounds=1, adapt_iterations=20, numeric_maxiter=2, mstep_interval=5,
+    numeric_mstep=:mixture)
 const COMPILE_OPTIONS = SAEMOptions(iterations=3, burnin=1, mcmc_burnin=1,
-    mh_rounds=1, adapt_iterations=2, numeric_maxiter=1, mstep_interval=3)
+    mh_rounds=1, adapt_iterations=2, numeric_maxiter=1, mstep_interval=3,
+    numeric_mstep=:mixture)
 const NUTS = WarmupHMCNUTS(warmup_draws=8, warmup_evaluations=50,
     stepsize_adaptation_limit=10, max_tree_depth=6)
 

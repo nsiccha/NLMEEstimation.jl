@@ -21,13 +21,13 @@ end
 function nuts_fit_check(model, ω, cfg, seeds)
     options = SAEMOptions(iterations=40, burnin=15, mcmc_burnin=5,
         mh_rounds=1, adapt_iterations=0,
-        numeric_maxiter=2, mstep_interval=5)
+        numeric_maxiter=2, mstep_interval=5, numeric_mstep=:mixture)
     kernel = nuts_kernel(cfg)
     saem(model, θ_THEOPH, σ_THEOPH, ω;
         rng=MersenneTwister(1), subjects=collect(1:6),
         options=SAEMOptions(iterations=2, burnin=1, mcmc_burnin=1,
             mh_rounds=1, adapt_iterations=0,
-            numeric_maxiter=1, mstep_interval=2), kernel)
+            numeric_maxiter=1, mstep_interval=2, numeric_mstep=:mixture), kernel)
     trials = [@timed saem(model, θ_THEOPH, σ_THEOPH, ω;
         rng=MersenneTwister(seed), subjects=collect(1:6),
         options, kernel) for seed in seeds]
@@ -42,7 +42,7 @@ function fit_cost(model, ω, mh_cfg, nuts_cfg, seeds)
     mh_options = SAEMOptions(iterations=40, burnin=15, mcmc_burnin=5,
         mh_rounds=1, rw_scale=mh_cfg.scale,
         adapt_iterations=mh_cfg.adapt ? 20 : 0,
-        numeric_maxiter=2, mstep_interval=5)
+        numeric_maxiter=2, mstep_interval=5, numeric_mstep=:mixture)
     kernel = StandardSAEMMH()
     # Compile the end-to-end path outside the timed region.
     saem(model, θ_THEOPH, σ_THEOPH, ω;
@@ -50,7 +50,7 @@ function fit_cost(model, ω, mh_cfg, nuts_cfg, seeds)
         options=SAEMOptions(iterations=2, burnin=1, mcmc_burnin=1,
             mh_rounds=1, rw_scale=mh_options.rw_scale,
             adapt_iterations=mh_options.adapt_iterations > 0 ? 1 : 0,
-            numeric_maxiter=1, mstep_interval=2), kernel)
+            numeric_maxiter=1, mstep_interval=2, numeric_mstep=:mixture), kernel)
     trials = [@timed saem(model, θ_THEOPH, σ_THEOPH, ω;
         rng=MersenneTwister(seed), subjects=collect(1:6),
         options=mh_options, kernel) for seed in seeds]

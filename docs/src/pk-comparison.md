@@ -76,6 +76,8 @@ The [full emitted source](https://github.com/nsiccha/NLMEEstimation.jl/blob/mast
 
 The posthoc result is conditional on its supplied population parameters; it does not estimate them. FOCE, FOCEI, and SAEM estimate population parameters but use different approximations and sampling schedules. The full joint fit provides a posterior comparison on the same data. Population point estimates and subject effects are the useful quantities to compare across rows; the methods' raw objective values are not interchangeable.
 
+The recorded SAEM rows used the historical running-mixture numerical M-step every third iteration. The script spells out `numeric_mstep=:mixture` so those pinned results remain reproducible. They do not measure the textbook every-iteration default.
+
 Here are the fitting calls from the [complete script](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/docs/examples/brm_rkppl_pk.jl). The initial `θ0`, `σ0`, and `ω0` encode the generating population point in the model's declared parameter order; `m`, `backend`, and `AD` come from the model setup above.
 
 ```julia
@@ -94,11 +96,12 @@ focei_fit = focei(m, θ0, σ0, ω0;
 
 saem_mh = saem(m, θ0, σ0, ω0; rng=Xoshiro(5),
     options=SAEMOptions(iterations=100, burnin=50, mcmc_burnin=15,
-        adapt_iterations=50, numeric_maxiter=8, mstep_interval=3),
+        adapt_iterations=50, numeric_maxiter=8, mstep_interval=3,
+        numeric_mstep=:mixture),
     kernel=StandardSAEMMH())
 saem_nuts = saem(m, θ0, σ0, ω0; rng=Xoshiro(6),
     options=SAEMOptions(iterations=40, burnin=20, mcmc_burnin=0,
-        numeric_maxiter=8, mstep_interval=3),
+        numeric_maxiter=8, mstep_interval=3, numeric_mstep=:mixture),
     kernel=WarmupHMCNUTS(warmup_draws=12, warmup_evaluations=50,
         stepsize_adaptation_limit=10, max_tree_depth=5))
 
