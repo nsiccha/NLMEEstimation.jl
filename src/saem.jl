@@ -540,7 +540,7 @@ function _saem_remove_stream_dir(root::AbstractString)
         catch err
             # Windows can report ENOTEMPTY while a checkpoint file finishes
             # closing. Retry only that transient error and preserve all others.
-            if !(err isa IOError && err.code == Base.UV_ENOTEMPTY && attempt < 10)
+            if !(err isa Base.IOError && err.code == Base.UV_ENOTEMPTY && attempt < 10)
                 rethrow()
             end
             sleep(0.05 * attempt)
