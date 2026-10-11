@@ -32,7 +32,7 @@ function check_against_joint_reference(model, θ, σ, ω; method = default_ebe_m
     if r.hessians === nothing
         @test !provides_eta_hessian(model)
     else
-        Hcond = DI.hessian(joint_conditional, RUNTIME_HESSIAN, x,
+        Hcond = DI.hessian(joint_conditional, JOINT_HESSIAN, x,
             DI.Constant(model), DI.Constant(θ), DI.Constant(σ), DI.Constant(m))
         Hjoint = Hcond - kron(Matrix(I, n, n), prior.precision)
         for i in 1:n, j in 1:n
