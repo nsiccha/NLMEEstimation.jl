@@ -676,6 +676,19 @@ function _saem_numeric_update(::Val{:online}, model, subjects, θ, σ, free,
     return x[1:length(θ)], x[length(θ)+1:end]
 end
 
+# Resolve the selected M-step once at runtime. Keeping its callable abstract in
+# saem prevents Julia from compiling the unused mode's model-specific gradient
+# while compiling the outer SAEM loop.
+struct _SAEMNumericUpdate{M<:Val} <: Function
+    mode::M
+end
+
+function (update::_SAEMNumericUpdate)(model, subjects, θ, σ, free, indices,
+        design, bank, weights, maxiter, γ)
+    return _saem_numeric_update(update.mode, model, subjects, θ, σ, free,
+        indices, design, bank, weights, maxiter, γ)
+end
+
 """
     saem(model, θ0, σ0, ω0; rng=Random.default_rng(), subjects=nothing,
          η0=nothing, options=SAEMOptions(), kernel=StandardSAEMMH()) -> SAEMResult
@@ -721,6 +734,7 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
     bank = Matrix{Float64}[]
     weights = Float64[]
     numeric_mode = _saem_numeric_mode(options.numeric_mstep, free, layout.ntheta)
+    numeric_update = Base.invokelatest(_SAEMNumericUpdate, numeric_mode)::Function
     mean_phi = zeros(neta(layout), length(ids))
     second_phi = zeros(neta(layout), neta(layout), length(ids))
     logscale = log(options.rw_scale)
@@ -774,8 +788,8 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
                 θ, Ω = _saem_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
                     design, mean_phi, second_phi, options.omega_floor)
                 ω = omega_parameters(layout, Ω)
-                θ, σ = _saem_numeric_update(numeric_mode, model, ids, θ, σ,
-                    free, indices, design, bank, weights, options.numeric_maxiter, γ)
+                θ, σ = numeric_update(model, ids, θ, σ, free, indices, design,
+                    bank, weights, options.numeric_maxiter, γ)::Tuple{Vector{Float64},Vector{Float64}}
                 if mala_cache !== nothing && mala_cache.valid
                     if θ == θ_before && σ == σ_before
                         _saem_mala_refresh_prior!(mala_cache, H, prior,
