@@ -9,7 +9,7 @@ Every model implements `nsubjects(model)` and `nlme_layout(model)`. It can use e
 | `PerSubjectEvaluation()` | `conditional_loglikelihood(model, i, θ, σ, η)` | The package gathers subject calls into a batch. |
 | `BatchedEvaluation()` | `conditional_loglikelihoods(model, subjects, θ, σ, H)` | One call evaluates the listed subjects; column `k` of `H` is that subject's η. |
 
-The likelihood excludes the η prior. Derivatives may be provided directly or obtained through `ad_backend(model)` with DifferentiationInterface. Reverse-mode Enzyme is the tested backend. Per-subject η Hessian blocks are optional; set `hessian_ad_backend(model) = nothing` for a gradient-only model.
+The likelihood excludes the η prior. Derivatives may be provided directly or obtained through `ad_backend(model)` with DifferentiationInterface. Reverse-mode Enzyme is the tested backend. Per-subject η Hessian blocks are optional; set `hessian_ad_backend(model) = nothing` for a gradient-only model. [PPL and AD requirements](requirements.md) lists which derivatives each estimator uses; every method runs on first-order AD.
 
 FOCE and FOCEI require `observation_model(model) = GaussianObservations()` and observation means, variances, and first η Jacobians. SAEM can use `mu_referencing(model)` for a closed-form update of the corresponding fixed effects and Ω; remaining population coordinates use a numerical M-step.
 

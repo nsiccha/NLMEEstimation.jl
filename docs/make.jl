@@ -11,6 +11,7 @@ makedocs(
     pages = [
         "Home" => "index.md",
         "Model protocol" => "protocol.md",
+        "PPL and AD requirements" => "requirements.md",
         "Estimators" => "estimators.md",
         "PK comparison" => "pk-comparison.md",
         "SAEM benchmarks" => "saem-benchmarks.md",
