@@ -34,6 +34,89 @@ struct NLMELayout
         return new(Int(ntheta), Int(nsigma), collect(Int, eta_blocks))
     end
 end
+
+"""
+    RaggedNLMELayout(; ntheta, nsigma, family_sizes, subject_families)
+
+A nested random-effect layout with one shared covariance per family. `family_sizes[f]`
+is the dimension of family `f`; `subject_families[i]` lists the family of each
+successive block in subject `i`'s η vector. A family may occur more than once in
+a subject (for example, once per lesion). No absent block is padded into η.
+The model's subject order must agree with `subject_families`.
+"""
+struct RaggedNLMELayout
+    ntheta::Int
+    nsigma::Int
+    family_sizes::Vector{Int}
+    subject_families::Vector{Vector{Int}}
+    function RaggedNLMELayout(ntheta::Integer, nsigma::Integer,
+            family_sizes::AbstractVector{<:Integer}, subject_families::AbstractVector{<:AbstractVector{<:Integer}})
+        ntheta >= 0 || throw(ArgumentError("RaggedNLMELayout: ntheta must be nonnegative"))
+        nsigma >= 0 || throw(ArgumentError("RaggedNLMELayout: nsigma must be nonnegative"))
+        !isempty(family_sizes) && all(>=(1), family_sizes) || throw(ArgumentError(
+            "RaggedNLMELayout: family sizes must be positive and nonempty"))
+        !isempty(subject_families) || throw(ArgumentError(
+            "RaggedNLMELayout: at least one subject is required"))
+        nf = length(family_sizes)
+        all(!isempty, subject_families) || throw(ArgumentError(
+            "RaggedNLMELayout: each subject needs at least one random-effect block"))
+        all(fs -> all(f -> 1 <= f <= nf, fs), subject_families) || throw(ArgumentError(
+            "RaggedNLMELayout: subject family index is outside 1:$nf"))
+        used = reduce(vcat, subject_families)
+        all(f -> f in used, 1:nf) || throw(ArgumentError(
+            "RaggedNLMELayout: every covariance family must occur in at least one subject"))
+        return new(Int(ntheta), Int(nsigma), collect(Int, family_sizes),
+            [collect(Int, fs) for fs in subject_families])
+    end
+end
+RaggedNLMELayout(; ntheta, nsigma, family_sizes, subject_families) =
+    RaggedNLMELayout(ntheta, nsigma, family_sizes, subject_families)
+Base.:(==)(a::RaggedNLMELayout, b::RaggedNLMELayout) =
+    a.ntheta == b.ntheta && a.nsigma == b.nsigma &&
+    a.family_sizes == b.family_sizes && a.subject_families == b.subject_families
+
+neta(layout::RaggedNLMELayout, i::Integer) =
+    sum(f -> layout.family_sizes[f], layout.subject_families[i]; init=0)
+nomega(layout::RaggedNLMELayout) =
+    sum(k -> k * (k + 1) ÷ 2, layout.family_sizes)
+
+function _ragged_family_ranges(layout::RaggedNLMELayout)
+    ranges = UnitRange{Int}[]
+    offset = 0
+    for k in layout.family_sizes
+        width = k * (k + 1) ÷ 2
+        push!(ranges, (offset + 1):(offset + width))
+        offset += width
+    end
+    return ranges
+end
+
+function _ragged_subject_blocks(layout::RaggedNLMELayout, i::Integer)
+    blocks = Pair{Int,UnitRange{Int}}[]
+    offset = 0
+    for family in layout.subject_families[i]
+        width = layout.family_sizes[family]
+        push!(blocks, family => ((offset + 1):(offset + width)))
+        offset += width
+    end
+    return blocks
+end
+
+function omega_cholesky(layout::RaggedNLMELayout, ω::AbstractVector)
+    _check_length("ω", ω, nomega(layout))
+    return [omega_cholesky(NLMELayout(0, 0, [k]), view(ω, r))
+        for (k, r) in zip(layout.family_sizes, _ragged_family_ranges(layout))]
+end
+
+omega_matrix(layout::RaggedNLMELayout, ω::AbstractVector) =
+    [Matrix(L * L') for L in omega_cholesky(layout, ω)]
+
+function omega_parameters(layout::RaggedNLMELayout, Ω::AbstractVector{<:AbstractMatrix})
+    length(Ω) == length(layout.family_sizes) || throw(DimensionMismatch(
+        "Ω needs one covariance matrix per family"))
+    return reduce(vcat, [omega_parameters(NLMELayout(0, 0, [k]), matrix)
+        for (k, matrix) in zip(layout.family_sizes, Ω)])
+end
 NLMELayout(; ntheta::Integer, nsigma::Integer, eta_blocks::AbstractVector{<:Integer}) =
     NLMELayout(ntheta, nsigma, eta_blocks)
 

@@ -52,6 +52,9 @@ function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
     n = nsubjects(model)
     n isa Integer && n >= 1 || violation("nsubjects returned $(repr(n)); expected a positive integer")
     layout = nlme_layout(model)
+    layout isa RaggedNLMELayout && return _check_ragged_protocol(model, layout, θ, σ, ω;
+        subjects, η, reference_backend, reference_hessian_backend,
+        population_gradient, rtol)
     layout isa NLMELayout || violation("nlme_layout returned a $(typeof(layout)); expected an NLMELayout")
     evaluation_style(model) isa EvaluationStyle ||
         violation("evaluation_style returned $(repr(evaluation_style(model))); expected an EvaluationStyle")

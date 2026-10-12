@@ -33,7 +33,7 @@ import NLopt
 import LogDensityProblems as LDP
 import WarmupHMC
 
-export NLMELayout, neta, nomega, omega_cholesky, omega_matrix, omega_parameters
+export NLMELayout, RaggedNLMELayout, neta, nomega, omega_cholesky, omega_matrix, omega_parameters
 export nsubjects, nlme_layout, EvaluationStyle, PerSubjectEvaluation, BatchedEvaluation,
     evaluation_style, conditional_loglikelihood, conditional_loglikelihoods,
     conditional_loglikelihood_and_gradient, conditional_loglikelihoods_and_gradients,
@@ -43,13 +43,13 @@ export nsubjects, nlme_layout, EvaluationStyle, PerSubjectEvaluation, BatchedEva
     population_logprior, population_logprior_and_gradient, population_prior_provenance
 export mu_referencing, MuReferencing, observation_model, GaussianObservations,
     observations, observation_moments, observation_moments_and_jacobians
-export NormalREPrior, re_prior, re_logprior, re_logprior_gradient_and_hessian,
+export NormalREPrior, RaggedNormalREPrior, re_prior, re_logprior, re_logprior_gradient_and_hessian,
     complete_data_loglikelihood, complete_data_loglikelihood_gradient_and_hessian
 export check_protocol, ProtocolViolation
 export empirical_bayes, posthoc, EBEMethod, NewtonEBE, QuasiNewtonEBE, default_ebe_method,
-    EBEOptions, EBEResult, EBEConvergenceError, ebe_covariances
+    EBEOptions, EBEResult, RaggedEBEResult, EBEConvergenceError, ebe_covariances
 export focei, focei_evaluate, FOCEOptions, FOCEResult, FOCEEvaluation
-export saem, saem_population_gradient_style, SAEMOptions, SAEMResult,
+export saem, saem_population_gradient_style, SAEMOptions, SAEMResult, RaggedSAEMResult,
     StandardSAEMMH, WarmupHMCNUTS, DualAveragingMALA
 
 include("layout.jl")
@@ -59,6 +59,7 @@ include("conformance.jl")
 include("empirical_bayes.jl")
 include("focei.jl")
 include("saem.jl")
+include("ragged.jl")
 include("ReferenceModels.jl")
 
 end

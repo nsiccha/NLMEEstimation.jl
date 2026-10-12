@@ -28,7 +28,9 @@ A model declares how it evaluates, by setting `evaluation_style`:
   `conditional_loglikelihood(model, i, θ, σ, η)`, the log-density for one subject.
 - **`BatchedEvaluation()`**: the model implements
   `conditional_loglikelihoods(model, subjects, θ, σ, H)`, a joint program that
-  evaluates many subjects in one pass. `H` holds one column of η per subject.
+  evaluates many subjects in one pass. For `NLMELayout`, `H` holds one column of
+  η per subject. For `RaggedNLMELayout`, `H[k]` is a compact η vector for
+  `subjects[k]`.
 
 Estimator likelihood queries call the batched entry points. Each style derives
 the other style's methods. A batched model's η gradients come from one AD pass
@@ -40,7 +42,7 @@ AD pass for batched models.
 | Function | Status | Meaning |
 |---|---|---|
 | `nsubjects(model)` | required | number of subjects |
-| `nlme_layout(model)` | required | `NLMELayout(ntheta, nsigma, eta_blocks)`: lengths of θ and σ, η block structure |
+| `nlme_layout(model)` | required | `NLMELayout` for equal-size subjects or `RaggedNLMELayout` for repeated, variable-count random-effect families |
 | `evaluation_style(model)` | optional | `PerSubjectEvaluation()` (default) or `BatchedEvaluation()` |
 | `conditional_loglikelihood(model, i, θ, σ, η)` | required (per-subject) | `log p(y_i \| θ, σ, η_i)`, without the η prior |
 | `conditional_loglikelihoods(model, subjects, θ, σ, H)` | required (batched) | the same for a batch of subjects |
@@ -67,6 +69,39 @@ Coordinates:
 
 `check_protocol(model, θ, σ, ω)` checks an implementation against these contracts,
 including batched-vs-per-subject consistency and the independence of subjects.
+
+### Nested random effects with unequal subject sizes
+
+`RaggedNLMELayout(ntheta, nsigma, family_sizes, subject_families)` declares one
+covariance per family and an ordered list of block instances for each subject.
+For example, one two-dimensional subject family followed by one one-dimensional
+lesion family per lesion can use:
+
+```julia
+layout = RaggedNLMELayout(ntheta=3, nsigma=1, family_sizes=[2, 1],
+    subject_families=[[1, 2], [1, 2, 2, 2], [1, 2, 2]])
+neta(layout, 1), neta(layout, 2), neta(layout, 3)  # 3, 5, 4
+```
+
+Each repeated `2` block shares the same family covariance. `ω` has one
+log-Cholesky segment per family; `omega_matrix(layout, ω)` returns a vector of
+family covariance matrices, and `omega_parameters(layout, Ωs)` is its inverse.
+The model implements the same conditional methods, with `H` as one vector per
+requested subject and gradients in the same shape. Its conditional density
+excludes all random-effect priors. `re_logprior(re_prior(model, ω), i, η_i)`
+sums the appropriate family densities for subject `i`.
+
+`empirical_bayes` and `posthoc` return `RaggedEBEResult`: `modes[k]` has the
+actual length of `subjects[k]`, and Hessian blocks have matching dimensions.
+`saem` with `StandardSAEMMH()` returns `RaggedSAEMResult`; its `eta[k]` is the
+compact final chain state and its `omega_matrix[f]` is the pooled covariance
+for family `f`. A model's optional `population_logprior` is included once in
+the joint MAP M-step and recorded by `objective` and `population_logprior`.
+Mu-referencing designs have `neta(layout, i)` rows. When
+`parameter_names` is not supplied by the model, `eta[i]` contains the default
+names for subject `i`; a model can supply its own subject and nested-unit labels.
+Ragged layouts currently support SAEM with the standard MH kernel and posthoc;
+FOCE(I), MALA and NUTS still use the equal-size layout.
 
 ## Empirical Bayes estimates (posthoc)
 

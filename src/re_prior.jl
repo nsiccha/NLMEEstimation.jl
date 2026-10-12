@@ -23,11 +23,77 @@ end
 neta(prior::NormalREPrior) = size(prior.cholesky_factor, 1)
 
 """
-    re_prior(model, ω) -> NormalREPrior
+    re_prior(model, ω) -> NormalREPrior or RaggedNormalREPrior
 
 The η prior of `model` at Ω parameters ω.
 """
-re_prior(model, ω::AbstractVector) = NormalREPrior(nlme_layout(model), ω)
+re_prior(model, ω::AbstractVector) = _re_prior(nlme_layout(model), ω)
+_re_prior(layout::NLMELayout, ω) = NormalREPrior(layout, ω)
+
+"""
+    RaggedNormalREPrior(layout, ω)
+
+Shared Gaussian covariance and precision for each random-effect family of a
+[`RaggedNLMELayout`](@ref). Repeated blocks use the same family parameters.
+"""
+struct RaggedNormalREPrior{T}
+    layout::RaggedNLMELayout
+    cholesky_factors::Vector{LowerTriangular{T,Matrix{T}}}
+    precisions::Vector{Matrix{T}}
+    logdet_omega::Vector{T}
+end
+
+function RaggedNormalREPrior(layout::RaggedNLMELayout, ω::AbstractVector)
+    factors = omega_cholesky(layout, ω)
+    inverses = inv.(factors)
+    precisions = [Matrix((L' * L + (L' * L)') / 2) for L in inverses]
+    logdets = [2sum(log, diag(L)) for L in factors]
+    return RaggedNormalREPrior(layout, factors, precisions, logdets)
+end
+
+_re_prior(layout::RaggedNLMELayout, ω) = RaggedNormalREPrior(layout, ω)
+
+"""
+    re_logprior(prior::RaggedNormalREPrior, i, η)
+
+Log density for subject `i`'s compact η vector, summing one Normal density per
+listed family block.
+"""
+function re_logprior(prior::RaggedNormalREPrior, i::Integer, η::AbstractVector)
+    layout = prior.layout
+    _check_length("subject $i η", η, neta(layout, i))
+    value = zero(promote_type(eltype(η), eltype(prior.logdet_omega)))
+    for (family, r) in _ragged_subject_blocks(layout, i)
+        z = prior.cholesky_factors[family] \ view(η, r)
+        value -= (length(r) * log(2π) + prior.logdet_omega[family] + dot(z, z)) / 2
+    end
+    return value
+end
+
+function re_logprior_gradient_and_hessian(prior::RaggedNormalREPrior, i::Integer, η::AbstractVector)
+    lp = re_logprior(prior, i, η)
+    gradient = zeros(promote_type(eltype(η), eltype(prior.logdet_omega)), length(η))
+    hessian = zeros(eltype(gradient), length(η), length(η))
+    for (family, r) in _ragged_subject_blocks(prior.layout, i)
+        P = prior.precisions[family]
+        gradient[r] = -(P * view(η, r))
+        hessian[r, r] = -P
+    end
+    return lp, gradient, hessian
+end
+
+re_logprior(model, ω::AbstractVector, i::Integer, η::AbstractVector) =
+    re_logprior(RaggedNormalREPrior(nlme_layout(model), ω), i, η)
+
+complete_data_loglikelihood(model, i, θ, σ, prior::RaggedNormalREPrior, η) =
+    conditional_loglikelihood(model, i, θ, σ, η) + re_logprior(prior, i, η)
+
+function complete_data_loglikelihood_gradient_and_hessian(model, i, θ, σ,
+        prior::RaggedNormalREPrior, η)
+    ℓ, g, H = conditional_loglikelihood_gradient_and_hessian(model, i, θ, σ, η)
+    lp, gp, Hp = re_logprior_gradient_and_hessian(prior, i, η)
+    return ℓ, ℓ + lp, g + gp, H + Hp
+end
 
 """
     re_logprior(prior::NormalREPrior, η) -> Real
