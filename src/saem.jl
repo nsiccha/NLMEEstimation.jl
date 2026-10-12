@@ -308,6 +308,26 @@ struct SAEMResult{T, A, R, P}
     prior_provenance::P
 end
 
+"""
+    RaggedSAEMResult
+
+SAEM estimate for a [`RaggedNLMELayout`](@ref). `eta[k]` is subject
+`subjects[k]`'s compact latent vector. `omega_matrix[f]` is the shared
+covariance of random-effect family `f`.
+"""
+struct RaggedSAEMResult{T}
+    subjects::Vector{Int}
+    theta::Vector{T}
+    sigma::Vector{T}
+    omega::Vector{T}
+    omega_matrix::Vector{Matrix{T}}
+    eta::Vector{Vector{T}}
+    acceptance::NamedTuple{(:prior, :random_walk),Tuple{Float64,Float64}}
+    rw_scale::Float64
+    kernel::Symbol
+    numeric_mstep::Symbol
+end
+
 struct _SAEMSubjectTarget{M, P}
     model::M
     subject::Int
@@ -619,7 +639,7 @@ function _saem_population_value_gradient(::PerSubjectEvaluation, model, subjects
     gθ = zeros(Float64, length(θ))
     gσ = zeros(Float64, length(σ))
     for (k, i) in enumerate(subjects)
-        ℓ, a, b = conditional_loglikelihood_and_population_gradient(model, i, θ, σ, view(H, :, k))
+        ℓ, a, b = conditional_loglikelihood_and_population_gradient(model, i, θ, σ, _eta_column(H, k))
         value += ℓ
         gθ += a
         gσ += b
@@ -855,10 +875,15 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
         rng::AbstractRNG = Random.default_rng(), subjects = nothing, η0 = nothing,
         options::SAEMOptions = SAEMOptions(),
         kernel::AbstractSAEMKernel = StandardSAEMMH())
+    return _saem(nlme_layout(model), model, θ0, σ0, ω0, rng, subjects, η0,
+        options, kernel)
+end
+
+function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
+        options, kernel)
     _saem_check_options(options)
     kernel isa WarmupHMCNUTS && _saem_check_nuts(kernel)
     kernel isa DualAveragingMALA && _saem_check_mala(kernel)
-    layout = nlme_layout(model)
     _check_length("θ", θ0, layout.ntheta)
     _check_length("σ", σ0, layout.nsigma)
     _check_length("ω", ω0, nomega(layout))

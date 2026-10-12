@@ -77,6 +77,7 @@ once after the subject likelihood terms; it does not alter the subject EBEs.
 function focei_evaluate(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η0 = nothing, interaction::Bool = true,
         ebe_options::EBEOptions = EBEOptions())
+    _require_focei_layout(nlme_layout(model))
     observation_model(model) isa GaussianObservations || throw(ArgumentError(
         "FOCE(I) requires observation_model(model) = GaussianObservations()"))
     ebes = empirical_bayes(model, θ, σ, ω; subjects, η0,
@@ -135,6 +136,7 @@ log posterior; the result still reports its likelihood separately.
 function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVector;
         subjects = nothing, free = nothing, options::FOCEOptions = FOCEOptions())
     layout = nlme_layout(model)
+    _require_focei_layout(layout)
     _check_length("θ", θ0, layout.ntheta)
     _check_length("σ", σ0, layout.nsigma)
     _check_length("ω", ω0, nomega(layout))
@@ -207,3 +209,7 @@ function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVec
         status in (:SUCCESS, :STOPVAL_REACHED, :FTOL_REACHED, :XTOL_REACHED),
         (minimum_ofv = min_ofv, status = status))
 end
+
+_require_focei_layout(::NLMELayout) = nothing
+_require_focei_layout(::RaggedNLMELayout) = throw(ArgumentError(
+    "FOCE(I) does not yet support RaggedNLMELayout; use posthoc or standard-MH SAEM for nested random effects"))

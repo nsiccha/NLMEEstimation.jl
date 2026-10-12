@@ -75,10 +75,30 @@ subject `subjects[k]`.
 - `gradient_norm`: the standardized complete-data gradient `‖Lᵀg‖∞` at η̂_i.
 - `method`: the [`EBEMethod`](@ref) used.
 """
-struct EBEResult{T <: Real, HS <: Union{Nothing, Vector{Matrix{T}}}, M <: EBEMethod}
+abstract type AbstractEBEResult end
+
+struct EBEResult{T <: Real, HS <: Union{Nothing, Vector{Matrix{T}}}, M <: EBEMethod} <: AbstractEBEResult
     subjects::Vector{Int}
     modes::Matrix{T}
     hessians::HS
+    conditional_loglikelihood::Vector{T}
+    complete_data_loglikelihood::Vector{T}
+    converged::Vector{Bool}
+    iterations::Vector{Int}
+    gradient_norm::Vector{T}
+    method::M
+end
+
+"""
+    RaggedEBEResult
+
+Empirical Bayes result for a [`RaggedNLMELayout`](@ref). `modes[k]` and
+`hessians[k]` have the actual dimension of `subjects[k]`, without padding.
+"""
+struct RaggedEBEResult{T <: Real, M <: EBEMethod} <: AbstractEBEResult
+    subjects::Vector{Int}
+    modes::Vector{Vector{T}}
+    hessians::Union{Nothing,Vector{Matrix{T}}}
     conditional_loglikelihood::Vector{T}
     complete_data_loglikelihood::Vector{T}
     converged::Vector{Bool}
@@ -93,7 +113,7 @@ end
 Thrown by [`empirical_bayes`](@ref) when no mode was found for some subjects;
 `result` holds the partial [`EBEResult`](@ref).
 """
-struct EBEConvergenceError{R <: EBEResult} <: Exception
+struct EBEConvergenceError{R <: AbstractEBEResult} <: Exception
     subjects::Vector{Int}
     result::R
 end
@@ -137,6 +157,12 @@ function empirical_bayes(model, θ::AbstractVector, σ::AbstractVector, ω::Abst
         subjects = nothing, η0 = nothing, method::EBEMethod = default_ebe_method(model),
         options::EBEOptions = EBEOptions(), require_convergence::Bool = true)
     layout = nlme_layout(model)
+    return _empirical_bayes(layout, model, θ, σ, ω, subjects, η0, method, options,
+        require_convergence)
+end
+
+function _empirical_bayes(layout::NLMELayout, model, θ, σ, ω, subjects, η0,
+        method, options, require_convergence)
     _check_length("θ", θ, layout.ntheta)
     _check_length("σ", σ, layout.nsigma)
     _check_length("ω", ω, nomega(layout))
@@ -167,6 +193,7 @@ The Laplace (Gaussian) approximation of each subject's η posterior covariance,
 Hessians or some `-H_i` is not positive definite.
 """
 ebe_covariances(result::EBEResult) = _ebe_covariances(result.hessians)
+ebe_covariances(result::RaggedEBEResult) = _ebe_covariances(result.hessians)
 _ebe_covariances(hessians::Vector) = [inv(cholesky(Symmetric(-H))) for H in hessians]
 _ebe_covariances(::Nothing) = throw(ArgumentError(
     "this EBEResult carries no Hessians: the model provides no η second order (provides_eta_hessian)"))

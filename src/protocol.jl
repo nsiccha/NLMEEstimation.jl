@@ -1,8 +1,9 @@
 # The model protocol. A model is any Julia value; it takes part by adding methods
 # to the functions below. Subjects are indexed `1:nsubjects(model)`. θ, σ and η may
 # be any `AbstractVector` (views, AD-tracked values), and a batch of random effects
-# is an `AbstractMatrix` with one column per subject, so implementations must not
-# restrict element types.
+# is an `AbstractMatrix` with one column per subject for `NLMELayout`, or a
+# vector of compact subject vectors for `RaggedNLMELayout`. Implementations
+# must not restrict element types.
 #
 # Two evaluation styles exist, chosen by `evaluation_style(model)`. Estimators always
 # call the batched entry points (`conditional_loglikelihoods`, …); every entry point
@@ -18,7 +19,7 @@
 function nsubjects end
 
 """
-    nlme_layout(model) -> NLMELayout
+    nlme_layout(model) -> NLMELayout or RaggedNLMELayout
 
 **Required.** The parameter layout: lengths of θ and σ and the η block structure.
 See [`NLMELayout`](@ref) for the coordinate conventions.
@@ -86,7 +87,8 @@ conditional_loglikelihood(model, i, θ, σ, η) =
 
 The conditional log-densities of a batch of subjects: entry `k` is
 `log p(y_i | θ, σ, η_i)` for `i = subjects[k]` and `η_i = H[:, k]`, with `H` of
-size `neta × length(subjects)`.
+size `neta × length(subjects)` for `NLMELayout`. For `RaggedNLMELayout`, `H[k]`
+has length `neta(layout, subjects[k])`.
 
 **Required** under [`BatchedEvaluation`](@ref): a joint-program model places each
 column of `H` into its subject's random-effect slots (the other subjects' slots are
@@ -101,10 +103,15 @@ _conditional_loglikelihood(::PerSubjectEvaluation, model, i, θ, σ, η) = throw
     "$(typeof(model)) declares PerSubjectEvaluation but implements no " *
     "`NLMEEstimation.conditional_loglikelihood(::$(typeof(model)), i, θ, σ, η)`"))
 _conditional_loglikelihood(::BatchedEvaluation, model, i, θ, σ, η) =
-    only(conditional_loglikelihoods(model, [i], θ, σ, reshape(η, :, 1)))
+    only(conditional_loglikelihoods(model, [i], θ, σ, _single_eta_batch(nlme_layout(model), η)))
+
+_single_eta_batch(::NLMELayout, η) = reshape(η, :, 1)
+_single_eta_batch(::RaggedNLMELayout, η) = [η]
+_eta_column(H::AbstractMatrix, k) = H[:, k]
+_eta_column(H::AbstractVector{<:AbstractVector}, k) = H[k]
 
 _conditional_loglikelihoods(::PerSubjectEvaluation, model, subjects, θ, σ, H) =
-    [conditional_loglikelihood(model, i, θ, σ, H[:, k]) for (k, i) in enumerate(subjects)]
+    [conditional_loglikelihood(model, i, θ, σ, _eta_column(H, k)) for (k, i) in enumerate(subjects)]
 _conditional_loglikelihoods(::BatchedEvaluation, model, subjects, θ, σ, H) = throw(ArgumentError(
     "$(typeof(model)) declares BatchedEvaluation but implements no " *
     "`NLMEEstimation.conditional_loglikelihoods(::$(typeof(model)), subjects, θ, σ, H)`"))
@@ -286,8 +293,14 @@ function _and_gradients(::PerSubjectEvaluation, model, subjects, θ, σ, H)
     end
     return [first(p) for p in pairs], G
 end
+function _and_gradients(::PerSubjectEvaluation, model, subjects, θ, σ,
+        H::AbstractVector{<:AbstractVector})
+    pairs = [conditional_loglikelihood_and_gradient(model, i, θ, σ, H[k])
+        for (k, i) in enumerate(subjects)]
+    return [first(p) for p in pairs], [last(p) for p in pairs]
+end
 _hessian_blocks(::PerSubjectEvaluation, model, subjects, θ, σ, H) =
-    [last(conditional_loglikelihood_gradient_and_hessian(model, i, θ, σ, H[:, k])) for (k, i) in enumerate(subjects)]
+    [last(conditional_loglikelihood_gradient_and_hessian(model, i, θ, σ, _eta_column(H, k))) for (k, i) in enumerate(subjects)]
 
 # Batched models: derivatives of the batch's summed density, then per-subject views.
 function _and_gradients(::BatchedEvaluation, model, subjects, θ, σ, H)
@@ -295,6 +308,31 @@ function _and_gradients(::BatchedEvaluation, model, subjects, θ, σ, H)
     ℓ = conditional_loglikelihoods(model, subjects, θ, σ, H)
     G = DI.gradient(_batch_objective, backend, H, _batch_contexts(model, subjects, θ, σ)...)
     return ℓ, G
+end
+function _ragged_ranges(H::AbstractVector{<:AbstractVector})
+    ranges = UnitRange{Int}[]
+    offset = 0
+    for h in H
+        push!(ranges, (offset + 1):(offset + length(h)))
+        offset += length(h)
+    end
+    return ranges
+end
+_ragged_unpack(x, ranges) = [view(x, r) for r in ranges]
+_ragged_batch_objective(x, model, subjects, θ, σ, ranges) =
+    sum(conditional_loglikelihoods(model, subjects, θ, σ, _ragged_unpack(x, ranges)))
+_ragged_batch_contexts(model, subjects, θ, σ, ranges) =
+    (DI.Constant(model), DI.Constant(subjects), DI.Constant(θ), DI.Constant(σ), DI.Constant(ranges))
+
+function _and_gradients(::BatchedEvaluation, model, subjects, θ, σ,
+        H::AbstractVector{<:AbstractVector})
+    backend = _checked_backend(model, ad_backend(model), :conditional_loglikelihoods_and_gradients)
+    ranges = _ragged_ranges(H)
+    flat = reduce(vcat, H; init=Float64[])
+    ℓ = conditional_loglikelihoods(model, subjects, θ, σ, H)
+    gradient = DI.gradient(_ragged_batch_objective, backend, flat,
+        _ragged_batch_contexts(model, subjects, θ, σ, ranges)...)
+    return ℓ, [gradient[r] for r in ranges]
 end
 function _hessian_blocks(::BatchedEvaluation, model, subjects, θ, σ, H)
     backend = _checked_backend(model, hessian_ad_backend(model), :conditional_loglikelihood_hessian_blocks)
@@ -309,13 +347,32 @@ function _hessian_blocks(::BatchedEvaluation, model, subjects, θ, σ, H)
     hvps = DI.hvp(_batch_objective, backend, H, tangents, _batch_contexts(model, subjects, θ, σ)...)
     return [reduce(hcat, [hvps[c][:, k] for c in 1:m]) for k in eachindex(subjects)]
 end
+function _hessian_blocks(::BatchedEvaluation, model, subjects, θ, σ,
+        H::AbstractVector{<:AbstractVector})
+    backend = _checked_backend(model, hessian_ad_backend(model), :conditional_loglikelihood_hessian_blocks)
+    ranges = _ragged_ranges(H)
+    flat = reduce(vcat, H; init=Float64[])
+    m = maximum(length, H; init=0)
+    tangents = ntuple(m) do c
+        V = zero(flat)
+        for r in ranges
+            c <= length(r) && (V[r[c]] = 1)
+        end
+        V
+    end
+    hvps = DI.hvp(_ragged_batch_objective, backend, flat, tangents,
+        _ragged_batch_contexts(model, subjects, θ, σ, ranges)...)
+    return [reduce(hcat, [hvps[c][r] for c in 1:length(r)]) for r in ranges]
+end
 function _and_gradient(::BatchedEvaluation, model, i, θ, σ, η)
-    ℓ, G = conditional_loglikelihoods_and_gradients(model, [i], θ, σ, reshape(η, :, 1))
-    return only(ℓ), G[:, 1]
+    ℓ, G = conditional_loglikelihoods_and_gradients(model, [i], θ, σ,
+        _single_eta_batch(nlme_layout(model), η))
+    return only(ℓ), _eta_column(G, 1)
 end
 function _gradient_and_hessian(::BatchedEvaluation, model, i, θ, σ, η)
     ℓ, g = conditional_loglikelihood_and_gradient(model, i, θ, σ, η)
-    return ℓ, g, only(conditional_loglikelihood_hessian_blocks(model, [i], θ, σ, reshape(η, :, 1)))
+    return ℓ, g, only(conditional_loglikelihood_hessian_blocks(model, [i], θ, σ,
+        _single_eta_batch(nlme_layout(model), η)))
 end
 
 _eta_objective(η, model, i, θ, σ) = conditional_loglikelihood(model, i, θ, σ, η)
@@ -346,9 +403,18 @@ _checked_backend(model, backend, op) = throw(ArgumentError(
 """
 function parameter_names(model)
     layout = nlme_layout(model)
+    return _default_parameter_names(layout)
+end
+function _default_parameter_names(layout::NLMELayout)
     return (theta = ["θ$k" for k in 1:layout.ntheta],
         sigma = ["σ$k" for k in 1:layout.nsigma],
         eta = ["η$k" for k in 1:neta(layout)])
+end
+function _default_parameter_names(layout::RaggedNLMELayout)
+    return (theta = ["θ$k" for k in 1:layout.ntheta],
+        sigma = ["σ$k" for k in 1:layout.nsigma],
+        eta = [["η$(i).$(k)" for k in 1:neta(layout, i)]
+            for i in eachindex(layout.subject_families)])
 end
 
 # ── Optional structural traits (used by later estimators) ─────────────────────
