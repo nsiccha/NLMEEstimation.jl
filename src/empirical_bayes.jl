@@ -59,6 +59,8 @@ Base.@kwdef struct EBEOptions
     max_backtracks::Int = 30
 end
 
+abstract type AbstractEBEResult end
+
 """
     EBEResult
 
@@ -75,8 +77,6 @@ subject `subjects[k]`.
 - `gradient_norm`: the standardized complete-data gradient `‖Lᵀg‖∞` at η̂_i.
 - `method`: the [`EBEMethod`](@ref) used.
 """
-abstract type AbstractEBEResult end
-
 struct EBEResult{T <: Real, HS <: Union{Nothing, Vector{Matrix{T}}}, M <: EBEMethod} <: AbstractEBEResult
     subjects::Vector{Int}
     modes::Matrix{T}
