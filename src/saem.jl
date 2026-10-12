@@ -284,9 +284,11 @@ These MH-only fields are `missing` for other kernels. `kernel` identifies the
 method and `nuts_divergences` counts its fixed-kernel transitions that diverged.
 For MALA, `mala_stepsizes` and `mala_acceptance` hold per-subject final values;
 `mala_adaptation_steps` counts updates per subject. `numeric_mstep` records
-the resolved numerical M-step mode (`:online` or `:mixture`).
+the resolved numerical M-step mode (`:online` or `:mixture`). `objective` is
+`:ML` without a model population prior and `:MAP` otherwise. The result is a
+population point estimate, not a draw from a population posterior.
 """
-struct SAEMResult{T, A, R}
+struct SAEMResult{T, A, R, P}
     subjects::Vector{Int}
     theta::Vector{T}
     sigma::Vector{T}
@@ -301,6 +303,9 @@ struct SAEMResult{T, A, R}
     mala_acceptance::Union{Missing, Vector{Float64}}
     mala_adaptation_steps::Int
     numeric_mstep::Symbol
+    objective::Symbol
+    population_logprior::T
+    prior_provenance::P
 end
 
 struct _SAEMSubjectTarget{M, P}
@@ -536,6 +541,39 @@ function _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_
     return θnew, Ωnew
 end
 
+# Expected Gaussian random-effect log density under the running sufficient
+# statistics, with derivatives in mu-referenced θ and log-Cholesky ω.
+function _saem_gaussian_map_value_gradient(layout, θ, ω, indices, design,
+        mean_phi, second_phi)
+    m, n = size(mean_phi)
+    L = Matrix(omega_cholesky(layout, ω))
+    Linv = inv(LowerTriangular(L))
+    P = Matrix(Linv' * Linv)
+    μ = view(θ, indices)
+    S = zeros(Float64, m, m)
+    gμ = zeros(Float64, length(indices))
+    for k in 1:n
+        X = design[k]
+        xμ = X * μ
+        φ = view(mean_phi, :, k)
+        S += view(second_phi, :, :, k) - φ * xμ' - xμ * φ' + xμ * xμ'
+        gμ += X' * P * (φ - xμ)
+    end
+    value = -(n * (m * log(2π) + 2sum(log, diag(L))) + sum(P .* S)) / 2
+    GL = (P * S * P - n * P) * L
+    gω = zeros(Float64, length(ω))
+    ranges, omega_ranges = _block_ranges(layout)
+    for (er, or) in zip(ranges, omega_ranges)
+        c = first(or)
+        for j in 1:length(er), l in 1:j
+            row, col = er[j], er[l]
+            gω[c] = j == l ? GL[row, col] * L[row, col] : GL[row, col]
+            c += 1
+        end
+    end
+    return value, gμ, gω
+end
+
 # The historical mixture optimizes the running conditional-density objective.
 function _saem_record!(::Val{:mixture}, bank, weights, Φ, γ)
     if γ == 1
@@ -660,6 +698,108 @@ function _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design, ban
     return x[1:length(θ)], x[length(θ)+1:end]
 end
 
+function _saem_map_value_gradient(x, model, subjects, layout, indices, design,
+        bank, weights, mean_phi, second_phi, mode::Val)
+    nθ, nσ = layout.ntheta, layout.nsigma
+    θ = view(x, 1:nθ)
+    σ = view(x, nθ+1:nθ+nσ)
+    ω = view(x, nθ+nσ+1:length(x))
+    value = 0.0
+    gradient = zeros(Float64, length(x))
+    style = saem_population_gradient_style(model, mode)
+    for (Φ, w) in zip(bank, weights)
+        H = _saem_eta(Φ, θ, indices, design)
+        v, g = _saem_population_value_gradient(style, model, subjects, θ, σ, H)
+        value += w * v
+        gradient[1:nθ+nσ] .+= w .* g
+    end
+    # At fixed Φ, mu-referencing makes the conditional density invariant in
+    # these θ coordinates; its fixed-η gradient is not their total derivative.
+    gradient[indices] .= 0
+    gaussian, gμ, gω = _saem_gaussian_map_value_gradient(layout, θ, ω,
+        indices, design, mean_phi, second_phi)
+    value += gaussian
+    gradient[indices] .+= gμ
+    gradient[nθ+nσ+1:end] .+= gω
+    lp, gpθ, gpσ, gpω = population_logprior_and_gradient(model, θ, σ, ω)
+    lp isa Real || throw(ArgumentError("population_logprior_and_gradient must return a real value"))
+    _check_length("population prior θ gradient", gpθ, nθ)
+    _check_length("population prior σ gradient", gpσ, nσ)
+    _check_length("population prior ω gradient", gpω, length(ω))
+    value += lp
+    gradient .+= vcat(gpθ, gpσ, gpω)
+    return value, gradient
+end
+
+function _saem_omega_above_floor(layout, ω, floor)
+    Ω = omega_matrix(layout, ω)
+    all(isfinite, Ω) || return false
+    ranges, _ = _block_ranges(layout)
+    return all(r -> eigmin(Symmetric(Ω[r, r])) >= floor, ranges)
+end
+
+function _saem_floor_omega(layout, ω, floor)
+    Ω = omega_matrix(layout, ω)
+    all(isfinite, Ω) || throw(DomainError(ω,
+        "SAEM MAP M-step starts with non-finite covariance"))
+    ranges, _ = _block_ranges(layout)
+    for r in ranges
+        E = eigen(Symmetric(Ω[r, r]))
+        Ω[r, r] = E.vectors * Diagonal(max.(E.values, floor)) * E.vectors'
+    end
+    return omega_parameters(layout, Ω)
+end
+
+function _saem_map_mstep(model, subjects, layout, θ, σ, ω, indices, design,
+        bank, weights, mean_phi, second_phi, maxiter, mode::Val, γ, floor)
+    x0 = vcat(θ, σ, _saem_floor_omega(layout, ω, floor))
+    x = copy(x0)
+    objective(z) = _saem_map_value_gradient(z, model, subjects, layout,
+        indices, design, bank, weights, mean_phi, second_phi, mode)
+    value, gradient = objective(x)
+    isfinite(value) && all(isfinite, gradient) || throw(DomainError(value,
+        "SAEM MAP M-step has non-finite objective or gradient"))
+    B = Matrix{Float64}(I, length(x), length(x))
+    for _ in 1:maxiter
+        maximum(abs, gradient) < 1.0e-6 && break
+        direction = B * gradient
+        if dot(direction, gradient) <= 0
+            direction = copy(gradient)
+            B = Matrix{Float64}(I, length(x), length(x))
+        end
+        step = 1.0
+        accepted = false
+        while step >= 1.0e-8
+            candidate = x + step * direction
+            candidate_omega = view(candidate, layout.ntheta+layout.nsigma+1:length(candidate))
+            if !_saem_omega_above_floor(layout, candidate_omega, floor)
+                step /= 2
+                continue
+            end
+            next_value, next_gradient = objective(candidate)
+            if isfinite(next_value) && all(isfinite, next_gradient) &&
+                    next_value >= value + 1.0e-4 * step * dot(gradient, direction)
+                s = candidate - x
+                y = gradient - next_gradient
+                ys = dot(y, s)
+                if ys > 1.0e-12
+                    ρ = inv(ys)
+                    C = Matrix{Float64}(I, length(x), length(x)) - ρ * s * y'
+                    B = C * B * C' + ρ * s * s'
+                end
+                x, value, gradient = candidate, next_value, next_gradient
+                accepted = true
+                break
+            end
+            step /= 2
+        end
+        accepted || break
+    end
+    mode isa Val{:online} && (x = x0 .+ γ .* (x .- x0))
+    return x[1:layout.ntheta], x[layout.ntheta+1:layout.ntheta+layout.nsigma],
+        x[layout.ntheta+layout.nsigma+1:end]
+end
+
 _saem_numeric_update(::Val{:mixture}, model, subjects, θ, σ, free, indices,
     design, bank, weights, maxiter, γ) =
     _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design,
@@ -706,6 +846,10 @@ undeclared structural θ as a model-specific approximation.
 `SAEMResult.numeric_mstep` records the selected mode. `kernel` selects the
 standard lockstep MH proposals, batched continuously adapted MALA proposals,
 or per-subject in-memory WarmupHMC NUTS transitions.
+When [`population_logprior`](@ref) is supplied, the M-step instead jointly
+optimizes θ, σ and ω, adding the prior once to the conditional and expected
+Gaussian random-effect objectives. The model supplies a population-prior
+gradient or an AD backend from which to derive it.
 """
 function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVector;
         rng::AbstractRNG = Random.default_rng(), subjects = nothing, η0 = nothing,
@@ -723,6 +867,17 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
     indices, design = _saem_mu_trait(model, ids, layout)
     θ, σ, ω = Float64.(θ0), Float64.(σ0), Float64.(ω0)
+    initial_lp = population_logprior(model, θ, σ, ω)
+    initial_lp === nothing || initial_lp isa Real || throw(ArgumentError(
+        "population_logprior must return a real log density or nothing"))
+    map_objective = initial_lp !== nothing
+    map_objective && !isfinite(initial_lp) && throw(DomainError(initial_lp,
+        "SAEM initial population log prior must be finite"))
+    if map_objective
+        gradient_lp = first(population_logprior_and_gradient(model, θ, σ, ω))
+        isapprox(gradient_lp, initial_lp; rtol = 1e-10, atol = 1e-10) ||
+            throw(ArgumentError("population_logprior_and_gradient value differs from population_logprior"))
+    end
     H = η0 === nothing ? zeros(neta(layout), length(ids)) : Matrix{Float64}(η0)
     size(H) == (neta(layout), length(ids)) || throw(DimensionMismatch(
         "η0 has size $(size(H)); expected ($(neta(layout)), $(length(ids)))"))
@@ -785,11 +940,17 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
             _saem_record!(numeric_mode, bank, weights, Φ, γ)
             if k % options.mstep_interval == 0 || k == options.iterations
                 θ_before, σ_before = θ, σ
-                θ, Ω = _saem_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
-                    design, mean_phi, second_phi, options.omega_floor)
-                ω = omega_parameters(layout, Ω)
-                θ, σ = numeric_update(model, ids, θ, σ, free, indices, design,
-                    bank, weights, options.numeric_maxiter, γ)::Tuple{Vector{Float64},Vector{Float64}}
+                if map_objective
+                    θ, σ, ω = _saem_map_mstep(model, ids, layout, θ, σ, ω,
+                        indices, design, bank, weights, mean_phi, second_phi,
+                        options.numeric_maxiter, numeric_mode, γ, options.omega_floor)
+                else
+                    θ, Ω = _saem_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
+                        design, mean_phi, second_phi, options.omega_floor)
+                    ω = omega_parameters(layout, Ω)
+                    θ, σ = numeric_update(model, ids, θ, σ, free, indices, design,
+                        bank, weights, options.numeric_maxiter, γ)::Tuple{Vector{Float64},Vector{Float64}}
+                end
                 if mala_cache !== nothing && mala_cache.valid
                     if θ == θ_before && σ == σ_before
                         _saem_mala_refresh_prior!(mala_cache, H, prior,
@@ -806,6 +967,9 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
     denom = sweeps * length(ids)
     is_mh = kernel isa StandardSAEMMH
     is_mala = kernel isa DualAveragingMALA
+    final_lp = map_objective ? population_logprior(model, θ, σ, ω) : 0.0
+    final_lp isa Real && isfinite(final_lp) || throw(DomainError(final_lp,
+        "SAEM final population log prior must be finite"))
     return SAEMResult(ids, θ, σ, ω, omega_matrix(layout, ω), H,
         (prior = is_mh ? nprior / denom : missing,
             random_walk = is_mh ? nrw / denom : missing),
@@ -815,7 +979,8 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
         is_mala ? exp.([s.log_stepsize for s in mala_states]) : missing,
         is_mala ? [s.accepted / s.count for s in mala_states] : missing,
         is_mala ? first(mala_states).count : 0,
-        _saem_mode_name(numeric_mode))
+        _saem_mode_name(numeric_mode), map_objective ? :MAP : :ML,
+        final_lp, map_objective ? population_prior_provenance(model) : nothing)
 end
 
 function _saem_remove_nuts_tempdir(root::AbstractString)

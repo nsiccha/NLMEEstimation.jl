@@ -39,7 +39,8 @@ export nsubjects, nlme_layout, EvaluationStyle, PerSubjectEvaluation, BatchedEva
     conditional_loglikelihood_and_gradient, conditional_loglikelihoods_and_gradients,
     conditional_loglikelihood_gradient_and_hessian, conditional_loglikelihood_hessian_blocks,
     conditional_loglikelihood_and_population_gradient,
-    ad_backend, hessian_ad_backend, provides_eta_hessian, parameter_names
+    ad_backend, hessian_ad_backend, provides_eta_hessian, parameter_names,
+    population_logprior, population_logprior_and_gradient, population_prior_provenance
 export mu_referencing, MuReferencing, observation_model, GaussianObservations,
     observations, observation_moments, observation_moments_and_jacobians
 export NormalREPrior, re_prior, re_logprior, re_logprior_gradient_and_hessian,
