@@ -97,6 +97,24 @@ function NE.conditional_loglikelihood_and_population_gradient(m::RaggedScaleFixt
     return value, Float64[], [-length(residual) + sum(abs2, residual) * exp(-2σ[1])]
 end
 
+struct RaggedMAPFixture
+    source::RaggedScaleFixture
+end
+NE.nsubjects(m::RaggedMAPFixture) = NE.nsubjects(m.source)
+NE.nlme_layout(m::RaggedMAPFixture) = NE.nlme_layout(m.source)
+NE.conditional_loglikelihood(m::RaggedMAPFixture, i, θ, σ, η) =
+    NE.conditional_loglikelihood(m.source, i, θ, σ, η)
+NE.conditional_loglikelihood_and_gradient(m::RaggedMAPFixture, i, θ, σ, η) =
+    NE.conditional_loglikelihood_and_gradient(m.source, i, θ, σ, η)
+NE.conditional_loglikelihood_and_population_gradient(m::RaggedMAPFixture,
+    i, θ, σ, η) =
+    NE.conditional_loglikelihood_and_population_gradient(m.source, i, θ, σ, η)
+NE.population_logprior(m::RaggedMAPFixture, θ, σ, ω) =
+    -(σ[1]^2 + sum(abs2, ω)) / (2 * 0.5^2)
+NE.population_logprior_and_gradient(m::RaggedMAPFixture, θ, σ, ω) =
+    (NE.population_logprior(m, θ, σ, ω), Float64[], [-4σ[1]], -4ω)
+NE.population_prior_provenance(::RaggedMAPFixture) = "synthetic Normal(0, 0.5) coordinates"
+
 @testset "ragged random-effect families" begin
     layout = RaggedNLMELayout(ntheta=0, nsigma=0, family_sizes=[1, 1],
         subject_families=[[1, 2], [1, 2, 2, 2], [1, 2, 2]])
@@ -116,6 +134,20 @@ end
     _, _, dense_hessian = re_logprior_gradient_and_hessian(dense_prior, 2, zeros(4))
     @test dense_hessian[1:2, 1:2] ≈ -inv(dense_covariances[1])
     @test dense_hessian[3, 4] == 0
+    dense_design = [zeros(3, 0), zeros(4, 0)]
+    dense_mean = [zeros(3), zeros(4)]
+    dense_second = [Matrix{Float64}(I, 3, 3), Matrix{Float64}(I, 4, 4)]
+    _, _, dense_gradient = NE._saem_gaussian_map_value_gradient(dense_layout,
+        Float64[], dense_ω, Int[], dense_design, dense_mean, dense_second, 1:2)
+    for j in eachindex(dense_ω)
+        step = zeros(length(dense_ω))
+        step[j] = 1e-6
+        plus = first(NE._saem_gaussian_map_value_gradient(dense_layout,
+            Float64[], dense_ω + step, Int[], dense_design, dense_mean, dense_second, 1:2))
+        minus = first(NE._saem_gaussian_map_value_gradient(dense_layout,
+            Float64[], dense_ω - step, Int[], dense_design, dense_mean, dense_second, 1:2))
+        @test dense_gradient[j] ≈ (plus - minus) / 2e-6 atol=1e-5
+    end
     prior = re_prior(model, ω)
     @test prior isa RaggedNormalREPrior
     @test isapprox(re_logprior(prior, 2, zeros(4)) - re_logprior(prior, 1, zeros(2)),
@@ -205,4 +237,10 @@ end
             mcmc_burnin=0, numeric_mstep=:mixture, numeric_maxiter=2))
     @test mixture_fit.numeric_mstep == :mixture
     @test isfinite(mixture_fit.sigma[1])
+    map_fit = saem(RaggedMAPFixture(scale_model), Float64[], [log(0.8)], [log(0.5)];
+        rng=Xoshiro(9), options=SAEMOptions(iterations=6, burnin=2,
+            mcmc_burnin=0, numeric_mstep=:mixture, numeric_maxiter=3))
+    @test map_fit.objective == :MAP
+    @test isfinite(map_fit.population_logprior)
+    @test map_fit.prior_provenance == "synthetic Normal(0, 0.5) coordinates"
 end

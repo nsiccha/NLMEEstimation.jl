@@ -95,7 +95,9 @@ sums the appropriate family densities for subject `i`.
 actual length of `subjects[k]`, and Hessian blocks have matching dimensions.
 `saem` with `StandardSAEMMH()` returns `RaggedSAEMResult`; its `eta[k]` is the
 compact final chain state and its `omega_matrix[f]` is the pooled covariance
-for family `f`. Mu-referencing designs have `neta(layout, i)` rows. When
+for family `f`. A model's optional `population_logprior` is included once in
+the joint MAP M-step and recorded by `objective` and `population_logprior`.
+Mu-referencing designs have `neta(layout, i)` rows. When
 `parameter_names` is not supplied by the model, `eta[i]` contains the default
 names for subject `i`; a model can supply its own subject and nested-unit labels.
 Ragged layouts currently support SAEM with the standard MH kernel and posthoc;

@@ -313,9 +313,10 @@ end
 
 SAEM estimate for a [`RaggedNLMELayout`](@ref). `eta[k]` is subject
 `subjects[k]`'s compact latent vector. `omega_matrix[f]` is the shared
-covariance of random-effect family `f`.
+covariance of random-effect family `f`. `objective` is `:MAP` when the model
+supplies a population prior and `:ML` otherwise.
 """
-struct RaggedSAEMResult{T}
+struct RaggedSAEMResult{T, P}
     subjects::Vector{Int}
     theta::Vector{T}
     sigma::Vector{T}
@@ -326,6 +327,9 @@ struct RaggedSAEMResult{T}
     rw_scale::Float64
     kernel::Symbol
     numeric_mstep::Symbol
+    objective::Symbol
+    population_logprior::T
+    prior_provenance::P
 end
 
 struct _SAEMSubjectTarget{M, P}
@@ -594,6 +598,10 @@ function _saem_gaussian_map_value_gradient(layout, θ, ω, indices, design,
     return value, gμ, gω
 end
 
+_saem_gaussian_map_value_gradient(layout::NLMELayout, θ, ω, indices, design,
+    mean_phi, second_phi, subjects) = _saem_gaussian_map_value_gradient(
+        layout, θ, ω, indices, design, mean_phi, second_phi)
+
 # The historical mixture optimizes the running conditional-density objective.
 function _saem_record!(::Val{:mixture}, bank, weights, Φ, γ)
     if γ == 1
@@ -737,7 +745,7 @@ function _saem_map_value_gradient(x, model, subjects, layout, indices, design,
     # these θ coordinates; its fixed-η gradient is not their total derivative.
     gradient[indices] .= 0
     gaussian, gμ, gω = _saem_gaussian_map_value_gradient(layout, θ, ω,
-        indices, design, mean_phi, second_phi)
+        indices, design, mean_phi, second_phi, subjects)
     value += gaussian
     gradient[indices] .+= gμ
     gradient[nθ+nσ+1:end] .+= gω

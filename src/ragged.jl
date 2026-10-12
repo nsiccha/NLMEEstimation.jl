@@ -351,6 +351,68 @@ function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
     throw(ErrorException("ragged SAEM Gaussian M-step did not converge in 100 coordinate updates"))
 end
 
+function _saem_gaussian_map_value_gradient(layout::RaggedNLMELayout, θ, ω,
+        indices, design, mean_phi, second_phi, subjects)
+    factors = omega_cholesky(layout, ω)
+    precisions = [begin
+        Linv = inv(L)
+        Matrix(Linv' * Linv)
+    end for L in factors]
+    μ = view(θ, indices)
+    sums = [zeros(k, k) for k in layout.family_sizes]
+    counts = zeros(Int, length(layout.family_sizes))
+    gμ = zeros(Float64, length(indices))
+    for (k, i) in enumerate(subjects)
+        X = design[k]
+        xμ = X * μ
+        φ = mean_phi[k]
+        S = second_phi[k]
+        for (family, r) in _ragged_subject_blocks(layout, i)
+            a = view(xμ, r)
+            p = view(φ, r)
+            Xr = view(X, r, :)
+            P = precisions[family]
+            sums[family] += view(S, r, r) - p * a' - a * p' + a * a'
+            counts[family] += 1
+            gμ += Xr' * P * (p - a)
+        end
+    end
+    value = 0.0
+    gω = zeros(Float64, length(ω))
+    omega_ranges = _ragged_family_ranges(layout)
+    for f in eachindex(factors)
+        L = factors[f]
+        P = precisions[f]
+        c = counts[f]
+        S = sums[f]
+        value -= (c * (layout.family_sizes[f] * log(2π) + 2sum(log, diag(L))) +
+            sum(P .* S)) / 2
+        GL = (P * S * P - c * P) * L
+        cursor = first(omega_ranges[f])
+        for j in 1:layout.family_sizes[f], l in 1:j
+            gω[cursor] = j == l ? GL[j, l] * L[j, l] : GL[j, l]
+            cursor += 1
+        end
+    end
+    return value, gμ, gω
+end
+
+function _saem_omega_above_floor(layout::RaggedNLMELayout, ω, floor)
+    covariances = omega_matrix(layout, ω)
+    return all(Ω -> all(isfinite, Ω) && eigmin(Symmetric(Ω)) >= floor, covariances)
+end
+
+function _saem_floor_omega(layout::RaggedNLMELayout, ω, floor)
+    covariances = omega_matrix(layout, ω)
+    all(Ω -> all(isfinite, Ω), covariances) || throw(DomainError(ω,
+        "SAEM MAP M-step starts with non-finite covariance"))
+    floored = [begin
+        E = eigen(Symmetric(Ω))
+        Matrix(Symmetric(E.vectors * Diagonal(max.(E.values, floor)) * E.vectors'))
+    end for Ω in covariances]
+    return omega_parameters(layout, floored)
+end
+
 function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
         options::SAEMOptions, kernel::StandardSAEMMH)
     _saem_check_options(options)
@@ -364,6 +426,17 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
     indices, design = _saem_mu_trait(model, ids, layout)
     θ, σ, ω = Float64.(θ0), Float64.(σ0), Float64.(ω0)
+    initial_lp = population_logprior(model, θ, σ, ω)
+    initial_lp === nothing || initial_lp isa Real || throw(ArgumentError(
+        "population_logprior must return a real log density or nothing"))
+    map_objective = initial_lp !== nothing
+    map_objective && !isfinite(initial_lp) && throw(DomainError(initial_lp,
+        "SAEM initial population log prior must be finite"))
+    if map_objective
+        gradient_lp = first(population_logprior_and_gradient(model, θ, σ, ω))
+        isapprox(gradient_lp, initial_lp; rtol=1e-10, atol=1e-10) || throw(ArgumentError(
+            "population_logprior_and_gradient value differs from population_logprior"))
+    end
     H = _ragged_start(η0, layout, ids)
     free = [i for i in 1:(layout.ntheta + layout.nsigma) if i > layout.ntheta || !(i in indices)]
     prior = RaggedNormalREPrior(layout, ω)
@@ -402,17 +475,27 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
         _ragged_moments!(mean_phi, second_phi, Φ, γ)
         _saem_record!(numeric_mode, bank, weights, Φ, γ)
         if k % options.mstep_interval == 0 || k == options.iterations
-            θ, Ω = _ragged_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
-                design, mean_phi, second_phi, options.omega_floor, ids)
-            ω = omega_parameters(layout, Ω)
-            θ, σ = numeric_update(model, ids, θ, σ, free, indices, design,
-                bank, weights, options.numeric_maxiter, γ)::Tuple{Vector{Float64},Vector{Float64}}
+            if map_objective
+                θ, σ, ω = _saem_map_mstep(model, ids, layout, θ, σ, ω,
+                    indices, design, bank, weights, mean_phi, second_phi,
+                    options.numeric_maxiter, numeric_mode, γ, options.omega_floor)
+            else
+                θ, Ω = _ragged_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
+                    design, mean_phi, second_phi, options.omega_floor, ids)
+                ω = omega_parameters(layout, Ω)
+                θ, σ = numeric_update(model, ids, θ, σ, free, indices, design,
+                    bank, weights, options.numeric_maxiter, γ)::Tuple{Vector{Float64},Vector{Float64}}
+            end
         end
     end
     denom = sweeps * length(ids)
+    final_lp = map_objective ? population_logprior(model, θ, σ, ω) : 0.0
+    final_lp isa Real && isfinite(final_lp) || throw(DomainError(final_lp,
+        "SAEM final population log prior must be finite"))
     return RaggedSAEMResult(ids, θ, σ, ω, omega_matrix(layout, ω), H,
         (prior=nprior / denom, random_walk=nrw / denom), exp(logscale),
-        :standard_mh, _saem_mode_name(numeric_mode))
+        :standard_mh, _saem_mode_name(numeric_mode), map_objective ? :MAP : :ML,
+        final_lp, map_objective ? population_prior_provenance(model) : nothing)
 end
 
 _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
