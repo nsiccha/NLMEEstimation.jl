@@ -20,12 +20,18 @@ end
 
 FOCE(I) log-likelihood at fixed population parameters. `ebes.modes` contains
 the subject EBEs, and `curvatures[k]` is the positive η curvature for subject
-`subjects[k]`. `ofv` is minus twice `loglikelihood`.
+`subjects[k]`. `logposterior` adds the optional population log prior exactly
+once; `ofv` is minus twice `logposterior` (equal to minus twice the likelihood
+when `objective == :ML`).
 """
-struct FOCEEvaluation{T, E}
+struct FOCEEvaluation{T, E, P}
     subjects::Vector{Int}
     loglikelihood::T
+    logposterior::T
+    population_logprior::T
     ofv::T
+    objective::Symbol
+    prior_provenance::P
     ebes::E
     curvatures::Vector{Matrix{T}}
 end
@@ -35,15 +41,21 @@ end
 
 Population estimate from [`focei`](@ref). `theta`, `sigma`, and `omega` use the
 model's declared coordinates; `omega_matrix` is the estimated Ω on covariance
-scale. `ofv` is minus twice the approximate marginal log-likelihood.
+scale. `loglikelihood` remains the approximate marginal likelihood;
+`logposterior` includes a model-provided population prior once, and `ofv` is
+minus twice that fitted objective. `objective` distinguishes `:ML` from `:MAP`.
 """
-struct FOCEResult{T, E, I}
+struct FOCEResult{T, E, I, P}
     theta::Vector{T}
     sigma::Vector{T}
     omega::Vector{T}
     omega_matrix::Matrix{T}
     loglikelihood::T
+    logposterior::T
+    population_logprior::T
     ofv::T
+    objective::Symbol
+    prior_provenance::P
     ebes::E
     curvatures::Vector{Matrix{T}}
     evaluations::Int
@@ -59,7 +71,8 @@ Evaluate the first-order conditional (with interaction by default) marginal
 log-likelihood. The EBEs maximize the exact complete-data log-density; their
 Laplace curvature uses only the first η derivatives of the Gaussian observation
 means and variances. Supply `η0` as for [`empirical_bayes`](@ref) to warm-start
-the mode search.
+the mode search. A model's [`population_logprior`](@ref), if present, is added
+once after the subject likelihood terms; it does not alter the subject EBEs.
 """
 function focei_evaluate(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η0 = nothing, interaction::Bool = true,
@@ -95,7 +108,14 @@ function focei_evaluate(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
         ll += ebes.complete_data_loglikelihood[k] + m * log(2π) / 2 -
             sum(log, diag(factor.L))
     end
-    return FOCEEvaluation(ebes.subjects, ll, -2ll, ebes, curvatures)
+    lp = population_logprior(model, θ, σ, ω)
+    lp === nothing || lp isa Real || throw(ArgumentError(
+        "population_logprior must return a real log density or nothing"))
+    active = lp !== nothing
+    lp = active ? lp : zero(ll)
+    return FOCEEvaluation(ebes.subjects, ll, ll + lp, lp, -2(ll + lp),
+        active ? :MAP : :ML, active ? population_prior_provenance(model) : nothing,
+        ebes, curvatures)
 end
 
 """
@@ -109,6 +129,8 @@ Each objective call warm-starts subject EBEs from the preceding successful call.
 No population derivatives or η Hessians are taken.
 `free` may select one-based positions in the concatenated `(θ, σ, ω)` vector;
 other coordinates stay at their starting values.
+With a population prior, the outer objective is the MAP point's negative twice
+log posterior; the result still reports its likelihood separately.
 """
 function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVector;
         subjects = nothing, free = nothing, options::FOCEOptions = FOCEOptions())
@@ -178,7 +200,9 @@ function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVec
         interaction = options.interaction, ebe_options = options.ebe_options)
     T = eltype(optimum)
     return FOCEResult(Vector{T}(θ̂), Vector{T}(σ̂), Vector{T}(ω̂),
-        Matrix{T}(omega_matrix(layout, ω̂)), evaluated.loglikelihood, evaluated.ofv,
+        Matrix{T}(omega_matrix(layout, ω̂)), evaluated.loglikelihood,
+        evaluated.logposterior, evaluated.population_logprior, evaluated.ofv,
+        evaluated.objective, evaluated.prior_provenance,
         evaluated.ebes, evaluated.curvatures, calls[],
         status in (:SUCCESS, :STOPVAL_REACHED, :FTOL_REACHED, :XTOL_REACHED),
         (minimum_ofv = min_ofv, status = status))

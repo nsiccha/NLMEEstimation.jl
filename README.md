@@ -49,6 +49,9 @@ AD pass for batched models.
 | `ad_backend(model)`, `hessian_ad_backend(model)` | optional | backends for derivatives the model does not implement; `hessian_ad_backend = nothing` declares a gradient-only model |
 | `provides_eta_hessian(model)` | optional | whether Hessian blocks are available |
 | `conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)` | optional | `(ℓ, ∇θ ℓ, ∇σ ℓ)` |
+| `population_logprior(model, θ, σ, ω)` | optional | log prior on unconstrained population coordinates; `nothing` (default) selects maximum likelihood |
+| `population_logprior_and_gradient(model, θ, σ, ω)` | optional | prior value and gradients in θ, σ, ω; derived using `ad_backend` unless implemented |
+| `population_prior_provenance(model)` | optional | description carried in population-fit results |
 | `mu_referencing(model)` | optional trait | `MuReferencing`: θ coordinates entering as `ϕ_i = X_i θ + η_i` (SAEM) |
 | `observation_model(model)` | optional trait | `GaussianObservations()` for FOCE(I) |
 | `observations(model, subjects)` | required for batched Gaussian models | one observation vector per subject, in batch order |
@@ -101,8 +104,9 @@ It throws an `EBEConvergenceError` naming any subject without a mode, unless
 at_start = focei_evaluate(model, θ, σ, ω)
 fit = focei(model, θ, σ, ω; options = FOCEOptions(maxeval = 500))
 fit.theta, fit.sigma, fit.omega_matrix  # estimated model coordinates and Ω
-fit.ofv                                # -2 × approximate marginal log-likelihood
+fit.ofv                                # -2 × fitted ML or MAP objective
 fit.ebes.modes                         # η̂ at the optimum
+fit.objective, fit.loglikelihood, fit.logposterior
 fit.converged, fit.evaluations
 ```
 
@@ -111,6 +115,18 @@ The outer BOBYQA search uses no gradients. For a joint-program model, implement
 the three batched Gaussian methods in the table so one query can return the
 moments and η Jacobians of all subjects. `FOCEOptions(interaction = false)`
 omits the variance-Jacobian term for FOCE without interaction.
+
+By default FOCE and SAEM estimate by maximum likelihood (`objective == :ML`).
+To request a maximum a posteriori (MAP) population point, implement
+`population_logprior(model, θ, σ, ω)` and return a real log density. This is a
+single prior for the whole population fit; it does not belong in each subject's
+conditional likelihood. The density must be expressed with respect to the
+unconstrained coordinates. For example, a prior on a positive parameter
+`a = exp(θ[1])` needs the `+θ[1]` log-Jacobian term. The package's Gaussian
+random-effect prior is already included separately. A model can also implement
+`population_logprior_and_gradient` directly and name its prior through
+`population_prior_provenance`. FOCE keeps `loglikelihood` separate from
+`logposterior`; its `ofv` optimizes `-2logposterior` in MAP mode.
 
 ## SAEM population estimation
 
@@ -121,6 +137,9 @@ saem_fit = saem(model, θ, σ, ω; rng = Xoshiro(2026),
     options = SAEMOptions(iterations = 300, burnin = 150))
 saem_fit.theta, saem_fit.sigma, saem_fit.omega_matrix
 saem_fit.eta                 # final subject-chain states
+saem_fit.objective, saem_fit.population_logprior, saem_fit.prior_provenance
+posthoc_fit = empirical_bayes(model, saem_fit.theta, saem_fit.sigma,
+    saem_fit.omega; η0 = saem_fit.eta)  # subject EBEs at the fitted point
 saem_fit.acceptance          # prior and random-walk MH acceptance fractions
 ```
 
@@ -149,10 +168,25 @@ decisions per subject. The random-walk scale adapts for a finite initial period.
 After an optional MCMC burn-in, stochastic approximation averages latent-effect
 statistics with unit steps during exploration and decreasing steps thereafter.
 
-With `mu_referencing(model)`, the M-step updates those θ coordinates by
-generalized least squares and Ω within `eta_blocks`. Other θ coordinates and σ
-use first-order AD. The numerical M-step retains the weighted history of latent
-samples because an arbitrary conditional model need not have finite sufficient
-statistics. Its memory and evaluation cost grow with the number of iterations;
-`mstep_interval` can reduce evaluation frequency. SAEM estimates depend on the
-RNG stream and run length, so assess recovery across starts for a new model.
+When a population prior is present, SAEM includes it once in a joint numerical
+M-step over θ, σ, and ω. The step combines the conditional objective, running
+Gaussian random-effect statistics, and the population prior, so priors on
+mu-referenced fixed effects and covariance coordinates also affect the estimate.
+The `:online` numerical mode blends the joint update with the SA gain; the
+`:mixture` mode optimizes the weighted retained-draw objective. The reported
+point and final subject states are estimates, not samples from a population
+posterior.
+
+`saem_fit.eta` contains the final Markov-chain states, not EBEs; call
+`empirical_bayes` as above when subject posterior modes are needed for app
+reporting or initialization.
+
+Without a population prior, `mu_referencing(model)` lets the M-step update its
+θ coordinates by generalized least squares and Ω within `eta_blocks`; other θ
+coordinates and σ use first-order AD. The `:mixture` numerical mode retains
+weighted latent draws, so its memory and evaluation cost grow with iterations.
+The `:online` mode keeps the current draw and applies the SA gain to its
+numerical update. `:auto` selects between them from the declared
+mu-referencing coverage. `mstep_interval` can reduce evaluation frequency.
+SAEM estimates depend on the RNG stream and run length, so assess recovery
+across starts for a new model.

@@ -223,6 +223,52 @@ modes use the one-argument style, preserving existing model methods.
 saem_population_gradient_style(model) = evaluation_style(model)
 saem_population_gradient_style(model, ::Val) = saem_population_gradient_style(model)
 
+"""
+    population_logprior(model, θ, σ, ω) -> Union{Nothing, Real}
+
+Optional log prior on the population coordinates, evaluated **once per fit**, not
+once per subject or retained SAEM draw. Return `nothing` (the default) for
+maximum likelihood. A model with a prior returns its log density with respect
+to the unconstrained `(θ, σ, ω)` coordinates. If the original prior is defined
+on transformed parameters, the model must include the transformation's log
+absolute Jacobian here. `ω` is the package's log-Cholesky coordinate vector.
+The random-effect prior `η ~ N(0, Ω)` is already owned by this package and must
+not be repeated here.
+"""
+population_logprior(model, θ, σ, ω) = nothing
+
+"""
+    population_logprior_and_gradient(model, θ, σ, ω)
+        -> (logprior, ∇θ logprior, ∇σ logprior, ∇ω logprior)
+
+Optional gradient for a model's [`population_logprior`](@ref). The default uses
+`ad_backend(model)` when a prior is present and returns zero gradients when
+there is none. Models may implement this method directly, including when their
+conditional-likelihood gradient uses a different backend.
+"""
+function population_logprior_and_gradient(model, θ, σ, ω)
+    lp = population_logprior(model, θ, σ, ω)
+    lp === nothing && return (zero(promote_type(eltype(θ), eltype(σ), eltype(ω))),
+        zero(θ), zero(σ), zero(ω))
+    backend = _checked_backend(model, ad_backend(model), :population_logprior_and_gradient)
+    nθ, nσ = length(θ), length(σ)
+    value, g = DI.value_and_gradient(_population_logprior_objective, backend,
+        vcat(θ, σ, ω), DI.Constant(model), DI.Constant(nθ), DI.Constant(nσ))
+    return value, g[1:nθ], g[nθ+1:nθ+nσ], g[nθ+nσ+1:end]
+end
+
+_population_logprior_objective(x, model, nθ, nσ) =
+    population_logprior(model, view(x, 1:nθ), view(x, nθ+1:nθ+nσ),
+        view(x, nθ+nσ+1:length(x)))
+
+"""
+    population_prior_provenance(model)
+
+Optional, model-supplied description of the population prior. Returned unchanged
+in SAEM and FOCE results when a prior is present; defaults to `nothing`.
+"""
+population_prior_provenance(model) = nothing
+
 # Per-subject models: derivatives of the per-subject density.
 function _and_gradient(::PerSubjectEvaluation, model, i, θ, σ, η)
     backend = _checked_backend(model, ad_backend(model), :conditional_loglikelihood_and_gradient)
