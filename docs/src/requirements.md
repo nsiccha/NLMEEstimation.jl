@@ -32,6 +32,7 @@ Some estimators need more structure:
 | `saem` with `DualAveragingMALA()` | ✓ | ✓ | — | ✓ | Optional: initial metric with `metric=:hessian` |
 | `saem` with `WarmupHMCNUTS()` | ✓ | ✓ | — | ✓ | Optional: initial NUTS metric |
 | `covariance_step` with `FOCEApproximation()` | ✓ | ✓ | ✓ | — | Optional: Newton subject modes |
+| `marginal_loglikelihood` / `covariance_step` with `ImportanceSampling()` or `AdaptiveGaussHermite()` | ✓ | ✓ | — | — | Optional: proposal curvature |
 
 All of these are first-order quantities, except the Hessian blocks:
 
@@ -40,6 +41,7 @@ All of these are first-order quantities, except the Hessian blocks:
 - SAEM's MH transitions use only values. MALA and NUTS need ∇η. A Hessian only seeds their initial metric. Without one, they use Ω.
 - Without a population prior, SAEM updates the mu-referenced θ and Ω in closed form from sufficient statistics, without derivatives. The remaining θ and every σ coordinate use a numerical M-step that needs ∇θσ. In practice that means almost every model, because residual-error parameters live in σ.
 - `covariance_step` evaluates the per-subject FOCE(I) marginal log-likelihoods at central-difference points in `(θ, σ, ω)`. Each evaluation needs what `focei` needs. With Hessian blocks it finds the subject modes by Newton, which converges to roundoff; otherwise it uses BFGS with a tighter tolerance. It takes no population derivatives ([source](https://github.com/nsiccha/NLMEEstimation.jl/blob/abea84d04bf65c2b90859d6b975032f29707c69c/src/covariance.jl#L213-L231)).
+- `marginal_loglikelihood` with importance sampling or adaptive Gauss–Hermite quadrature needs conditional values at its points and ∇η for each subject's mode. The curvature at the mode comes from the Hessian blocks when provided, and otherwise from central differences of batched ∇η. These approximations need no Gaussian observation model and support ragged layouts.
 - With a population prior, SAEM takes one numerical MAP step over `(θ, σ, ω)`. The package computes the mu-referenced and Ω parts of its gradient in closed form; the model supplies ∇θσ and the prior's gradient. `population_logprior_and_gradient` derives the latter with `ad_backend(model)` by default.
 
 Ragged nested random effects (`RaggedNLMELayout`) have the same requirements. FOCE(I) does not support them yet, and SAEM supports only the MH kernel.
