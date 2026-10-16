@@ -35,7 +35,9 @@ subject):
   size, and the density is invariant under the mu-referencing shift;
 - a declared [`observation_model`](@ref) reproduces the conditional log-density.
 - a declared Gaussian model's batched moments and first-order η Jacobians have
-  the promised per-subject shape and agree with its plain moments.
+  the promised per-subject shape and agree with its plain moments;
+- a declared [`fixed_omega`](@ref) is valid for the layout, and `ω` holds its
+  fixed values.
 
 With `reference_backend` (an AD backend), the model's η gradients are also compared
 against that backend, and its Hessian blocks (when provided) against
@@ -67,6 +69,7 @@ function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
     length(θ) == layout.ntheta || violation("θ has length $(length(θ)), the layout declares ntheta = $(layout.ntheta)")
     length(σ) == layout.nsigma || violation("σ has length $(length(σ)), the layout declares nsigma = $(layout.nsigma)")
     length(ω) == nomega(layout) || violation("ω has length $(length(ω)), the layout requires nomega = $(nomega(layout))")
+    _check_fixed_omega(violation, model, layout, ω)
     subjects = subjects === nothing ? collect(1:n) : collect(Int, subjects)
     all(i -> 1 <= i <= n, subjects) || violation("subjects $subjects are outside 1:$n")
     m = neta(layout)

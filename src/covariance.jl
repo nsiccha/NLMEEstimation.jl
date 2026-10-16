@@ -52,9 +52,15 @@ end
 
 Result of [`covariance_step`](@ref). `point` is the full concatenated population
 vector `[θ; σ; ω]` at which the step was taken, in the model's unconstrained
-coordinates and the package's log-Cholesky ω. Every other vector and matrix field
-is indexed by the estimated coordinates `free` (positions in `point`), named in
-`names`:
+coordinates and the package's log-Cholesky ω. `coordinates` is the same point in
+the coordinates the estimators fit: `[θ; σ; free Ω coordinates]`. It equals
+`point` unless the model declares [`fixed_omega`](@ref); then a fully fixed
+family has no coordinates, and a partially fixed family contributes its
+estimated log standard deviations (named `log sd(…)`) and, when its
+correlation is estimated, its correlation coordinates `m_jl = L_jl / L_jj` of
+the Cholesky factor `L` (named `m(…)`). Every other vector and matrix field is
+indexed by the estimated coordinates `free` (positions in `coordinates`),
+named in `names`:
 
 - `covariance`, `standard_errors`: the estimated sampling covariance of those
   coordinates and the square roots of its diagonal, for `method` `:rs`
@@ -75,6 +81,7 @@ Use [`delta_method`](@ref) for natural-unit quantities.
 struct CovarianceResult{T, A}
     subjects::Vector{Int}
     point::Vector{T}
+    coordinates::Vector{T}
     free::Vector{Int}
     names::Vector{String}
     method::Symbol
@@ -88,6 +95,7 @@ struct CovarianceResult{T, A}
     subject_gradients::Matrix{T}
     step::Vector{T}
     evaluations::Int
+    omega_constraints::Union{Nothing, _OmegaConstraints}
 end
 
 """
@@ -157,8 +165,11 @@ marginal is a smooth function of the coordinates. [`AdaptiveGaussHermite`](@ref)
 is the deterministic alternative for few random effects per subject. For those
 two approximations, perturbations of ω and of mu-referenced θ reuse the
 conditional values and cost no model evaluations. `free` selects positions in the
-concatenated `(θ, σ, ω)` vector. Throws [`CovarianceStepError`](@ref) when the
-requested matrix is not positive definite.
+estimated coordinates `[θ; σ; free Ω coordinates]`, which are the concatenated
+`(θ, σ, ω)` unless the model declares [`fixed_omega`](@ref) (see
+[`CovarianceResult`](@ref)). Fixed covariance parts carry no uncertainty and are
+never differentiated; `ω` must hold their values. Throws
+[`CovarianceStepError`](@ref) when the requested matrix is not positive definite.
 """
 function covariance_step(model, fit::FOCEResult; approximation = FOCEApproximation(
             interaction = fit.options.interaction), kwargs...)
@@ -188,15 +199,19 @@ function covariance_step(model, θ::AbstractVector, σ::AbstractVector, ω::Abst
     _check_length("θ", θ, nθ)
     _check_length("σ", σ, nσ)
     _check_length("ω", ω, nomega(layout))
+    constraints = _checked_omega_constraints(model, layout, ω)
     x̂ = Float64.(vcat(θ, σ, ω))
-    free = free === nothing ? collect(eachindex(x̂)) : collect(Int, free)
-    !isempty(free) && allunique(free) && all(i -> 1 <= i <= length(x̂), free) ||
-        throw(ArgumentError("free must contain unique positions in 1:$(length(x̂))"))
-    names = _population_coordinate_names(model)[free]
+    # The estimated coordinates; `point_of` maps them back to [θ; σ; ω].
+    ŷ = Float64.(vcat(θ, σ, _free_omega(constraints, ω)))
+    free = free === nothing ? collect(eachindex(ŷ)) : collect(Int, free)
+    !isempty(free) && allunique(free) && all(i -> 1 <= i <= length(ŷ), free) ||
+        throw(ArgumentError("free must contain unique positions in 1:$(length(ŷ))"))
+    names = _estimated_coordinate_names(model, constraints)[free]
     prepared = _prepare_marginal(approximation, model, θ, σ, ω, subjects, η0, rng)
     subject_ids = collect(Int, _marginal_subjects(prepared))
-    split(x) = (x[1:nθ], x[nθ+1:nθ+nσ], x[nθ+nσ+1:end])
-    lp0 = population_logprior(model, split(x̂)...)
+    point_of(y) = _point_from_coordinates(constraints, y, nθ + nσ)
+    split(y) = (x = point_of(y); (x[1:nθ], x[nθ+1:nθ+nσ], x[nθ+nσ+1:end]))
+    lp0 = population_logprior(model, split(ŷ)...)
     lp0 === nothing || lp0 isa Real || throw(ArgumentError(
         "population_logprior must return a real log density or nothing"))
     evaluations = Ref(0)
@@ -213,16 +228,16 @@ function covariance_step(model, θ::AbstractVector, σ::AbstractVector, ω::Abst
         return Vector{Float64}(terms), Float64(lp)
     end
     p = length(free)
-    h = step .* max.(1.0, abs.(x̂[free]))
+    h = step .* max.(1.0, abs.(ŷ[free]))
     total((terms, lp)) = sum(terms) + lp
     function shifted(signs)
-        x = copy(x̂)
+        y = copy(ŷ)
         for (j, s) in signs
-            x[free[j]] += s * h[j]
+            y[free[j]] += s * h[j]
         end
-        return x
+        return y
     end
-    center = evaluate(x̂)
+    center = evaluate(ŷ)
     plus = [evaluate(shifted(((j, 1),))) for j in 1:p]
     minus = [evaluate(shifted(((j, -1),))) for j in 1:p]
     G = Matrix{Float64}(reduce(hcat, [(plus[j][1] - minus[j][1]) / (2h[j]) for j in 1:p])')
@@ -242,10 +257,14 @@ function covariance_step(model, θ::AbstractVector, σ::AbstractVector, ω::Abst
         end
     end
     covariance = _covariance_from(Val(method), R, S, G, gradient, names)
-    return CovarianceResult(subject_ids, x̂, free, names, method, approximation,
+    return CovarianceResult(subject_ids, x̂, ŷ, free, names, method, approximation,
         lp0 === nothing ? :ML : :MAP, covariance, sqrt.(diag(covariance)), R, S,
-        gradient, G, h, evaluations[])
+        gradient, G, h, evaluations[], constraints)
 end
+
+_point_from_coordinates(::Nothing, y, nθσ) = y
+_point_from_coordinates(c::_OmegaConstraints, y, nθσ) =
+    vcat(y[1:nθσ], _constrained_omega(c, y[nθσ+1:end]))
 
 function _covariance_from(::Val{:s}, R, S, G, gradient, names)
     F = cholesky(Symmetric(S); check = false)
@@ -278,7 +297,9 @@ First-order (delta-method) uncertainty of natural-unit quantities `f(x)`, a real
 vector function of the full population vector `x = [θ; σ; ω]` (`result.point`).
 `jacobian(x)` may supply `∂f/∂x` as a `length(f(x)) × length(x)` matrix;
 otherwise the Jacobian is taken by central differences. Coordinates outside
-`result.free` carry no uncertainty. For example, with `nθ = length(θ)` and
+`result.free`, and covariance parts held by [`fixed_omega`](@ref), carry no
+uncertainty; the Jacobian is taken with respect to `result.coordinates`, mapped
+through the fixed parts. For example, with `nθ = length(θ)` and
 `nσ = length(σ)`, the covariance of `exp.(θ)` and of the Ω entries is
 
     delta_method(result, x -> exp.(x[1:nθ]))
@@ -289,14 +310,40 @@ function delta_method(result::CovarianceResult, f; jacobian = nothing)
     value = f(x)
     value isa AbstractVector{<:Real} || throw(ArgumentError(
         "delta_method: f must return a real vector, got $(typeof(value))"))
-    J = jacobian === nothing ? _central_jacobian(f, x, result.free, length(value)) :
-        jacobian(x)[:, result.free]
+    J = jacobian === nothing ? _central_jacobian(result.omega_constraints, f, result, length(value)) :
+        _coordinate_jacobian(result.omega_constraints, jacobian(x), result)
     size(J) == (length(value), length(result.free)) || throw(DimensionMismatch(
         "delta_method: the Jacobian has size $(size(J)); expected ($(length(value)), $(length(x))) before selecting free coordinates"))
     covariance = J * result.covariance * J'
     covariance = (covariance + covariance') / 2
     return (estimate = collect(value), covariance = covariance,
         standard_errors = sqrt.(diag(covariance)))
+end
+
+_central_jacobian(::Nothing, f, result, m) = _central_jacobian(f, result.point, result.free, m)
+function _central_jacobian(c::_OmegaConstraints, f, result, m)
+    nθσ = length(result.point) - last(last(c.ranges))
+    return _central_jacobian(y -> f(_point_from_coordinates(c, y, nθσ)),
+        result.coordinates, result.free, m)
+end
+
+_coordinate_jacobian(::Nothing, J, result) = J[:, result.free]
+# Chain rule through the fixed parts: ∂f/∂y = ∂f/∂x ∂x/∂y.
+function _coordinate_jacobian(c::_OmegaConstraints, J, result)
+    x, y = result.point, result.coordinates
+    nω = last(last(c.ranges))
+    nθσ = length(x) - nω
+    size(J, 2) == length(x) || throw(DimensionMismatch(
+        "delta_method: the Jacobian has $(size(J, 2)) columns; expected $(length(x))"))
+    D = zeros(length(x), length(y))
+    for i in 1:nθσ
+        D[i, i] = 1
+    end
+    ω = x[(nθσ + 1):end]
+    for r in 1:nω
+        D[nθσ + r, (nθσ + 1):end] = _free_omega_gradient(c, ω, [i == r ? 1.0 : 0.0 for i in 1:nω])
+    end
+    return J * D[:, result.free]
 end
 
 function _central_jacobian(f, x, free, m)
@@ -329,6 +376,31 @@ end
 omega_elements(layout::RaggedNLMELayout, ω::AbstractVector) =
     [Ω[j, l] for (k, Ω) in zip(layout.family_sizes, omega_matrix(layout, ω))
         for j in 1:k for l in 1:j]
+
+_estimated_coordinate_names(model, ::Nothing) = _population_coordinate_names(model)
+function _estimated_coordinate_names(model, c::_OmegaConstraints)
+    layout = nlme_layout(model)
+    full = _population_coordinate_names(model)
+    nθσ = layout.ntheta + layout.nsigma
+    labels = _omega_margin_labels(layout, parameter_names(model).eta)
+    names = full[1:nθσ]
+    for (f, fam) in enumerate(c.families)
+        if fam === nothing
+            append!(names, full[nθσ .+ c.ranges[f]])
+        elseif !fam.fully_fixed
+            k = c.sizes[f]
+            append!(names, ["log sd($(labels[f][j]))" for j in 1:k if !fam.sd_fixed[j]])
+            fam.correlation_fixed || append!(names,
+                ["m($(labels[f][j]),$(labels[f][l]))" for j in 1:k for l in 1:(j - 1)])
+        end
+    end
+    return names
+end
+
+_omega_margin_labels(layout::NLMELayout, eta) =
+    [[string(eta[i]) for i in r] for r in first(_block_ranges(layout))]
+_omega_margin_labels(layout::RaggedNLMELayout, eta) =
+    [["$f[$j]" for j in 1:k] for (f, k) in enumerate(layout.family_sizes)]
 
 # Names of the concatenated population coordinates [θ; σ; ω]. The ω entry for
 # Cholesky position (j, l) of a block is named by the η components it couples.

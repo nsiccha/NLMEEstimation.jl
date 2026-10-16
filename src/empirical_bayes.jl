@@ -220,18 +220,19 @@ end
 
 # ── The lockstep solver ───────────────────────────────────────────────────────
 #
-# State per subject k: current η (column of H), conditional and complete-data
-# log-densities ℓ[k], f[k], complete-data gradient G[:, k], and the method's
-# curvature (Newton: Hessian block; quasi-Newton: inverse-Hessian approximation of
-# -f). Each iteration proposes a direction for every active subject, evaluates all
-# trial points in batched value calls (retrying rejected subjects with more damping
-# or a shorter step), then evaluates gradients (and Newton's Hessian blocks) at the
-# accepted points in one batched call.
+# State per subject k: current η (column k of H, or H[k] for a ragged layout),
+# conditional and complete-data log-densities ℓ[k], f[k], complete-data gradient (in
+# the same storage as H), and the method's curvature (Newton: Hessian block;
+# quasi-Newton: inverse-Hessian approximation of -f). Each iteration proposes a
+# direction for every active subject, evaluates all trial points in batched value
+# calls (retrying rejected subjects with more damping or a shorter step), then
+# evaluates gradients (and Newton's Hessian blocks) at the accepted points in one
+# batched call. The prior's type selects the layout's complete-data evaluations.
 
 function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, opt::EBEOptions)
-    T = float(promote_type(eltype(H0), eltype(θ), eltype(σ), eltype(prior.precision)))
+    T = float(promote_type(_eta_eltype(H0), eltype(θ), eltype(σ), _prior_eltype(prior)))
     n = length(subjects)
-    H = Matrix{T}(H0)
+    H = _eta_state(T, H0)
     ℓ, f, G = _complete_gradients(model, subjects, θ, σ, prior, H)
     bad = findall(!isfinite, f)
     isempty(bad) || throw(DomainError(f[bad], "empirical_bayes: the complete-data log-density is " *
@@ -242,7 +243,7 @@ function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, op
     iterations = zeros(Int, n)
     while true
         active = findall(k -> !converged[k] && !failed[k], 1:n)
-        done = filter(k -> _is_converged(method, curvature, k, view(G, :, k), prior, opt), active)
+        done = filter(k -> _is_converged(method, curvature, k, _column(G, k), prior, subjects[k], opt), active)
         converged[done] .= true
         _polish!(method, model, subjects, θ, σ, prior, H, ℓ, f, G, curvature, iterations, done)
         active = setdiff(active, done)
@@ -251,56 +252,83 @@ function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, op
         failed[exhausted] .= true
         active = setdiff(active, exhausted)
         isempty(active) && break
-        steps, rejected = _search_steps(method, model, subjects, θ, σ, prior, H, f, G, curvature, active, opt)
+        accepted, steps, rejected = _search_steps(method, model, subjects, θ, σ, prior, H, f, G,
+            curvature, active, opt)
         failed[rejected] .= true
-        accepted = setdiff(active, rejected)
         isempty(accepted) && continue
-        previous_G = G[:, accepted]
-        H[:, accepted] .+= steps[:, accepted]
-        ℓa, fa, Ga = _complete_gradients(model, subjects[accepted], θ, σ, prior, H[:, accepted])
+        previous_G = _columns(G, accepted)
+        Ha = _from_columns(H, [_column(H, k) + step for (k, step) in zip(accepted, steps)])
+        _set_columns!(H, accepted, Ha)
+        ℓa, fa, Ga = _complete_gradients(model, subjects[accepted], θ, σ, prior, Ha)
         ℓ[accepted] = ℓa
         f[accepted] = fa
-        G[:, accepted] = Ga
+        _set_columns!(G, accepted, Ga)
         iterations[accepted] .+= 1
         _update_curvature!(method, curvature, model, subjects, θ, σ, prior, H, accepted,
-            steps[:, accepted], previous_G, Ga)
+            steps, previous_G, Ga)
     end
     hessians = _final_hessians(method, curvature, model, subjects, θ, σ, prior, H)
-    L = prior.cholesky_factor
-    gradient_norm = [maximum(abs, L' * view(G, :, k); init = zero(T)) for k in 1:n]
-    return EBEResult(collect(subjects), H, hessians, ℓ, f, collect(converged), iterations, gradient_norm, method)
+    gradient_norm = [_standardized_norm(prior, i, _column(G, k)) for (k, i) in enumerate(subjects)]
+    return _ebe_result(H, collect(subjects), hessians, ℓ, f, collect(converged), iterations,
+        gradient_norm, method)
 end
 
 # Trial steps for the active subjects: a direction each, then batched value calls
 # until every subject either passes the sufficient-increase test or exhausts its
-# retries. Returns the accepted steps (columns of a neta × n matrix) and the
-# subjects that found no ascent step.
+# retries. Returns the subjects that found an ascent step (in `active` order), their
+# steps, and the subjects that found none.
 function _search_steps(method, model, subjects, θ, σ, prior, H, f, G, curvature, active, opt)
-    T = eltype(H)
-    steps = zeros(T, size(H))
-    trials = Dict(k => _first_trial(method, curvature, k, view(G, :, k), H) for k in active)
+    trials = Dict(k => _first_trial(method, curvature, k, _column(G, k)) for k in active)
     pending = collect(active)
-    rejected = Int[]
     for _ in 0:opt.max_backtracks
         isempty(pending) && break
         proposals = filter(k -> trials[k].step !== nothing, pending)
         if !isempty(proposals)
-            trial_H = H[:, proposals] .+ reduce(hcat, [trials[k].step for k in proposals])
+            trial_H = _from_columns(H, [_column(H, k) + trials[k].step for k in proposals])
             _, ft = _complete_values(model, subjects[proposals], θ, σ, prior, trial_H)
             for (j, k) in enumerate(proposals)
-                if _accepts(trials[k], f[k], ft[j], view(G, :, k))
-                    steps[:, k] = trials[k].step
-                    filter!(!=(k), pending)
-                end
+                _accepts(trials[k], f[k], ft[j], _column(G, k)) && filter!(!=(k), pending)
             end
         end
         for k in pending
-            trials[k] = _next_trial(method, trials[k], curvature, k, view(G, :, k))
+            trials[k] = _next_trial(method, trials[k], curvature, k, _column(G, k))
         end
     end
-    append!(rejected, pending)
-    return steps, rejected
+    accepted = setdiff(active, pending)
+    return accepted, [trials[k].step for k in accepted], pending
 end
+
+# η storage: a neta × n matrix for an equal-size layout, one compact vector per
+# subject for a ragged one. `k` indexes the solver's subjects.
+_eta_eltype(H::AbstractMatrix) = eltype(H)
+_eta_eltype(H::AbstractVector{<:AbstractVector}) = eltype(eltype(H))
+_eta_state(::Type{T}, H::AbstractMatrix) where {T} = Matrix{T}(H)
+_eta_state(::Type{T}, H::AbstractVector{<:AbstractVector}) where {T} = [Vector{T}(h) for h in H]
+_column(X::AbstractMatrix, k) = view(X, :, k)
+_column(X::AbstractVector{<:AbstractVector}, k) = X[k]
+_columns(X::AbstractMatrix, ks) = X[:, ks]
+_columns(X::AbstractVector{<:AbstractVector}, ks) = X[ks]
+_from_columns(::AbstractMatrix, columns) = reduce(hcat, columns)
+_from_columns(::AbstractVector{<:AbstractVector}, columns) = columns
+_set_columns!(X::AbstractMatrix, ks, Y) = (X[:, ks] = Y; X)
+_set_columns!(X::AbstractVector{<:AbstractVector}, ks, Y) = (X[ks] = Y; X)
+_set_column!(X::AbstractMatrix, k, y) = (X[:, k] = y; X)
+_set_column!(X::AbstractVector{<:AbstractVector}, k, y) = (X[k] = y; X)
+
+_ebe_result(H::AbstractMatrix, subjects, hessians, ℓ, f, converged, iterations, gradient_norm, method) =
+    EBEResult(subjects, H, hessians, ℓ, f, converged, iterations, gradient_norm, method)
+function _ebe_result(H::AbstractVector{<:AbstractVector}, subjects, hessians, ℓ, f, converged,
+        iterations, gradient_norm, method)
+    T = _eta_eltype(H)
+    return RaggedEBEResult(subjects, H, hessians, Vector{T}(ℓ), Vector{T}(f), converged, iterations,
+        Vector{T}(gradient_norm), method)
+end
+
+# The prior's covariance of subject i's η, and the standardized gradient ‖Lᵀg‖∞.
+_prior_eltype(prior::NormalREPrior) = eltype(prior.precision)
+_prior_covariance(prior::NormalREPrior, i) = Matrix(prior.cholesky_factor * prior.cholesky_factor')
+_standardized_norm(prior::NormalREPrior, i, g) =
+    maximum(abs, prior.cholesky_factor' * g; init = zero(eltype(g)))
 
 # Sufficient increase (Armijo, c = 1e-4) — or, for an undamped full step whose
 # predicted increase is below what f resolves, no measurable decrease.
@@ -319,7 +347,7 @@ _roundoff(f) = 16 * eps(typeof(f)) * max(one(f), abs(f))
 _initial_curvature(::NewtonEBE, model, subjects, θ, σ, prior, H) =
     _complete_hessians(model, subjects, θ, σ, prior, H)
 
-function _is_converged(::NewtonEBE, hessians, k, g, prior, opt)
+function _is_converged(::NewtonEBE, hessians, k, g, prior, i, opt)
     p, decrement = _newton_step(g, hessians[k])
     return p !== nothing && decrement / 2 <= opt.decrement_tol
 end
@@ -333,11 +361,23 @@ function _newton_step(g, Hk)
     return p, dot(g, p)
 end
 
-function _first_trial(::NewtonEBE, hessians, k, g, H)
+# A Newton trial: the full step (λ = 0) or a Levenberg–Marquardt step (-H + λI)⁻¹g.
+# `step` is `nothing` while -H + λI is not positive definite (the next retry raises
+# λ). Every state has this one concrete type, so `_search_steps` can store any retry
+# in the table it builds from the first trials.
+struct DampedTrial{T}
+    step::Union{Nothing, Vector{T}}
+    full::Bool
+    λ::T
+    λ0::T
+end
+DampedTrial(step, full, λ::T, λ0::T) where {T} = DampedTrial{T}(step, full, λ, λ0)
+
+function _first_trial(::NewtonEBE, hessians, k, g)
     p, _ = _newton_step(g, hessians[k])
-    λ0 = 1.0e-3 * max(one(eltype(H)), maximum(abs, diag(hessians[k])))
+    λ0 = 1.0e-3 * max(one(eltype(hessians[k])), maximum(abs, diag(hessians[k])))
     p === nothing && return _damped_trial(hessians[k], g, λ0, λ0)
-    return (step = p, full = true, λ = zero(λ0), λ0 = λ0)
+    return DampedTrial(p, true, zero(λ0), λ0)
 end
 
 function _next_trial(::NewtonEBE, trial, hessians, k, g)
@@ -345,15 +385,13 @@ function _next_trial(::NewtonEBE, trial, hessians, k, g)
     return _damped_trial(hessians[k], g, λ, trial.λ0)
 end
 
-# Levenberg–Marquardt step (-H + λI)⁻¹g; `step = nothing` while -H + λI is not
-# positive definite (the next retry raises λ).
 function _damped_trial(Hk, g, λ, λ0)
     ch = cholesky(Symmetric(-Hk + λ * I); check = false)
-    return (step = issuccess(ch) ? ch \ g : nothing, full = false, λ = λ, λ0 = λ0)
+    return DampedTrial(issuccess(ch) ? ch \ g : nothing, false, λ, λ0)
 end
 
 function _update_curvature!(::NewtonEBE, hessians, model, subjects, θ, σ, prior, H, accepted, steps, previous_G, Ga)
-    hessians[accepted] = _complete_hessians(model, subjects[accepted], θ, σ, prior, H[:, accepted])
+    hessians[accepted] = _complete_hessians(model, subjects[accepted], θ, σ, prior, _columns(H, accepted))
     return hessians
 end
 
@@ -362,17 +400,16 @@ end
 # definite at the new point.
 function _polish!(::NewtonEBE, model, subjects, θ, σ, prior, H, ℓ, f, G, hessians, iterations, done)
     isempty(done) && return nothing
-    steps = reduce(hcat, [first(_newton_step(view(G, :, k), hessians[k])) for k in done])
-    Hp = H[:, done] .+ steps
+    Hp = _from_columns(H, [_column(H, k) + first(_newton_step(_column(G, k), hessians[k])) for k in done])
     ℓp, fp, Gp = _complete_gradients(model, subjects[done], θ, σ, prior, Hp)
     Hessp = _complete_hessians(model, subjects[done], θ, σ, prior, Hp)
     for (j, k) in enumerate(done)
         keep = isfinite(fp[j]) && fp[j] >= f[k] - _roundoff(f[k]) &&
             issuccess(cholesky(Symmetric(-Hessp[j]); check = false))
         keep || continue
-        H[:, k] = Hp[:, j]
+        _set_column!(H, k, _column(Hp, j))
         ℓ[k], f[k] = ℓp[j], fp[j]
-        G[:, k] = Gp[:, j]
+        _set_column!(G, k, _column(Gp, j))
         hessians[k] = Hessp[j]
         iterations[k] += 1
     end
@@ -391,23 +428,20 @@ struct BFGSState{T}
     rescaled::Vector{Bool}
 end
 
-function _initial_curvature(::QuasiNewtonEBE, model, subjects, θ, σ, prior, H)
-    Ω = Matrix(prior.cholesky_factor * prior.cholesky_factor')
-    return BFGSState([copy(Ω) for _ in subjects], fill(false, length(subjects)))
-end
+_initial_curvature(::QuasiNewtonEBE, model, subjects, θ, σ, prior, H) =
+    BFGSState([_prior_covariance(prior, i) for i in subjects], fill(false, length(subjects)))
 
-_is_converged(::QuasiNewtonEBE, state, k, g, prior, opt) =
-    maximum(abs, prior.cholesky_factor' * g; init = zero(eltype(g))) <= opt.gtol
+_is_converged(::QuasiNewtonEBE, state, k, g, prior, i, opt) = _standardized_norm(prior, i, g) <= opt.gtol
 
-_first_trial(::QuasiNewtonEBE, state, k, g, H) = (step = state.inverse_hessians[k] * g, full = true)
+_first_trial(::QuasiNewtonEBE, state, k, g) = (step = state.inverse_hessians[k] * g, full = true)
 _next_trial(::QuasiNewtonEBE, trial, state, k, g) = (step = trial.step / 2, full = false)
 
 # BFGS update of the inverse Hessian of -f with s = Δη, y = Δ(-g); skipped when the
 # curvature condition sᵀy > 0 fails.
 function _update_curvature!(::QuasiNewtonEBE, state, model, subjects, θ, σ, prior, H, accepted, steps, previous_G, Ga)
     for (j, k) in enumerate(accepted)
-        s = steps[:, j]
-        y = previous_G[:, j] - Ga[:, j]
+        s = steps[j]
+        y = _column(previous_G, j) - _column(Ga, j)
         sy = dot(s, y)
         sy > 0 || continue
         B = state.inverse_hessians[k]

@@ -300,7 +300,7 @@ end
                            rng = Random.default_rng(), nobs = nothing)
     marginal_loglikelihood(model, θ, σ, ω; subjects = 1:nsubjects(model), η0 = nothing,
                            approximation = ImportanceSampling(), rng = Random.default_rng(),
-                           nparameters = length(θ) + length(σ) + length(ω), nobs = nothing)
+                           nparameters = nothing, nobs = nothing)
         -> MarginalLikelihoodResult
 
 The marginal log-likelihood `Σᵢ log ∫ p(y_i | θ, σ, η) N(η; 0, Ω) dη` at a fit's
@@ -309,9 +309,11 @@ SAEM fits a likelihood-based objective. `approximation` is
 [`ImportanceSampling`](@ref), [`AdaptiveGaussHermite`](@ref) or
 [`FOCEApproximation`](@ref). The first two need only conditional values and
 η gradients, so they apply to any likelihood and to ragged layouts. Subject
-modes warm-start from the fit's EBEs or final chain states (`η0`). For a fit,
-`nparameters` counts the estimated coordinates: all of them for SAEM, and
-`fit.free` for FOCE(I). `nobs` overrides the observation count used by BIC.
+modes warm-start from the fit's EBEs or final chain states (`η0`).
+`nparameters`, the AIC/BIC parameter count, defaults to the estimated
+coordinates: θ, σ and the Ω coordinates that [`fixed_omega`](@ref) leaves free,
+or `fit.free` for a FOCE(I) fit. `nobs` overrides the observation count used by
+BIC.
 """
 function marginal_loglikelihood(model, fit::Union{SAEMResult, RaggedSAEMResult};
         nobs = nothing, kwargs...)
@@ -327,12 +329,14 @@ end
 
 function marginal_loglikelihood(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η0 = nothing, approximation = ImportanceSampling(),
-        rng::AbstractRNG = Random.default_rng(),
-        nparameters::Integer = length(θ) + length(σ) + length(ω), nobs = nothing)
+        rng::AbstractRNG = Random.default_rng(), nparameters = nothing, nobs = nothing)
     layout = nlme_layout(model)
     _check_length("θ", θ, layout.ntheta)
     _check_length("σ", σ, layout.nsigma)
     _check_length("ω", ω, nomega(layout))
+    nparameters = nparameters === nothing ? layout.ntheta + layout.nsigma +
+        length(_free_omega(_omega_constraints(layout, fixed_omega(model)), ω)) :
+        Int(nparameters)
     nparameters >= 0 || throw(ArgumentError("nparameters must be nonnegative"))
     prepared = _prepare_marginal(approximation, model, θ, σ, ω, subjects, η0, rng)
     ids = collect(Int, _marginal_subjects(prepared))

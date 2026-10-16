@@ -63,7 +63,9 @@ end
 _ragged_start(η0, layout, subjects) = throw(ArgumentError(
     "ragged η0 must be nothing, a vector of subject vectors, or a RaggedEBEResult"))
 
-function _ragged_prior_covariance(prior::RaggedNormalREPrior, i)
+_prior_eltype(::RaggedNormalREPrior{T}) where {T} = T
+
+function _prior_covariance(prior::RaggedNormalREPrior, i)
     n = neta(prior.layout, i)
     Ω = zeros(Float64, n, n)
     for (family, r) in _ragged_subject_blocks(prior.layout, i)
@@ -73,7 +75,7 @@ function _ragged_prior_covariance(prior::RaggedNormalREPrior, i)
     return Ω
 end
 
-function _ragged_standardized_norm(prior::RaggedNormalREPrior, i, g)
+function _standardized_norm(prior::RaggedNormalREPrior, i, g)
     norm = 0.0
     for (family, r) in _ragged_subject_blocks(prior.layout, i)
         norm = max(norm, maximum(abs, prior.cholesky_factors[family]' * view(g, r); init=0.0))
@@ -92,139 +94,7 @@ function _empirical_bayes(layout::RaggedNLMELayout, model, θ, σ, ω, subjects,
     !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= nsubjects(model), ids) ||
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
     H = _ragged_start(η0, layout, ids)
-    prior = RaggedNormalREPrior(layout, ω)
-    ℓ, f, G = _complete_gradients(model, ids, θ, σ, prior, H)
-    all(isfinite, f) || throw(DomainError(f, "empirical_bayes: non-finite initial complete-data density"))
-    n = length(ids)
-    converged = falses(n)
-    failed = falses(n)
-    iterations = zeros(Int, n)
-    hessians = method isa NewtonEBE ?
-        _complete_hessians(model, ids, θ, σ, prior, H) : nothing
-    inverses = method isa QuasiNewtonEBE ?
-        [_ragged_prior_covariance(prior, i) for i in ids] : nothing
-    rescaled = falses(n)
-    for _ in 0:opt.maxiter
-        active = Int[]
-        done = Int[]
-        for k in 1:n
-            (converged[k] || failed[k]) && continue
-            g = G[k]
-            if method isa NewtonEBE
-                step, decrement = _newton_step(g, hessians[k])
-                if step !== nothing && decrement / 2 <= opt.decrement_tol
-                    converged[k] = true
-                    push!(done, k)
-                    continue
-                end
-            elseif _ragged_standardized_norm(prior, ids[k], g) <= opt.gtol
-                converged[k] = true
-                continue
-            end
-            if iterations[k] >= opt.maxiter
-                failed[k] = true
-            else
-                push!(active, k)
-            end
-        end
-        if method isa NewtonEBE && !isempty(done)
-            polished = [H[k] + first(_newton_step(G[k], hessians[k])) for k in done]
-            ℓp, fp, Gp = _complete_gradients(model, ids[done], θ, σ,
-                prior, polished)
-            Hp = _complete_hessians(model, ids[done], θ, σ, prior, polished)
-            for (j, k) in enumerate(done)
-                good = isfinite(fp[j]) && fp[j] >= f[k] - _roundoff(f[k]) &&
-                    issuccess(cholesky(Symmetric(-Hp[j]); check=false))
-                good || continue
-                H[k], ℓ[k], f[k], G[k], hessians[k] = polished[j], ℓp[j], fp[j], Gp[j], Hp[j]
-                iterations[k] += 1
-            end
-        end
-        isempty(active) && break
-        steps = Vector{Vector{Float64}}(undef, n)
-        damping = zeros(n)
-        first_damping = zeros(n)
-        for k in active
-            if method isa NewtonEBE
-                step, _ = _newton_step(G[k], hessians[k])
-                first_damping[k] = 1e-3 * max(1.0, maximum(abs, diag(hessians[k])))
-                if step === nothing
-                    damping[k] = first_damping[k]
-                    ch = cholesky(Symmetric(-hessians[k] + damping[k] * I); check=false)
-                    steps[k] = issuccess(ch) ? ch \ G[k] : zeros(length(G[k]))
-                else
-                    steps[k] = step
-                end
-            else
-                steps[k] = inverses[k] * G[k]
-            end
-        end
-        pending = copy(active)
-        accepted = Int[]
-        for attempt in 0:opt.max_backtracks
-            isempty(pending) && break
-            trial_H = [H[k] + steps[k] for k in pending]
-            _, ft = _complete_values(model, ids[pending], θ, σ, prior, trial_H)
-            keep = Int[]
-            for (j, k) in enumerate(pending)
-                predicted = dot(G[k], steps[k])
-                full = attempt == 0 && method isa QuasiNewtonEBE ||
-                    attempt == 0 && method isa NewtonEBE && iszero(damping[k])
-                if isfinite(ft[j]) && (ft[j] - f[k] >= 1e-4 * predicted ||
-                        full && predicted <= sqrt(eps(Float64)) * max(1.0, abs(f[k])) &&
-                        ft[j] >= f[k] - _roundoff(f[k]))
-                    push!(accepted, k)
-                else
-                    push!(keep, k)
-                    if method isa NewtonEBE
-                        λ = iszero(damping[k]) ? first_damping[k] : 10damping[k]
-                        ch = cholesky(Symmetric(-hessians[k] + λ * I); check=false)
-                        steps[k] = issuccess(ch) ? ch \ G[k] : zeros(length(G[k]))
-                        damping[k] = λ
-                    else
-                        steps[k] ./= 2
-                    end
-                end
-            end
-            pending = keep
-        end
-        failed[pending] .= true
-        isempty(accepted) && continue
-        previous_G = [copy(G[k]) for k in accepted]
-        for k in accepted
-            H[k] += steps[k]
-        end
-        ℓa, fa, Ga = _complete_gradients(model, ids[accepted], θ, σ, prior, H[accepted])
-        for (j, k) in enumerate(accepted)
-            ℓ[k], f[k], G[k] = ℓa[j], fa[j], Ga[j]
-            iterations[k] += 1
-            if method isa QuasiNewtonEBE
-                s = steps[k]
-                y = previous_G[j] - Ga[j]
-                sy = dot(s, y)
-                if sy > 0
-                    B = inverses[k]
-                    if !rescaled[k]
-                        B = (sy / dot(y, B * y)) * B
-                        rescaled[k] = true
-                    end
-                    ρ = inv(sy)
-                    V = I - ρ * y * s'
-                    inverses[k] = V' * B * V + ρ * s * s'
-                end
-            end
-        end
-        if method isa NewtonEBE
-            hessians[accepted] = _complete_hessians(model, ids[accepted], θ, σ,
-                prior, H[accepted])
-        end
-    end
-    if method isa QuasiNewtonEBE && provides_eta_hessian(model)
-        hessians = _complete_hessians(model, ids, θ, σ, prior, H)
-    end
-    norms = [_ragged_standardized_norm(prior, i, G[k]) for (k, i) in enumerate(ids)]
-    result = RaggedEBEResult(ids, H, hessians, Float64.(ℓ), Float64.(f),
-        collect(converged), iterations, norms, method)
+    result = _ebe_lockstep(method, model, ids, θ, σ, RaggedNormalREPrior(layout, ω), H, opt)
     bad = ids[.!result.converged]
     require_convergence && !isempty(bad) && throw(EBEConvergenceError(bad, result))
     return result
@@ -301,7 +171,7 @@ function _saem_mh_round!(rng, model, subjects, θ, σ, prior::RaggedNormalREPrio
 end
 
 function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
-        second_phi, floor, subjects)
+        second_phi, floor, subjects, constraints = nothing)
     μ = copy(θ[indices])
     Ωnew = deepcopy(Ω)
     for _ in 1:100
@@ -333,11 +203,19 @@ function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
                 counts[family] += 1
             end
         end
-        all(>(0), counts) || throw(ArgumentError(
-            "SAEM selected subjects contain no instances of at least one covariance family"))
+        all(f -> counts[f] > 0 || _fully_fixed_family(constraints, f), eachindex(counts)) ||
+            throw(ArgumentError(
+                "SAEM selected subjects contain no instances of at least one estimated covariance family"))
         nextΩ = [begin
-            E = eigen(Symmetric(sums[f] / counts[f]))
-            Matrix(Symmetric(E.vectors * Diagonal(max.(E.values, floor)) * E.vectors'))
+            fam = _omega_family(constraints, f)
+            if fam === nothing
+                E = eigen(Symmetric(sums[f] / counts[f]))
+                Matrix(Symmetric(E.vectors * Diagonal(max.(E.values, floor)) * E.vectors'))
+            elseif fam.fully_fixed
+                copy(fam.covariance)
+            else
+                _fixed_family_update(fam, sums[f] / counts[f], Ωnew[f], floor)
+            end
         end for f in eachindex(sums)]
         if all(f -> maximum(abs, nextΩ[f] - Ωnew[f]) <=
                 1e-8 * max(1.0, maximum(abs, Ωnew[f])), eachindex(Ωnew))
@@ -381,18 +259,9 @@ function _saem_gaussian_map_value_gradient(layout::RaggedNLMELayout, θ, ω,
     gω = zeros(Float64, length(ω))
     omega_ranges = _ragged_family_ranges(layout)
     for f in eachindex(factors)
-        L = factors[f]
-        P = precisions[f]
-        c = counts[f]
-        S = sums[f]
-        value -= (c * (layout.family_sizes[f] * log(2π) + 2sum(log, diag(L))) +
-            sum(P .* S)) / 2
-        GL = (P * S * P - c * P) * L
-        cursor = first(omega_ranges[f])
-        for j in 1:layout.family_sizes[f], l in 1:j
-            gω[cursor] = j == l ? GL[j, l] * L[j, l] : GL[j, l]
-            cursor += 1
-        end
+        v, g = _gaussian_family_value_gradient(factors[f], precisions[f], sums[f], counts[f])
+        value += v
+        gω[omega_ranges[f]] = g
     end
     return value, gμ, gω
 end
@@ -421,6 +290,7 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
     _check_length("θ", θ0, layout.ntheta)
     _check_length("σ", σ0, layout.nsigma)
     _check_length("ω", ω0, nomega(layout))
+    constraints = _checked_omega_constraints(model, layout, ω0)
     ids = subjects === nothing ? collect(1:nsubjects(model)) : collect(Int, subjects)
     !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= nsubjects(model), ids) ||
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
@@ -478,11 +348,12 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
             if map_objective
                 θ, σ, ω = _saem_map_mstep(model, ids, layout, θ, σ, ω,
                     indices, design, bank, weights, mean_phi, second_phi,
-                    options.numeric_maxiter, numeric_mode, γ, options.omega_floor)
+                    options.numeric_maxiter, numeric_mode, γ, options.omega_floor,
+                    constraints)
             else
                 θ, Ω = _ragged_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
-                    design, mean_phi, second_phi, options.omega_floor, ids)
-                ω = omega_parameters(layout, Ω)
+                    design, mean_phi, second_phi, options.omega_floor, ids, constraints)
+                ω = _apply_omega_constraints(constraints, omega_parameters(layout, Ω))
                 θ, σ = numeric_update(model, ids, θ, σ, free, indices, design,
                     bank, weights, options.numeric_maxiter, γ)::Tuple{Vector{Float64},Vector{Float64}}
             end
@@ -515,6 +386,7 @@ function _check_ragged_protocol(model, layout::RaggedNLMELayout, θ, σ, ω;
     length(θ) == layout.ntheta || violation("θ length differs from layout")
     length(σ) == layout.nsigma || violation("σ length differs from layout")
     length(ω) == nomega(layout) || violation("ω length differs from layout")
+    _check_fixed_omega(violation, model, layout, ω)
     ids = subjects === nothing ? collect(1:n) : collect(Int, subjects)
     !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= n, ids) || violation(
         "subjects must be distinct valid model subject indices")
