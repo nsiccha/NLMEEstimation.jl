@@ -333,11 +333,23 @@ function _newton_step(g, Hk)
     return p, dot(g, p)
 end
 
+# A Newton trial: the full step (λ = 0) or a Levenberg–Marquardt step (-H + λI)⁻¹g.
+# `step` is `nothing` while -H + λI is not positive definite (the next retry raises
+# λ). Every state has this one concrete type, so `_search_steps` can store any retry
+# in the table it builds from the first trials.
+struct DampedTrial{T}
+    step::Union{Nothing, Vector{T}}
+    full::Bool
+    λ::T
+    λ0::T
+end
+DampedTrial(step, full, λ::T, λ0::T) where {T} = DampedTrial{T}(step, full, λ, λ0)
+
 function _first_trial(::NewtonEBE, hessians, k, g, H)
     p, _ = _newton_step(g, hessians[k])
     λ0 = 1.0e-3 * max(one(eltype(H)), maximum(abs, diag(hessians[k])))
     p === nothing && return _damped_trial(hessians[k], g, λ0, λ0)
-    return (step = p, full = true, λ = zero(λ0), λ0 = λ0)
+    return DampedTrial(p, true, zero(λ0), λ0)
 end
 
 function _next_trial(::NewtonEBE, trial, hessians, k, g)
@@ -345,11 +357,9 @@ function _next_trial(::NewtonEBE, trial, hessians, k, g)
     return _damped_trial(hessians[k], g, λ, trial.λ0)
 end
 
-# Levenberg–Marquardt step (-H + λI)⁻¹g; `step = nothing` while -H + λI is not
-# positive definite (the next retry raises λ).
 function _damped_trial(Hk, g, λ, λ0)
     ch = cholesky(Symmetric(-Hk + λ * I); check = false)
-    return (step = issuccess(ch) ? ch \ g : nothing, full = false, λ = λ, λ0 = λ0)
+    return DampedTrial(issuccess(ch) ? ch \ g : nothing, false, λ, λ0)
 end
 
 function _update_curvature!(::NewtonEBE, hessians, model, subjects, θ, σ, prior, H, accepted, steps, previous_G, Ga)

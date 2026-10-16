@@ -16,7 +16,8 @@ using Random
 import Optim
 
 export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH, theoph_model,
-    JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN
+    JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN,
+    DoubleWell
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -42,6 +43,24 @@ function simulated_model(; seed = 11, nsubjects = 24, Ω = Ω_SIM, eta_blocks = 
     subjects, η = simulate_one_compartment_oral(Xoshiro(seed), θ_SIM, σ_SIM, Ω; nsubjects)
     return OneCompartmentOral(subjects; backend = REVERSE, eta_blocks), η
 end
+
+# One η per subject, ℓ_i(η) = -(η² - a)²/4 + b_i η, with closed-form derivatives, for
+# either layout. With a unit prior variance and a > 1 the complete-data density is
+# convex near η = 0 and concave at its maximum, so Newton's damping must rise past
+# trials where -H + λI is not positive definite.
+struct DoubleWell{L}
+    layout::L
+    a::Float64
+    b::Vector{Float64}
+end
+NE.nsubjects(m::DoubleWell) = length(m.b)
+NE.nlme_layout(m::DoubleWell) = m.layout
+NE.conditional_loglikelihood(m::DoubleWell, i, θ, σ, η) = -(η[1]^2 - m.a)^2 / 4 + m.b[i] * η[1]
+NE.conditional_loglikelihood_and_gradient(m::DoubleWell, i, θ, σ, η) =
+    (NE.conditional_loglikelihood(m, i, θ, σ, η), [-(η[1]^2 - m.a) * η[1] + m.b[i]])
+NE.conditional_loglikelihood_gradient_and_hessian(m::DoubleWell, i, θ, σ, η) =
+    (NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η)..., fill(m.a - 3 * η[1]^2, 1, 1))
+NE.provides_eta_hessian(::DoubleWell) = true
 
 # Typical-value parameters of the standard one-compartment Theoph fit (no weight
 # effect), additive error.
