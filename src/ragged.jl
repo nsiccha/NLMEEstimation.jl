@@ -11,14 +11,14 @@ function _ragged_validate_batch(layout::RaggedNLMELayout, subjects, H)
     return nothing
 end
 
-function _ragged_complete_values(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
+function _complete_values(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
     ℓ = conditional_loglikelihoods(model, subjects, θ, σ, H)
     length(ℓ) == length(subjects) || throw(DimensionMismatch(
         "conditional likelihood returned $(length(ℓ)) values for $(length(subjects)) subjects"))
     return ℓ, [ℓ[k] + re_logprior(prior, i, H[k]) for (k, i) in enumerate(subjects)]
 end
 
-function _ragged_complete_gradients(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
+function _complete_gradients(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
     ℓ, Gc = conditional_loglikelihoods_and_gradients(model, subjects, θ, σ, H)
     length(ℓ) == length(Gc) == length(subjects) || throw(DimensionMismatch(
         "conditional gradient batch must return one value and gradient per subject"))
@@ -33,7 +33,7 @@ function _ragged_complete_gradients(model, subjects, θ, σ, prior::RaggedNormal
     return ℓ, f, G
 end
 
-function _ragged_complete_hessians(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
+function _complete_hessians(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
     blocks = conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H)
     length(blocks) == length(subjects) || throw(DimensionMismatch(
         "conditional Hessian batch must return one block per subject"))
@@ -93,14 +93,14 @@ function _empirical_bayes(layout::RaggedNLMELayout, model, θ, σ, ω, subjects,
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
     H = _ragged_start(η0, layout, ids)
     prior = RaggedNormalREPrior(layout, ω)
-    ℓ, f, G = _ragged_complete_gradients(model, ids, θ, σ, prior, H)
+    ℓ, f, G = _complete_gradients(model, ids, θ, σ, prior, H)
     all(isfinite, f) || throw(DomainError(f, "empirical_bayes: non-finite initial complete-data density"))
     n = length(ids)
     converged = falses(n)
     failed = falses(n)
     iterations = zeros(Int, n)
     hessians = method isa NewtonEBE ?
-        _ragged_complete_hessians(model, ids, θ, σ, prior, H) : nothing
+        _complete_hessians(model, ids, θ, σ, prior, H) : nothing
     inverses = method isa QuasiNewtonEBE ?
         [_ragged_prior_covariance(prior, i) for i in ids] : nothing
     rescaled = falses(n)
@@ -129,9 +129,9 @@ function _empirical_bayes(layout::RaggedNLMELayout, model, θ, σ, ω, subjects,
         end
         if method isa NewtonEBE && !isempty(done)
             polished = [H[k] + first(_newton_step(G[k], hessians[k])) for k in done]
-            ℓp, fp, Gp = _ragged_complete_gradients(model, ids[done], θ, σ,
+            ℓp, fp, Gp = _complete_gradients(model, ids[done], θ, σ,
                 prior, polished)
-            Hp = _ragged_complete_hessians(model, ids[done], θ, σ, prior, polished)
+            Hp = _complete_hessians(model, ids[done], θ, σ, prior, polished)
             for (j, k) in enumerate(done)
                 good = isfinite(fp[j]) && fp[j] >= f[k] - _roundoff(f[k]) &&
                     issuccess(cholesky(Symmetric(-Hp[j]); check=false))
@@ -164,7 +164,7 @@ function _empirical_bayes(layout::RaggedNLMELayout, model, θ, σ, ω, subjects,
         for attempt in 0:opt.max_backtracks
             isempty(pending) && break
             trial_H = [H[k] + steps[k] for k in pending]
-            _, ft = _ragged_complete_values(model, ids[pending], θ, σ, prior, trial_H)
+            _, ft = _complete_values(model, ids[pending], θ, σ, prior, trial_H)
             keep = Int[]
             for (j, k) in enumerate(pending)
                 predicted = dot(G[k], steps[k])
@@ -194,7 +194,7 @@ function _empirical_bayes(layout::RaggedNLMELayout, model, θ, σ, ω, subjects,
         for k in accepted
             H[k] += steps[k]
         end
-        ℓa, fa, Ga = _ragged_complete_gradients(model, ids[accepted], θ, σ, prior, H[accepted])
+        ℓa, fa, Ga = _complete_gradients(model, ids[accepted], θ, σ, prior, H[accepted])
         for (j, k) in enumerate(accepted)
             ℓ[k], f[k], G[k] = ℓa[j], fa[j], Ga[j]
             iterations[k] += 1
@@ -215,12 +215,12 @@ function _empirical_bayes(layout::RaggedNLMELayout, model, θ, σ, ω, subjects,
             end
         end
         if method isa NewtonEBE
-            hessians[accepted] = _ragged_complete_hessians(model, ids[accepted], θ, σ,
+            hessians[accepted] = _complete_hessians(model, ids[accepted], θ, σ,
                 prior, H[accepted])
         end
     end
     if method isa QuasiNewtonEBE && provides_eta_hessian(model)
-        hessians = _ragged_complete_hessians(model, ids, θ, σ, prior, H)
+        hessians = _complete_hessians(model, ids, θ, σ, prior, H)
     end
     norms = [_ragged_standardized_norm(prior, i, G[k]) for (k, i) in enumerate(ids)]
     result = RaggedEBEResult(ids, H, hessians, Float64.(ℓ), Float64.(f),
