@@ -168,11 +168,14 @@ function observation_moment(error_model, p, dose, t, σ)
     return C, residual_variance(error_model, σ, C)
 end
 
-# (exp(-ke t) - exp(-ka t)) / (ka - ke), accurate when ka ≈ ke.
+# (exp(-ke t) - exp(-ka t)) / (ka - ke), accurate when ka ≈ ke. The expression is
+# symmetric in the two rates; factoring out the slower one keeps the expm1
+# argument nonpositive, so neither rate ordering overflows.
 function bateman(ka, ke, t)
-    d = ka - ke
-    iszero(d) && return t * exp(-ke * t)
-    return -exp(-ke * t) * expm1(-d * t) / d
+    slow, fast = minmax(ka, ke)
+    d = fast - slow
+    iszero(d) && return t * exp(-slow * t)
+    return -exp(-slow * t) * expm1(-d * t) / d
 end
 
 """

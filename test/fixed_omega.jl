@@ -399,3 +399,24 @@ end
         omega_parameters(layout, Matrix(0.1I, 3, 3)))
     @test_throws ArgumentError covariance_step(model, fit.theta, fit.sigma, fit.omega; free = [7])
 end
+
+@testset "fixed Ω: marginal likelihood" begin
+    y = channel_data(nsubjects = 40)
+    layout = NLMELayout(3, 0, [1, 2])
+    θ = [0.45, -0.25, 0.95]
+    Ωfix = [0.25 0.06; 0.06 0.16]
+    model = ChannelGaussian(y, [2 => FixedOmega(Ωfix)])
+    ω = apply_fixed_omega(model, omega_parameters(layout, Matrix(0.09I, 3, 3)))
+    Ω = omega_matrix(layout, ω)
+    result = marginal_loglikelihood(model, θ, Float64[], ω;
+        approximation = AdaptiveGaussHermite(nodes = 1))
+    # Gaussian channels: Laplace is exact.
+    @test result.loglikelihood ≈ channel_marginal(y, θ, Ω) atol = 1e-8
+    # Three means and the free family's log SD; the fixed block is not counted.
+    @test result.nparameters == 4
+    @test result.aic ≈ -2 * result.loglikelihood + 8
+    free = marginal_loglikelihood(ChannelGaussian(y), θ, Float64[], ω;
+        approximation = AdaptiveGaussHermite(nodes = 1))
+    @test free.nparameters == 7  # 3 means + 1 + 3 log-Cholesky coordinates
+    @test free.loglikelihood ≈ result.loglikelihood
+end

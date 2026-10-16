@@ -23,7 +23,9 @@ Estimators:
   and a derivative-free outer optimizer.
 - [`saem`](@ref): population estimation by MCMC stochastic approximation.
 
-[`covariance_step`](@ref) gives standard errors of a fit's population coordinates.
+[`covariance_step`](@ref) gives standard errors of a fit's population coordinates, and
+[`marginal_loglikelihood`](@ref) its likelihood, OFV, AIC and BIC (for SAEM, by
+importance sampling or adaptive Gauss–Hermite quadrature).
 """
 module NLMEEstimation
 
@@ -54,6 +56,8 @@ export empirical_bayes, posthoc, EBEMethod, NewtonEBE, QuasiNewtonEBE, default_e
 export focei, focei_evaluate, FOCEOptions, FOCEResult, FOCEEvaluation
 export covariance_step, CovarianceResult, CovarianceStepError, FOCEApproximation,
     delta_method, omega_elements
+export marginal_loglikelihood, MarginalLikelihoodResult, ImportanceSampling,
+    AdaptiveGaussHermite
 export saem, saem_population_gradient_style, SAEMOptions, SAEMResult, RaggedSAEMResult,
     StandardSAEMMH, WarmupHMCNUTS, DualAveragingMALA
 
@@ -67,6 +71,7 @@ include("focei.jl")
 include("saem.jl")
 include("ragged.jl")
 include("covariance.jl")
+include("marginal.jl")
 include("ReferenceModels.jl")
 
 end
