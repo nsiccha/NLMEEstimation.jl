@@ -11,14 +11,14 @@ function _ragged_validate_batch(layout::RaggedNLMELayout, subjects, H)
     return nothing
 end
 
-function _ragged_complete_values(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
+function _complete_values(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
     ℓ = conditional_loglikelihoods(model, subjects, θ, σ, H)
     length(ℓ) == length(subjects) || throw(DimensionMismatch(
         "conditional likelihood returned $(length(ℓ)) values for $(length(subjects)) subjects"))
     return ℓ, [ℓ[k] + re_logprior(prior, i, H[k]) for (k, i) in enumerate(subjects)]
 end
 
-function _ragged_complete_gradients(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
+function _complete_gradients(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
     ℓ, Gc = conditional_loglikelihoods_and_gradients(model, subjects, θ, σ, H)
     length(ℓ) == length(Gc) == length(subjects) || throw(DimensionMismatch(
         "conditional gradient batch must return one value and gradient per subject"))
@@ -33,7 +33,7 @@ function _ragged_complete_gradients(model, subjects, θ, σ, prior::RaggedNormal
     return ℓ, f, G
 end
 
-function _ragged_complete_hessians(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
+function _complete_hessians(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
     blocks = conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H)
     length(blocks) == length(subjects) || throw(DimensionMismatch(
         "conditional Hessian batch must return one block per subject"))
@@ -63,7 +63,9 @@ end
 _ragged_start(η0, layout, subjects) = throw(ArgumentError(
     "ragged η0 must be nothing, a vector of subject vectors, or a RaggedEBEResult"))
 
-function _ragged_prior_covariance(prior::RaggedNormalREPrior, i)
+_prior_eltype(::RaggedNormalREPrior{T}) where {T} = T
+
+function _prior_covariance(prior::RaggedNormalREPrior, i)
     n = neta(prior.layout, i)
     Ω = zeros(Float64, n, n)
     for (family, r) in _ragged_subject_blocks(prior.layout, i)
@@ -73,7 +75,7 @@ function _ragged_prior_covariance(prior::RaggedNormalREPrior, i)
     return Ω
 end
 
-function _ragged_standardized_norm(prior::RaggedNormalREPrior, i, g)
+function _standardized_norm(prior::RaggedNormalREPrior, i, g)
     norm = 0.0
     for (family, r) in _ragged_subject_blocks(prior.layout, i)
         norm = max(norm, maximum(abs, prior.cholesky_factors[family]' * view(g, r); init=0.0))
@@ -92,139 +94,7 @@ function _empirical_bayes(layout::RaggedNLMELayout, model, θ, σ, ω, subjects,
     !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= nsubjects(model), ids) ||
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
     H = _ragged_start(η0, layout, ids)
-    prior = RaggedNormalREPrior(layout, ω)
-    ℓ, f, G = _ragged_complete_gradients(model, ids, θ, σ, prior, H)
-    all(isfinite, f) || throw(DomainError(f, "empirical_bayes: non-finite initial complete-data density"))
-    n = length(ids)
-    converged = falses(n)
-    failed = falses(n)
-    iterations = zeros(Int, n)
-    hessians = method isa NewtonEBE ?
-        _ragged_complete_hessians(model, ids, θ, σ, prior, H) : nothing
-    inverses = method isa QuasiNewtonEBE ?
-        [_ragged_prior_covariance(prior, i) for i in ids] : nothing
-    rescaled = falses(n)
-    for _ in 0:opt.maxiter
-        active = Int[]
-        done = Int[]
-        for k in 1:n
-            (converged[k] || failed[k]) && continue
-            g = G[k]
-            if method isa NewtonEBE
-                step, decrement = _newton_step(g, hessians[k])
-                if step !== nothing && decrement / 2 <= opt.decrement_tol
-                    converged[k] = true
-                    push!(done, k)
-                    continue
-                end
-            elseif _ragged_standardized_norm(prior, ids[k], g) <= opt.gtol
-                converged[k] = true
-                continue
-            end
-            if iterations[k] >= opt.maxiter
-                failed[k] = true
-            else
-                push!(active, k)
-            end
-        end
-        if method isa NewtonEBE && !isempty(done)
-            polished = [H[k] + first(_newton_step(G[k], hessians[k])) for k in done]
-            ℓp, fp, Gp = _ragged_complete_gradients(model, ids[done], θ, σ,
-                prior, polished)
-            Hp = _ragged_complete_hessians(model, ids[done], θ, σ, prior, polished)
-            for (j, k) in enumerate(done)
-                good = isfinite(fp[j]) && fp[j] >= f[k] - _roundoff(f[k]) &&
-                    issuccess(cholesky(Symmetric(-Hp[j]); check=false))
-                good || continue
-                H[k], ℓ[k], f[k], G[k], hessians[k] = polished[j], ℓp[j], fp[j], Gp[j], Hp[j]
-                iterations[k] += 1
-            end
-        end
-        isempty(active) && break
-        steps = Vector{Vector{Float64}}(undef, n)
-        damping = zeros(n)
-        first_damping = zeros(n)
-        for k in active
-            if method isa NewtonEBE
-                step, _ = _newton_step(G[k], hessians[k])
-                first_damping[k] = 1e-3 * max(1.0, maximum(abs, diag(hessians[k])))
-                if step === nothing
-                    damping[k] = first_damping[k]
-                    ch = cholesky(Symmetric(-hessians[k] + damping[k] * I); check=false)
-                    steps[k] = issuccess(ch) ? ch \ G[k] : zeros(length(G[k]))
-                else
-                    steps[k] = step
-                end
-            else
-                steps[k] = inverses[k] * G[k]
-            end
-        end
-        pending = copy(active)
-        accepted = Int[]
-        for attempt in 0:opt.max_backtracks
-            isempty(pending) && break
-            trial_H = [H[k] + steps[k] for k in pending]
-            _, ft = _ragged_complete_values(model, ids[pending], θ, σ, prior, trial_H)
-            keep = Int[]
-            for (j, k) in enumerate(pending)
-                predicted = dot(G[k], steps[k])
-                full = attempt == 0 && method isa QuasiNewtonEBE ||
-                    attempt == 0 && method isa NewtonEBE && iszero(damping[k])
-                if isfinite(ft[j]) && (ft[j] - f[k] >= 1e-4 * predicted ||
-                        full && predicted <= sqrt(eps(Float64)) * max(1.0, abs(f[k])) &&
-                        ft[j] >= f[k] - _roundoff(f[k]))
-                    push!(accepted, k)
-                else
-                    push!(keep, k)
-                    if method isa NewtonEBE
-                        λ = iszero(damping[k]) ? first_damping[k] : 10damping[k]
-                        ch = cholesky(Symmetric(-hessians[k] + λ * I); check=false)
-                        steps[k] = issuccess(ch) ? ch \ G[k] : zeros(length(G[k]))
-                        damping[k] = λ
-                    else
-                        steps[k] ./= 2
-                    end
-                end
-            end
-            pending = keep
-        end
-        failed[pending] .= true
-        isempty(accepted) && continue
-        previous_G = [copy(G[k]) for k in accepted]
-        for k in accepted
-            H[k] += steps[k]
-        end
-        ℓa, fa, Ga = _ragged_complete_gradients(model, ids[accepted], θ, σ, prior, H[accepted])
-        for (j, k) in enumerate(accepted)
-            ℓ[k], f[k], G[k] = ℓa[j], fa[j], Ga[j]
-            iterations[k] += 1
-            if method isa QuasiNewtonEBE
-                s = steps[k]
-                y = previous_G[j] - Ga[j]
-                sy = dot(s, y)
-                if sy > 0
-                    B = inverses[k]
-                    if !rescaled[k]
-                        B = (sy / dot(y, B * y)) * B
-                        rescaled[k] = true
-                    end
-                    ρ = inv(sy)
-                    V = I - ρ * y * s'
-                    inverses[k] = V' * B * V + ρ * s * s'
-                end
-            end
-        end
-        if method isa NewtonEBE
-            hessians[accepted] = _ragged_complete_hessians(model, ids[accepted], θ, σ,
-                prior, H[accepted])
-        end
-    end
-    if method isa QuasiNewtonEBE && provides_eta_hessian(model)
-        hessians = _ragged_complete_hessians(model, ids, θ, σ, prior, H)
-    end
-    norms = [_ragged_standardized_norm(prior, i, G[k]) for (k, i) in enumerate(ids)]
-    result = RaggedEBEResult(ids, H, hessians, Float64.(ℓ), Float64.(f),
-        collect(converged), iterations, norms, method)
+    result = _ebe_lockstep(method, model, ids, θ, σ, RaggedNormalREPrior(layout, ω), H, opt)
     bad = ids[.!result.converged]
     require_convergence && !isempty(bad) && throw(EBEConvergenceError(bad, result))
     return result

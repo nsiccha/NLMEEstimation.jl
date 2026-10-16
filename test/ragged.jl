@@ -5,6 +5,8 @@ using Test
 using DifferentiationInterface: AutoEnzyme
 import Enzyme
 import NLMEEstimation as NE
+isdefined(@__MODULE__, :TestCommon) || include("common.jl")
+using .TestCommon: DoubleWell
 
 struct RaggedGaussianFixture
     layout::RaggedNLMELayout
@@ -182,6 +184,23 @@ NE.population_prior_provenance(::RaggedMAPFixture) = "synthetic Normal(0, 0.5) c
     @test all(newton.converged)
     @test all(isapprox.(newton.modes, result.modes; atol=1e-6))
     @test length.(ebe_covariances(newton)) == [4, 16, 9]
+
+    # Newton raises its damping until -H + λI is positive definite (three retries at
+    # η0 here; see the equal-size test), instead of accepting a zero step.
+    well_layout = RaggedNLMELayout(ntheta=0, nsigma=0, family_sizes=[1],
+        subject_families=[[1], [1], [1]])
+    well = DoubleWell(well_layout, 1.5, [0.05, 0.1, 0.2])
+    well_ω = omega_parameters(well_layout, [[1.0;;]])
+    well_newton = empirical_bayes(well, Float64[], Float64[], well_ω;
+        η0=[[0.1] for _ in 1:3], method=NewtonEBE())
+    @test all(well_newton.converged)
+    well_η = only.(well_newton.modes)
+    @test maximum(abs, -well_η .^ 3 .+ 0.5 .* well_η .+ well.b) < 1e-12
+    @test all(H -> H[1, 1] < 0, well_newton.hessians)
+    well_equal = DoubleWell(NLMELayout(0, 0, [1]), 1.5, well.b)
+    @test well_η ≈ vec(empirical_bayes(well_equal, Float64[], Float64[],
+        omega_parameters(nlme_layout(well_equal), [1.0;;]); η0=fill(0.1, 1, 3),
+        method=NewtonEBE()).modes) atol=1e-12
     batched_result = empirical_bayes(batched, Float64[], Float64[], ω;
         method=QuasiNewtonEBE())
     @test all(batched_result.converged)
