@@ -46,9 +46,11 @@ model's declared coordinates; `omega_matrix` is the estimated Ω on covariance
 scale. `loglikelihood` remains the approximate marginal likelihood;
 `logposterior` includes a model-provided population prior once, and `ofv` is
 minus twice that fitted objective. `objective` distinguishes `:ML` from `:MAP`.
-`free` lists the fitted positions in the concatenated `(θ, σ, ω)` vector and
-`options` the [`FOCEOptions`](@ref) of the fit; [`covariance_step`](@ref) reuses
-both.
+`free` lists the fitted positions in the search vector `[θ; σ; free Ω
+coordinates]`, which is the concatenated `(θ, σ, ω)` unless the model declares
+[`fixed_omega`](@ref) (see [`CovarianceResult`](@ref) for those coordinates),
+and `options` the [`FOCEOptions`](@ref) of the fit; [`covariance_step`](@ref)
+reuses both.
 """
 struct FOCEResult{T, E, I, P}
     theta::Vector{T}

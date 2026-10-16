@@ -341,3 +341,61 @@ NE.population_logprior_and_gradient(m::RaggedFixedFixture, θ, σ, ω) =
         rng = Xoshiro(1), options = SAEMOptions(iterations = 10, burnin = 5, mcmc_burnin = 2))
     @test fit.omega_matrix[2] ≈ fill(0.5, 1, 1)
 end
+
+@testset "fixed Ω: covariance step" begin
+    y = channel_data()
+    layout = NLMELayout(3, 0, [1, 2])
+    θ0 = [0.3, 0.0, 0.8]
+    options = FOCEOptions(maxeval = 400, rhobeg = 0.2, rhoend = 1e-7,
+        ebe_options = EBEOptions(gtol = 1e-10))
+
+    # A fully fixed family: the same step as holding its ω positions with `free`.
+    whole = ChannelGaussian(y, [2 => FixedOmega([0.25 0.06; 0.06 0.16])])
+    ω0 = apply_fixed_omega(whole, omega_parameters(layout, Matrix(0.1I, 3, 3)))
+    fit = focei(whole, θ0, Float64[], ω0; options)
+    result = covariance_step(whole, fit)
+    masked = covariance_step(ChannelGaussian(y), fit.theta, fit.sigma, fit.omega; free = 1:4,
+        η0 = fit.ebes, approximation = FOCEApproximation(interaction = true))
+    @test result.coordinates == vcat(fit.theta, fit.omega[1:1])
+    @test result.point == vcat(fit.theta, fit.omega)
+    @test result.covariance == masked.covariance
+    @test result.names == masked.names
+    Ωse = delta_method(result, x -> omega_elements(layout, x[4:end])).standard_errors
+    @test Ωse[1] > 0 && all(iszero, Ωse[2:4])
+
+    # A partially fixed family: R is the observed information of the exact
+    # marginal likelihood in the estimated coordinates.
+    for constraint in (FixedOmega(sd = [0.5, nothing]), FixedOmega(correlation = [1 0.6; 0.6 1]))
+        model = ChannelGaussian(y, [2 => constraint])
+        ω0 = apply_fixed_omega(model, omega_parameters(layout, Matrix(0.1I, 3, 3)))
+        fit = focei(model, θ0, Float64[], ω0; options)
+        result = covariance_step(model, fit; method = :r)
+        c = NE._omega_constraints(model)
+        ŷ = vcat(fit.theta, NE._free_omega(c, fit.omega))
+        @test result.coordinates ≈ ŷ
+        @test result.free == fit.free == collect(eachindex(ŷ))
+        @test length(result.names) == length(ŷ) == 6
+        loglik(v) = channel_marginal(y, v[1:3], omega_matrix(layout, NE._constrained_omega(c, v[4:end])))
+        information = -ForwardDiff.hessian(loglik, ŷ)
+        @test result.R ≈ information rtol = 1e-4
+        f(x) = omega_elements(layout, x[4:end])
+        central = delta_method(result, f)
+        exact = delta_method(result, f; jacobian = x -> ForwardDiff.jacobian(f, x))
+        J = ForwardDiff.jacobian(v -> f(vcat(v[1:3], NE._constrained_omega(c, v[4:end]))), ŷ)
+        @test exact.covariance ≈ J * result.covariance * J' rtol = 1e-10
+        @test central.covariance ≈ exact.covariance rtol = 1e-6
+        constraint.sd === nothing || @test exact.standard_errors[2] ≈ 0 atol = 1e-14
+    end
+
+    # SAEM fits use every estimated coordinate; ω must hold the fixed values.
+    model = ChannelGaussian(y, [2 => FixedOmega(sd = [0.5, nothing])])
+    ω0 = apply_fixed_omega(model, omega_parameters(layout, Matrix(0.1I, 3, 3)))
+    fit = saem(model, θ0, Float64[], ω0; rng = Xoshiro(5),
+        options = SAEMOptions(iterations = 60, burnin = 20, mcmc_burnin = 10))
+    result = covariance_step(model, fit; method = :s)
+    @test result.names == ["θ1", "θ2", "θ3", "ω[η1,η1]", "log sd(η3)", "m(η3,η2)"]
+    @test all(isfinite, result.standard_errors)
+    @test_throws ArgumentError covariance_step(model, fit.theta, fit.sigma,
+        omega_parameters(layout, Matrix(0.1I, 3, 3)))
+    @test_throws ArgumentError covariance_step(model, fit.theta, fit.sigma, fit.omega; free = [7])
+end
