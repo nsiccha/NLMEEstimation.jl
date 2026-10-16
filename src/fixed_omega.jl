@@ -5,7 +5,7 @@
 A known value for all or part of one random-effect covariance family, declared
 through [`fixed_omega`](@ref). `FixedOmega(Ω)` holds the whole family at the
 covariance matrix `Ω`, like nlmixr2's `fix()` on an ω block or NONMEM's
-`\$OMEGA … FIX`.
+`OMEGA … FIX`.
 
 The keyword form fixes parts of a family in standard-deviation and correlation
 terms, `Ω = D R D` with `D = Diagonal(sd)`:
