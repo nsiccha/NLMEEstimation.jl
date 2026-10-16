@@ -162,6 +162,27 @@ end
         @test sum(i -> sse(i, r.modes[:, i]), 1:12) < sum(i -> sse(i, zeros(3)), 1:12) / 2
     end
 
+    @testset "Newton damping rises past non-positive-definite trials" begin
+        model = DoubleWell(NLMELayout(0, 0, [1]), 1.5, [0.05, 0.1, 0.2])
+        ω = omega_parameters(nlme_layout(model), [1.0;;])
+        η0 = fill(0.1, 1, 3)
+        # At η0 the complete-data Hessian is +0.47 for every subject: the Newton step
+        # does not exist, and -H + λI has no step for λ = 1e-3, 1e-2, 0.1. A trial
+        # table typed from those first trials could not store the step at λ = 1.
+        for i in 1:3
+            _, _, _, H = complete_data_loglikelihood_gradient_and_hessian(model, i, Float64[], Float64[], ω, η0[:, i])
+            @test H[1, 1] ≈ 0.47
+        end
+        newton = empirical_bayes(model, Float64[], Float64[], ω; η0, method = NewtonEBE())
+        bfgs = empirical_bayes(model, Float64[], Float64[], ω; η0, method = QuasiNewtonEBE())
+        @test all(newton.converged)
+        # The modes solve -η³ + (a - 1)η + b = 0 where the density is concave.
+        η = newton.modes[1, :]
+        @test maximum(abs, -η .^ 3 .+ 0.5 .* η .+ model.b) < 1.0e-12
+        @test all(H -> H[1, 1] < 0, newton.hessians)
+        @test maximum(abs, newton.modes - bfgs.modes) < 1.0e-7
+    end
+
     @testset "failures are reported, never silent" begin
         model, _ = simulated_model()
         ω = omega_parameters(nlme_layout(model), Ω_SIM)
