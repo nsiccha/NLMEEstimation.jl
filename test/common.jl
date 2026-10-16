@@ -229,9 +229,28 @@ end
 struct RaggedOccasions
     y::Vector{Vector{Vector{Float64}}}
     calls::Base.RefValue{Int}
+    gaussian::Bool
 end
 
-RaggedOccasions(y) = RaggedOccasions(y, Ref(0))
+RaggedOccasions(y; gaussian = false) = RaggedOccasions(y, Ref(0), gaussian)
+# `gaussian = true` declares the Gaussian observation protocol, for FOCE-style
+# residual diagnostics on a ragged layout.
+NE.observation_model(m::RaggedOccasions) = m.gaussian ? GaussianObservations() : nothing
+NE.observations(m::RaggedOccasions, i::Integer) = reduce(vcat, m.y[i])
+NE.observation_moments(m::RaggedOccasions, i::Integer, θ, σ, η) =
+    (reduce(vcat, [fill(θ[1] + η[1] + η[1+j], length(o)) for (j, o) in enumerate(m.y[i])]),
+        fill(exp(2σ[1]), sum(length, m.y[i])))
+function NE.observation_moments_and_jacobians(m::RaggedOccasions, i::Integer, θ, σ, η)
+    μ, v = NE.observation_moments(m, i, θ, σ, η)
+    J = zeros(length(μ), length(η))
+    J[:, 1] .= 1
+    offset = 0
+    for (j, o) in enumerate(m.y[i])
+        J[offset+1:offset+length(o), 1+j] .= 1
+        offset += length(o)
+    end
+    return μ, v, J, zeros(size(J))
+end
 NE.nsubjects(m::RaggedOccasions) = length(m.y)
 NE.nlme_layout(m::RaggedOccasions) = RaggedNLMELayout(1, 1, [1, 1],
     [vcat(1, fill(2, length(occasions))) for occasions in m.y])
@@ -280,7 +299,7 @@ end
 occasions_exact(m::RaggedOccasions, x) =
     sum(i -> occasions_exact_subject(m, i, x), 1:NE.nsubjects(m))
 
-function occasions_model(; seed = 9, n = 8)
+function occasions_model(; seed = 9, n = 8, gaussian = false)
     rng = Xoshiro(seed)
     y = map(1:n) do _
         a = 0.6 * randn(rng)
@@ -289,7 +308,7 @@ function occasions_model(; seed = 9, n = 8)
             2.0 + a + b .+ 0.25 .* randn(rng, rand(rng, 2:4))
         end
     end
-    return RaggedOccasions(y)
+    return RaggedOccasions(y; gaussian)
 end
 
 end

@@ -33,6 +33,7 @@ Some estimators need more structure:
 | `saem` with `WarmupHMCNUTS()` | ✓ | ✓ | — | ✓ | Optional: initial NUTS metric |
 | `covariance_step` with `FOCEApproximation()` | ✓ | ✓ | ✓ | — | Optional: Newton subject modes |
 | `marginal_loglikelihood` / `covariance_step` with `ImportanceSampling()` or `AdaptiveGaussHermite()` | ✓ | ✓ | — | — | Optional: proposal curvature |
+| `residual_diagnostics` (PRED, IPRED, IWRES, CWRES, NPDE) | ✓ | ✓ | ✓ | — | Optional: Newton subject modes |
 
 All of these are first-order quantities, except the Hessian blocks:
 

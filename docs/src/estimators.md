@@ -68,5 +68,25 @@ Every constant is kept. nlmixr2's `OBJF` omits the Gaussian constant, so it equa
 - At the same point, the Laplace approximation (`nodes = 1`) gives −180.168 and FOCEI −179.326.
 - saemix counts the same 8 parameters for its AIC, but its BIC penalizes log(number of subjects); `bic` here penalizes log(N_obs).
 
+## Residual diagnostics
+
+`residual_diagnostics(model, fit; replicates = 1000, rng)` returns per-observation diagnostics for a model with `GaussianObservations()`, on equal-size or ragged layouts. It works at a FOCE(I) or SAEM estimate, or at given `(θ, σ, ω)`. Every field of `ResidualDiagnostics` holds one vector per subject:
+
+| Field | Definition |
+| --- | --- |
+| `pred`, `ipred` | Observation means at `η = 0` and at the subject's EBE `η̂` |
+| `iwres` | `(y - ipred) / sqrt(v(η̂))` |
+| `cpred`, `cwres` | Hooker, Staatz and Karlsson (2007): linearize the means around `η̂`, `y ≈ μ(η̂) + J (η - η̂)`, giving mean `cpred = μ(η̂) - J η̂` and covariance `C = J Ω Jᵀ + diag(v(η̂))`; `cwres = U (y - cpred)` with `U` the upper Cholesky factor of `C⁻¹` (`UᵀU = C⁻¹`), which decorrelates within the subject |
+| `cwres_per_observation` | `(y - cpred) ./ sqrt.(diag(C))`, each observation standardized without decorrelation |
+| `epred`, `npd`, `pde`, `npde` | Brendel et al. (2006) and Comets, Brendel and Mentré (2008): simulate `replicates` datasets at the population parameters, decorrelate observed and simulated vectors with the Cholesky factor of the inverse of each subject's simulated covariance (as for `cwres`), and take the normal quantile of the fraction of simulated values below the observed one (`npd` skips the decorrelation) |
+
+CWRES uses the residual variance at the EBE, as this package's FOCE(I) objective does. Each replicate costs one batched `observation_moments` call. `replicates` must exceed every subject's number of observations, and `replicates = 0` skips the simulation. Both residuals are approximately independent standard normal values under a correct model. For a linear Gaussian model the linearization is exact, and `npde` converges to `Φ⁻¹(Φ(cwres)) = cwres` as `replicates` grows; the tests use this as an oracle. Non-Gaussian likelihoods have no residual diagnostics: the protocol gives the package no way to simulate their observations.
+
+**Relation to nlmixr2.** At nlmixr2 7.0.1's FOCEi estimate on R's theophylline data (`test/diagnostics.jl`), the two packages agree as follows:
+
+- `pred` matches nlmixr2's PRED to 1e-13. `ipred`, `iwres` and `cpred` match IPRED, IWRES and CPRED to 3e-4, nlmixr2's subject-mode precision.
+- nlmixr2's `CWRES` is the per-observation standardization: it equals `cwres_per_observation` to 2e-4. The decorrelated `cwres` of Hooker et al. is a different vector.
+- nlmixr2's NPDE uses the same decorrelation as `npde`. Its 300 simulations against 3000 here correlate at 0.83, and NPD (no decorrelation) against 2000 here at 0.995. Decorrelating with the lower Cholesky factor of the covariance instead, an equally valid whitening, correlates at only 0.23. The decorrelation order therefore matters when comparing NPDE across software.
+
 See the [PK comparison](pk-comparison.md) for one reproducible model, dataset, seeds, and all method calls.
 The [SAEM kernel benchmarks](saem-benchmarks.md) compare MH, NUTS, and an experimental batched MALA trial, including their implementation and measurement scripts.
