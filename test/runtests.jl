@@ -12,4 +12,5 @@ include("saem_nuts.jl")
 include("saem_mala.jl")
 include("saem_nuts_reference.jl")
 include("population_prior.jl")
+include("fixed_omega.jl")
 end

@@ -54,6 +54,7 @@ AD pass for batched models.
 | `population_logprior(model, θ, σ, ω)` | optional | log prior on unconstrained population coordinates; `nothing` (default) selects maximum likelihood |
 | `population_logprior_and_gradient(model, θ, σ, ω)` | optional | prior value and gradients in θ, σ, ω; derived using `ad_backend` unless implemented |
 | `population_prior_provenance(model)` | optional | description carried in population-fit results |
+| `fixed_omega(model)` | optional | `family => FixedOmega(…)` pairs holding a random-effect covariance family, or part of one, at a known value |
 | `mu_referencing(model)` | optional trait | `MuReferencing`: θ coordinates entering as `ϕ_i = X_i θ + η_i` (SAEM) |
 | `observation_model(model)` | optional trait | `GaussianObservations()` for FOCE(I) |
 | `observations(model, subjects)` | required for batched Gaussian models | one observation vector per subject, in batch order |
@@ -69,6 +70,30 @@ Coordinates:
 
 `check_protocol(model, θ, σ, ω)` checks an implementation against these contracts,
 including batched-vs-per-subject consistency and the independence of subjects.
+
+### Fixed (known) covariance families
+
+A model holds a covariance family at a known value, like nlmixr2's `fix()` on
+an ω or NONMEM's `OMEGA … FIX`, by declaring `fixed_omega`. A family is an
+`eta_blocks` entry of `NLMELayout`, or a `family_sizes` entry of
+`RaggedNLMELayout`, by position:
+
+```julia
+NLMEEstimation.fixed_omega(::MyModel) = [
+    1 => FixedOmega(fill(0.1, 1, 1)),                 # eta.ka ~ fix(0.1)
+    2 => FixedOmega([0.1 0.01; 0.01 0.1]),            # eta.cl + eta.v ~ fix(c(0.1, 0.01, 0.1))
+    3 => FixedOmega(sd = [0.3, nothing]),             # first SD known; second SD and correlation estimated
+    4 => FixedOmega(correlation = [1 0.5; 0.5 1]),    # correlation known; both SDs estimated
+]
+ω0 = apply_fixed_omega(model, omega_parameters(nlme_layout(model), Ω0))
+```
+
+The keyword form fixes parts of a family in standard-deviation/correlation
+terms, `Ω = D R D`. `focei` and `saem` estimate only the free parts, keep the
+fixed parts at their values, and report them in `omega` and `omega_matrix`.
+Their `ω0` must already hold the fixed values; `apply_fixed_omega` moves a
+vector onto them. `empirical_bayes` uses whatever `ω` it is given, and
+`check_protocol` verifies that `ω` holds the declared values.
 
 ### Nested random effects with unequal subject sizes
 
