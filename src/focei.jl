@@ -142,6 +142,11 @@ No population derivatives or η Hessians are taken.
 other coordinates stay at their starting values.
 With a population prior, the outer objective is the MAP point's negative twice
 log posterior; the result still reports its likelihood separately.
+Covariance families declared by [`fixed_omega`](@ref) keep their fixed parts.
+The search covers the estimated standard deviations and correlation of a
+partially fixed family; a fully fixed family is not searched. `free` may not
+name a position inside a constrained family's ω segment. `ω0` must hold the
+fixed values ([`apply_fixed_omega`](@ref)).
 """
 function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVector;
         subjects = nothing, free = nothing, options::FOCEOptions = FOCEOptions())
@@ -150,22 +155,22 @@ function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVec
     _check_length("θ", θ0, layout.ntheta)
     _check_length("σ", σ0, layout.nsigma)
     _check_length("ω", ω0, nomega(layout))
+    constraints = _checked_omega_constraints(model, layout, ω0)
     options.maxeval > 0 || throw(ArgumentError("maxeval must be positive"))
     0 < options.rhoend < options.rhobeg || throw(ArgumentError("require 0 < rhoend < rhobeg"))
     subjects = subjects === nothing ? collect(1:nsubjects(model)) : collect(Int, subjects)
-    x0 = Float64.(vcat(θ0, σ0, ω0))
-    free_indices = free === nothing ? collect(eachindex(x0)) : collect(Int, free)
-    !isempty(free_indices) && allunique(free_indices) &&
-        all(i -> 1 <= i <= length(x0), free_indices) || throw(ArgumentError(
-            "free must contain unique positions in 1:$(length(x0))"))
+    nθσ = layout.ntheta + layout.nsigma
+    # The search vector holds θ, σ and the free Ω coordinates (`_free_omega`).
+    x0 = Float64.(vcat(θ0, σ0, _free_omega(constraints, ω0)))
+    free_indices = _focei_free_indices(constraints, free, nθσ, nomega(layout), length(x0))
     function assemble(z)
         x = copy(x0)
         x[free_indices] = z
         return x
     end
     split(x) = (view(x, 1:layout.ntheta),
-        view(x, layout.ntheta + 1:layout.ntheta + layout.nsigma),
-        view(x, layout.ntheta + layout.nsigma + 1:length(x)))
+        view(x, layout.ntheta + 1:nθσ),
+        _constrained_omega(constraints, view(x, nθσ + 1:length(x))))
     θ, σ, ω = split(x0)
     initial = focei_evaluate(model, θ, σ, ω; subjects,
         interaction = options.interaction, ebe_options = options.ebe_options)
@@ -218,6 +223,48 @@ function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVec
         evaluated.ebes, evaluated.curvatures, calls[],
         status in (:SUCCESS, :STOPVAL_REACHED, :FTOL_REACHED, :XTOL_REACHED),
         (minimum_ofv = min_ofv, status = status), free_indices, options)
+end
+
+function _focei_free_indices(::Nothing, free, nθσ, nω, n)
+    free_indices = free === nothing ? collect(1:n) : collect(Int, free)
+    !isempty(free_indices) && allunique(free_indices) &&
+        all(i -> 1 <= i <= n, free_indices) || throw(ArgumentError(
+            "free must contain unique positions in 1:$n"))
+    return free_indices
+end
+
+# Map `free` positions in `(θ, σ, ω)` onto the search vector; every free
+# coordinate of a partially fixed family is searched.
+function _focei_free_indices(c::_OmegaConstraints, free, nθσ, nω, n)
+    position = collect(Int, 1:nθσ)
+    partial = Int[]
+    cursor = nθσ
+    family_of = zeros(Int, nω)
+    for (f, fam) in enumerate(c.families)
+        r = c.ranges[f]
+        family_of[r] .= f
+        if fam === nothing
+            append!(position, (cursor + 1):(cursor + length(r)))
+            cursor += length(r)
+        else
+            append!(position, zeros(Int, length(r)))
+            width = fam.fully_fixed ? 0 :
+                count(!, fam.sd_fixed) + (fam.correlation_fixed ? 0 : length(fam.m))
+            append!(partial, (cursor + 1):(cursor + width))
+            cursor += width
+        end
+    end
+    free === nothing && return collect(1:n)
+    requested = collect(Int, free)
+    allunique(requested) && all(i -> 1 <= i <= nθσ + nω, requested) || throw(ArgumentError(
+        "free must contain unique positions in 1:$(nθσ + nω)"))
+    for i in requested
+        position[i] == 0 && throw(ArgumentError(
+            "free position $i lies in covariance family $(family_of[i - nθσ]), which fixed_omega constrains"))
+    end
+    free_indices = vcat(position[requested], partial)
+    isempty(free_indices) && throw(ArgumentError("free selects no coordinates to estimate"))
+    return free_indices
 end
 
 _require_focei_layout(::NLMELayout) = nothing

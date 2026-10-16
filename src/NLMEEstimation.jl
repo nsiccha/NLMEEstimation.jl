@@ -35,7 +35,8 @@ import NLopt
 import LogDensityProblems as LDP
 import WarmupHMC
 
-export NLMELayout, RaggedNLMELayout, neta, nomega, omega_cholesky, omega_matrix, omega_parameters
+export NLMELayout, RaggedNLMELayout, neta, nomega, omega_cholesky, omega_matrix, omega_parameters,
+    FixedOmega, fixed_omega, apply_fixed_omega
 export nsubjects, nlme_layout, EvaluationStyle, PerSubjectEvaluation, BatchedEvaluation,
     evaluation_style, conditional_loglikelihood, conditional_loglikelihoods,
     conditional_loglikelihood_and_gradient, conditional_loglikelihoods_and_gradients,
@@ -59,6 +60,7 @@ export saem, saem_population_gradient_style, SAEMOptions, SAEMResult, RaggedSAEM
 include("layout.jl")
 include("protocol.jl")
 include("re_prior.jl")
+include("fixed_omega.jl")
 include("conformance.jl")
 include("empirical_bayes.jl")
 include("focei.jl")
