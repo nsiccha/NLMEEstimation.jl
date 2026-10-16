@@ -22,6 +22,8 @@ Estimators:
 - [`focei`](@ref): population estimation using first-order conditional curvature
   and a derivative-free outer optimizer.
 - [`saem`](@ref): population estimation by MCMC stochastic approximation.
+
+[`covariance_step`](@ref) gives standard errors of a fit's population coordinates.
 """
 module NLMEEstimation
 
@@ -49,6 +51,8 @@ export check_protocol, ProtocolViolation
 export empirical_bayes, posthoc, EBEMethod, NewtonEBE, QuasiNewtonEBE, default_ebe_method,
     EBEOptions, EBEResult, RaggedEBEResult, EBEConvergenceError, ebe_covariances
 export focei, focei_evaluate, FOCEOptions, FOCEResult, FOCEEvaluation
+export covariance_step, CovarianceResult, CovarianceStepError, FOCEApproximation,
+    delta_method, omega_elements
 export saem, saem_population_gradient_style, SAEMOptions, SAEMResult, RaggedSAEMResult,
     StandardSAEMMH, WarmupHMCNUTS, DualAveragingMALA
 
@@ -60,6 +64,7 @@ include("empirical_bayes.jl")
 include("focei.jl")
 include("saem.jl")
 include("ragged.jl")
+include("covariance.jl")
 include("ReferenceModels.jl")
 
 end

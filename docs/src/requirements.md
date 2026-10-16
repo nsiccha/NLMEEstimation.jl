@@ -1,6 +1,6 @@
 # PPL and AD requirements
 
-This page lists what a probabilistic programming language (PPL) and its automatic-differentiation (AD) backend must provide for each estimator. **Every implemented method runs on first-order derivatives.** Second derivatives are optional: when available, they are used only as per-subject `K × K` η Hessian blocks, where `K` is the number of random effects per subject. No method uses a joint Hessian, third derivatives, or finite differences.
+This page lists what a probabilistic programming language (PPL) and its automatic-differentiation (AD) backend must provide for each estimator. **Every implemented method runs on first-order derivatives.** Second derivatives are optional: when available, they are used only as per-subject `K × K` η Hessian blocks, where `K` is the number of random effects per subject. No estimator uses a joint Hessian, third derivatives, or finite differences. The covariance step takes finite differences of objective values and adds no derivative requirement.
 
 ## What the PPL must expose
 
@@ -31,6 +31,7 @@ Some estimators need more structure:
 | `saem` with `StandardSAEMMH()` | ✓ | — | — | ✓ | Never used |
 | `saem` with `DualAveragingMALA()` | ✓ | ✓ | — | ✓ | Optional: initial metric with `metric=:hessian` |
 | `saem` with `WarmupHMCNUTS()` | ✓ | ✓ | — | ✓ | Optional: initial NUTS metric |
+| `covariance_step` with `FOCEApproximation()` | ✓ | ✓ | ✓ | — | Optional: Newton subject modes |
 
 All of these are first-order quantities, except the Hessian blocks:
 
@@ -38,6 +39,7 @@ All of these are first-order quantities, except the Hessian blocks:
 - `focei` always computes its subject modes with `QuasiNewtonEBE()`. Its outer search over `(θ, σ, ω)` is NLopt's derivative-free BOBYQA, so FOCE(I) takes no population derivatives.
 - SAEM's MH transitions use only values. MALA and NUTS need ∇η. A Hessian only seeds their initial metric. Without one, they use Ω.
 - Without a population prior, SAEM updates the mu-referenced θ and Ω in closed form from sufficient statistics, without derivatives. The remaining θ and every σ coordinate use a numerical M-step that needs ∇θσ. In practice that means almost every model, because residual-error parameters live in σ.
+- `covariance_step` evaluates the per-subject FOCE(I) marginal log-likelihoods at central-difference points in `(θ, σ, ω)`. Each evaluation needs what `focei` needs. With Hessian blocks it finds the subject modes by Newton, which converges to roundoff; otherwise it uses BFGS with a tighter tolerance. It takes no population derivatives ([source](https://github.com/nsiccha/NLMEEstimation.jl/blob/abea84d04bf65c2b90859d6b975032f29707c69c/src/covariance.jl#L213-L231)).
 - With a population prior, SAEM takes one numerical MAP step over `(θ, σ, ω)`. The package computes the mu-referenced and Ω parts of its gradient in closed form; the model supplies ∇θσ and the prior's gradient. `population_logprior_and_gradient` derives the latter with `ad_backend(model)` by default.
 
 Ragged nested random effects (`RaggedNLMELayout`) have the same requirements. FOCE(I) does not support them yet, and SAEM supports only the MH kernel.
@@ -87,15 +89,15 @@ C_i = \Omega^{-1} + J_{\mu,i}^\top V_i^{-1} J_{\mu,i}
       + \tfrac12 J_{v,i}^\top V_i^{-2} J_{v,i},
 ```
 
-where `Vᵢ` is the diagonal matrix of predicted variances. The last term is the FOCEI interaction term; FOCE drops it. `Cᵢ` is the Fisher information of the Gaussian observations plus the prior precision. It uses only first derivatives of the predicted means and variances; this is what distinguishes FOCE(I) from the exact Laplace approximation. The implementation is direct ([source](https://github.com/nsiccha/NLMEEstimation.jl/blob/a3d9bfbfe34a5f08e1ba534ff7f4d2c2c32b835b/src/focei.jl#L105-L110)):
+where `Vᵢ` is the diagonal matrix of predicted variances. The last term is the FOCEI interaction term; FOCE drops it. `Cᵢ` is the Fisher information of the Gaussian observations plus the prior precision. It uses only first derivatives of the predicted means and variances; this is what distinguishes FOCE(I) from the exact Laplace approximation. The implementation is direct ([source](https://github.com/nsiccha/NLMEEstimation.jl/blob/abea84d04bf65c2b90859d6b975032f29707c69c/src/focei.jl#L114-L119)):
 
 ```julia
 C = prior.precision + Jμ' * (Jμ ./ v)
 interaction && (C += Jv' * (Jv ./ (2 .* v.^2)))
 factor = cholesky(Symmetric(C))
 push!(curvatures, Matrix{T}(C))
-ll += ebes.complete_data_loglikelihood[k] + m * log(2π) / 2 -
-    sum(log, diag(factor.L))
+push!(terms, ebes.complete_data_loglikelihood[k] + m * log(2π) / 2 -
+    sum(log, diag(factor.L)))
 ```
 
 ## Where higher orders would come from
@@ -119,6 +121,8 @@ Here θ stands for any population coordinate. The third-order case comes from th
 ```
 
 and `∂θ Hᵢ` and `∂η Hᵢ` are third derivatives of `fᵢ`. Third-order AD was mentioned in early planning for this reason. Both the gradient-based outer search and exact Laplace remain optional future work.
+
+The covariance step needs the Hessian of the objective in `(θ, σ, Ω)`, one order above the gradient column: third order for FOCE(I). `covariance_step` therefore takes second differences of objective values instead.
 
 ## Checklist for a new PPL integration
 

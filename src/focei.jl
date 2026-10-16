@@ -20,13 +20,15 @@ end
 
 FOCE(I) log-likelihood at fixed population parameters. `ebes.modes` contains
 the subject EBEs, and `curvatures[k]` is the positive η curvature for subject
-`subjects[k]`. `logposterior` adds the optional population log prior exactly
+`subjects[k]`. `subject_loglikelihoods[k]` is that subject's term of
+`loglikelihood`. `logposterior` adds the optional population log prior exactly
 once; `ofv` is minus twice `logposterior` (equal to minus twice the likelihood
 when `objective == :ML`).
 """
 struct FOCEEvaluation{T, E, P}
     subjects::Vector{Int}
     loglikelihood::T
+    subject_loglikelihoods::Vector{T}
     logposterior::T
     population_logprior::T
     ofv::T
@@ -44,6 +46,9 @@ model's declared coordinates; `omega_matrix` is the estimated Ω on covariance
 scale. `loglikelihood` remains the approximate marginal likelihood;
 `logposterior` includes a model-provided population prior once, and `ofv` is
 minus twice that fitted objective. `objective` distinguishes `:ML` from `:MAP`.
+`free` lists the fitted positions in the concatenated `(θ, σ, ω)` vector and
+`options` the [`FOCEOptions`](@ref) of the fit; [`covariance_step`](@ref) reuses
+both.
 """
 struct FOCEResult{T, E, I, P}
     theta::Vector{T}
@@ -61,27 +66,31 @@ struct FOCEResult{T, E, I, P}
     evaluations::Int
     converged::Bool
     optimizer_info::I
+    free::Vector{Int}
+    options::FOCEOptions
 end
 
 """
     focei_evaluate(model, θ, σ, ω; subjects = 1:nsubjects(model), η0 = nothing,
-                   interaction = true, ebe_options = EBEOptions())
+                   interaction = true, ebe_method = QuasiNewtonEBE(),
+                   ebe_options = EBEOptions())
 
 Evaluate the first-order conditional (with interaction by default) marginal
 log-likelihood. The EBEs maximize the exact complete-data log-density; their
 Laplace curvature uses only the first η derivatives of the Gaussian observation
 means and variances. Supply `η0` as for [`empirical_bayes`](@ref) to warm-start
-the mode search. A model's [`population_logprior`](@ref), if present, is added
-once after the subject likelihood terms; it does not alter the subject EBEs.
+the mode search; `ebe_method` and `ebe_options` configure it. A model's
+[`population_logprior`](@ref), if present, is added once after the subject
+likelihood terms; it does not alter the subject EBEs.
 """
 function focei_evaluate(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η0 = nothing, interaction::Bool = true,
-        ebe_options::EBEOptions = EBEOptions())
+        ebe_method::EBEMethod = QuasiNewtonEBE(), ebe_options::EBEOptions = EBEOptions())
     _require_focei_layout(nlme_layout(model))
     observation_model(model) isa GaussianObservations || throw(ArgumentError(
         "FOCE(I) requires observation_model(model) = GaussianObservations()"))
     ebes = empirical_bayes(model, θ, σ, ω; subjects, η0,
-        method = QuasiNewtonEBE(), options = ebe_options)
+        method = ebe_method, options = ebe_options)
     parts = observation_moments_and_jacobians(model, ebes.subjects, θ, σ, ebes.modes)
     length(parts) == length(ebes.subjects) || throw(DimensionMismatch(
         "observation_moments_and_jacobians returned $(length(parts)) entries for $(length(ebes.subjects)) subjects"))
@@ -92,7 +101,7 @@ function focei_evaluate(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
     m = neta(prior)
     T = float(promote_type(eltype(θ), eltype(σ), eltype(ω), eltype(ebes.modes)))
     curvatures = Matrix{T}[]
-    ll = zero(T)
+    terms = T[]
     for (k, (i, part)) in enumerate(zip(ebes.subjects, parts))
         μ, v, Jμ, Jv = part
         n = length(ys[k])
@@ -106,15 +115,16 @@ function focei_evaluate(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
         interaction && (C += Jv' * (Jv ./ (2 .* v.^2)))
         factor = cholesky(Symmetric(C))
         push!(curvatures, Matrix{T}(C))
-        ll += ebes.complete_data_loglikelihood[k] + m * log(2π) / 2 -
-            sum(log, diag(factor.L))
+        push!(terms, ebes.complete_data_loglikelihood[k] + m * log(2π) / 2 -
+            sum(log, diag(factor.L)))
     end
+    ll = sum(terms; init = zero(T))
     lp = population_logprior(model, θ, σ, ω)
     lp === nothing || lp isa Real || throw(ArgumentError(
         "population_logprior must return a real log density or nothing"))
     active = lp !== nothing
     lp = active ? lp : zero(ll)
-    return FOCEEvaluation(ebes.subjects, ll, ll + lp, lp, -2(ll + lp),
+    return FOCEEvaluation(ebes.subjects, ll, terms, ll + lp, lp, -2(ll + lp),
         active ? :MAP : :ML, active ? population_prior_provenance(model) : nothing,
         ebes, curvatures)
 end
@@ -207,7 +217,7 @@ function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVec
         evaluated.objective, evaluated.prior_provenance,
         evaluated.ebes, evaluated.curvatures, calls[],
         status in (:SUCCESS, :STOPVAL_REACHED, :FTOL_REACHED, :XTOL_REACHED),
-        (minimum_ofv = min_ofv, status = status))
+        (minimum_ofv = min_ofv, status = status), free_indices, options)
 end
 
 _require_focei_layout(::NLMELayout) = nothing

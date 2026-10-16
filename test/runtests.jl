@@ -6,6 +6,7 @@ using Test
     include("empirical_bayes.jl")
     include("ragged.jl")
 include("focei.jl")
+include("covariance.jl")
 include("saem.jl")
 include("saem_nuts.jl")
 include("saem_mala.jl")
