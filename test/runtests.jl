@@ -8,6 +8,7 @@ using Test
 include("focei.jl")
 include("covariance.jl")
 include("marginal.jl")
+include("diagnostics.jl")
 include("saem.jl")
 include("saem_nuts.jl")
 include("saem_mala.jl")

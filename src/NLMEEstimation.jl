@@ -26,6 +26,7 @@ Estimators:
 [`covariance_step`](@ref) gives standard errors of a fit's population coordinates, and
 [`marginal_loglikelihood`](@ref) its likelihood, OFV, AIC and BIC (for SAEM, by
 importance sampling or adaptive Gauss–Hermite quadrature).
+[`residual_diagnostics`](@ref) gives PRED, IPRED, IWRES, CWRES and NPDE.
 """
 module NLMEEstimation
 
@@ -58,6 +59,7 @@ export covariance_step, CovarianceResult, CovarianceStepError, FOCEApproximation
     delta_method, omega_elements
 export marginal_loglikelihood, MarginalLikelihoodResult, ImportanceSampling,
     AdaptiveGaussHermite
+export residual_diagnostics, ResidualDiagnostics
 export saem, saem_population_gradient_style, SAEMOptions, SAEMResult, RaggedSAEMResult,
     StandardSAEMMH, WarmupHMCNUTS, DualAveragingMALA
 
@@ -72,6 +74,7 @@ include("saem.jl")
 include("ragged.jl")
 include("covariance.jl")
 include("marginal.jl")
+include("diagnostics.jl")
 include("ReferenceModels.jl")
 
 end
