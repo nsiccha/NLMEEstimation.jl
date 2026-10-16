@@ -417,6 +417,6 @@ end
     @test result.aic ≈ -2 * result.loglikelihood + 8
     free = marginal_loglikelihood(ChannelGaussian(y), θ, Float64[], ω;
         approximation = AdaptiveGaussHermite(nodes = 1))
-    @test free.nparameters == 6
+    @test free.nparameters == 7  # 3 means + 1 + 3 log-Cholesky coordinates
     @test free.loglikelihood ≈ result.loglikelihood
 end
