@@ -16,7 +16,9 @@ using Random
 import Optim
 
 export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH, theoph_model,
-    JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN
+    JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN,
+    LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject,
+    RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -121,6 +123,154 @@ function joint_reference(model, θ, σ, ω)
         Optim.Options(g_tol = 1.0e-11, iterations = 100_000))
     Optim.converged(result) || error("joint reference did not converge: $result")
     return reshape(Optim.minimizer(result), m, n), prior
+end
+
+# Random intercepts and slopes with a dense 2 × 2 Ω and additive error. The model
+# is linear and Gaussian in η, so FOCE(I) is exact and every subject's marginal
+# log-likelihood is known in closed form: an oracle for both R and S.
+struct LinearGrowth
+    t::Vector{Vector{Float64}}
+    y::Vector{Vector{Float64}}
+    prior_sd::Union{Nothing, Float64}
+end
+
+const GROWTH_LAYOUT = NLMELayout(2, 1, [2])
+NE.nsubjects(m::LinearGrowth) = length(m.y)
+NE.nlme_layout(::LinearGrowth) = GROWTH_LAYOUT
+NE.observation_model(::LinearGrowth) = GaussianObservations()
+NE.observations(m::LinearGrowth, i::Integer) = m.y[i]
+NE.provides_eta_hessian(::LinearGrowth) = true
+NE.mu_referencing(m::LinearGrowth) =
+    MuReferencing([1, 2], [Matrix(1.0I, 2, 2) for _ in m.y])
+growth_mean(m, i, θ, η) = (θ[1] + η[1]) .+ (θ[2] + η[2]) .* m.t[i]
+
+function NE.conditional_loglikelihood(m::LinearGrowth, i::Integer, θ, σ, η)
+    r = m.y[i] .- growth_mean(m, i, θ, η)
+    return -sum(abs2, r) / (2exp(2σ[1])) - length(r) * (log(2π) / 2 + σ[1])
+end
+
+function NE.conditional_loglikelihood_and_gradient(m::LinearGrowth, i::Integer, θ, σ, η)
+    r = m.y[i] .- growth_mean(m, i, θ, η)
+    v = exp(2σ[1])
+    return NE.conditional_loglikelihood(m, i, θ, σ, η), [sum(r), dot(r, m.t[i])] ./ v
+end
+
+function NE.conditional_loglikelihood_gradient_and_hessian(m::LinearGrowth, i::Integer, θ, σ, η)
+    ℓ, g = NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η)
+    t = m.t[i]
+    return ℓ, g, -[length(t) sum(t); sum(t) dot(t, t)] ./ exp(2σ[1])
+end
+
+function NE.conditional_loglikelihood_and_population_gradient(m::LinearGrowth, i::Integer, θ, σ, η)
+    ℓ, g = NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η)
+    r = m.y[i] .- growth_mean(m, i, θ, η)
+    return ℓ, g, [sum(abs2, r) / exp(2σ[1]) - length(r)]
+end
+
+NE.observation_moments(m::LinearGrowth, i::Integer, θ, σ, η) =
+    (growth_mean(m, i, θ, η), fill(exp(2σ[1]), length(m.y[i])))
+
+function NE.observation_moments_and_jacobians(m::LinearGrowth, i::Integer, θ, σ, η)
+    μ, v = NE.observation_moments(m, i, θ, σ, η)
+    n = length(μ)
+    return μ, v, hcat(ones(n), m.t[i]), zeros(n, 2)
+end
+
+NE.population_logprior(m::LinearGrowth, θ, σ, ω) = m.prior_sd === nothing ? nothing :
+    -sum(abs2, vcat(θ, σ, ω)) / (2m.prior_sd^2)
+
+function growth_exact_subject(m, i, x)
+    θ, σ, ω = x[1:2], x[3], x[4:6]
+    Z = hcat(ones(length(m.t[i])), m.t[i])
+    C = Z * omega_matrix(GROWTH_LAYOUT, ω) * Z' + exp(2σ) * I
+    L = cholesky(Symmetric(C)).L
+    z = L \ (m.y[i] - Z * θ)
+    return -(length(z) * log(2π) + 2sum(log, diag(L)) + dot(z, z)) / 2
+end
+
+growth_exact(m, x) = sum(i -> growth_exact_subject(m, i, x), 1:NE.nsubjects(m))
+
+function growth_model(; seed = 5, n = 12, prior_sd = nothing)
+    rng = Xoshiro(seed)
+    Ω = [0.5 0.1; 0.1 0.2]
+    L = cholesky(Ω).L
+    t = [sort(3rand(rng, 3 + rand(rng, 0:3))) for _ in 1:n]
+    y = map(t) do ti
+        η = L * randn(rng, 2)
+        (1.0 + η[1]) .+ (0.5 + η[2]) .* ti .+ 0.3 .* randn(rng, length(ti))
+    end
+    return LinearGrowth(t, y, prior_sd)
+end
+
+# Nested intercepts with unequal subject sizes: one subject-level effect a_i and
+# one occasion-level effect b_ij per occasion, from two covariance families, with
+# additive error. The θ intercept is mu-referenced through a_i. The model declares
+# no observation model and no η Hessian, so the marginal approximations use
+# finite-difference curvature. Every subject's marginal is Gaussian and exact.
+struct RaggedOccasions
+    y::Vector{Vector{Vector{Float64}}}
+    calls::Base.RefValue{Int}
+end
+
+RaggedOccasions(y) = RaggedOccasions(y, Ref(0))
+NE.nsubjects(m::RaggedOccasions) = length(m.y)
+NE.nlme_layout(m::RaggedOccasions) = RaggedNLMELayout(1, 1, [1, 1],
+    [vcat(1, fill(2, length(occasions))) for occasions in m.y])
+NE.mu_referencing(m::RaggedOccasions) =
+    MuReferencing([1], [reshape(vcat(1.0, zeros(length(o))), :, 1) for o in m.y])
+
+function occasion_residuals(m::RaggedOccasions, i, θ, η)
+    return [m.y[i][j] .- (θ[1] + η[1] + η[1+j]) for j in eachindex(m.y[i])]
+end
+
+function NE.conditional_loglikelihood(m::RaggedOccasions, i::Integer, θ, σ, η)
+    m.calls[] += 1
+    r = reduce(vcat, occasion_residuals(m, i, θ, η))
+    return -sum(abs2, r) / (2exp(2σ[1])) - length(r) * (log(2π) / 2 + σ[1])
+end
+
+function NE.conditional_loglikelihood_and_gradient(m::RaggedOccasions, i::Integer, θ, σ, η)
+    rs = occasion_residuals(m, i, θ, η)
+    v = exp(2σ[1])
+    g = vcat(sum(sum, rs), [sum(r) for r in rs]) ./ v
+    return NE.conditional_loglikelihood(m, i, θ, σ, η), g
+end
+
+function NE.conditional_loglikelihood_and_population_gradient(m::RaggedOccasions, i::Integer, θ, σ, η)
+    ℓ, g = NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η)
+    r = reduce(vcat, occasion_residuals(m, i, θ, η))
+    return ℓ, [g[1]], [sum(abs2, r) / exp(2σ[1]) - length(r)]
+end
+
+function occasions_exact_subject(m::RaggedOccasions, i, x)
+    θ, σ, ω = x[1], x[2], x[3:4]
+    sizes = length.(m.y[i])
+    n = sum(sizes)
+    Z = zeros(n, length(sizes))
+    offset = 0
+    for (j, s) in enumerate(sizes)
+        Z[offset+1:offset+s, j] .= 1
+        offset += s
+    end
+    C = exp(2ω[1]) * ones(n, n) + exp(2ω[2]) * Z * Z' + exp(2σ) * I
+    L = cholesky(Symmetric(C)).L
+    z = L \ (reduce(vcat, m.y[i]) .- θ)
+    return -(n * log(2π) + 2sum(log, diag(L)) + dot(z, z)) / 2
+end
+
+occasions_exact(m::RaggedOccasions, x) =
+    sum(i -> occasions_exact_subject(m, i, x), 1:NE.nsubjects(m))
+
+function occasions_model(; seed = 9, n = 8)
+    rng = Xoshiro(seed)
+    y = map(1:n) do _
+        a = 0.6 * randn(rng)
+        map(1:rand(rng, 1:3)) do _
+            b = 0.4 * randn(rng)
+            2.0 + a + b .+ 0.25 .* randn(rng, rand(rng, 2:4))
+        end
+    end
+    return RaggedOccasions(y)
 end
 
 end

@@ -27,7 +27,7 @@ struct _PreparedFOCE{M, A <: FOCEApproximation, EM <: EBEMethod, E <: EBEResult}
     center::E
 end
 
-function _prepare_marginal(approximation::FOCEApproximation, model, θ, σ, ω, subjects, η0)
+function _prepare_marginal(approximation::FOCEApproximation, model, θ, σ, ω, subjects, η0, rng)
     _require_focei_layout(nlme_layout(model))
     observation_model(model) isa GaussianObservations || throw(ArgumentError(
         "FOCEApproximation requires observation_model(model) = GaussianObservations()"))
@@ -120,11 +120,12 @@ end
 """
     covariance_step(model, fit::FOCEResult; method = :rs, step = 1e-3,
                     approximation = FOCEApproximation(interaction = fit.options.interaction))
-    covariance_step(model, fit::SAEMResult; method = :rs, step = 1e-3,
-                    approximation = FOCEApproximation())
+    covariance_step(model, fit::Union{SAEMResult, RaggedSAEMResult}; method = :rs,
+                    step = 1e-3, approximation = <see below>, rng = Random.default_rng())
     covariance_step(model, θ, σ, ω; subjects = 1:nsubjects(model), free = nothing,
                     η0 = nothing, method = :rs, step = 1e-3,
-                    approximation = FOCEApproximation()) -> CovarianceResult
+                    approximation = FOCEApproximation(), rng = Random.default_rng())
+        -> CovarianceResult
 
 The covariance step: the sampling covariance and standard errors of the estimated
 population coordinates `(θ, σ, ω)`, in the unconstrained coordinates in which they
@@ -147,11 +148,17 @@ subject modes from the same solution at the estimate.
 
 For a FOCE(I) fit, the defaults reuse its subjects, its fitted coordinates
 (`fit.free`) and its interaction setting, so the step differentiates the fitted
-objective. For an SAEM fit, all `(θ, σ, ω)` are estimated, and the FOCE(I)
-approximation gives the linearized covariance at the SAEM estimate; it requires
-[`GaussianObservations`](@ref) and an [`NLMELayout`](@ref). `free` selects
-positions in the concatenated `(θ, σ, ω)` vector. Throws
-[`CovarianceStepError`](@ref) when the requested matrix is not positive definite.
+objective. For an SAEM fit, all `(θ, σ, ω)` are estimated. A model with
+[`GaussianObservations`](@ref) and an [`NLMELayout`](@ref) defaults to the FOCE(I)
+linearization at the SAEM estimate. Any other model, including every
+[`RaggedNLMELayout`](@ref), defaults to [`ImportanceSampling`](@ref). Its draws,
+from `rng`, are held fixed across the difference points, so the estimated
+marginal is a smooth function of the coordinates. [`AdaptiveGaussHermite`](@ref)
+is the deterministic alternative for few random effects per subject. For those
+two approximations, perturbations of ω and of mu-referenced θ reuse the
+conditional values and cost no model evaluations. `free` selects positions in the
+concatenated `(θ, σ, ω)` vector. Throws [`CovarianceStepError`](@ref) when the
+requested matrix is not positive definite.
 """
 function covariance_step(model, fit::FOCEResult; approximation = FOCEApproximation(
             interaction = fit.options.interaction), kwargs...)
@@ -161,14 +168,19 @@ function covariance_step(model, fit::FOCEResult; approximation = FOCEApproximati
 end
 
 function covariance_step(model, fit::Union{SAEMResult, RaggedSAEMResult};
-        approximation = FOCEApproximation(), kwargs...)
+        approximation = _default_saem_approximation(nlme_layout(model), observation_model(model)),
+        kwargs...)
     return covariance_step(model, fit.theta, fit.sigma, fit.omega;
         subjects = fit.subjects, η0 = fit.eta, approximation, kwargs...)
 end
 
+_default_saem_approximation(::NLMELayout, ::GaussianObservations) = FOCEApproximation()
+_default_saem_approximation(layout, observation_model) = ImportanceSampling()
+
 function covariance_step(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, free = nothing, η0 = nothing, method::Symbol = :rs,
-        step::Real = 1.0e-3, approximation = FOCEApproximation())
+        step::Real = 1.0e-3, approximation = FOCEApproximation(),
+        rng::AbstractRNG = Random.default_rng())
     method in (:rs, :r, :s) || throw(ArgumentError("method must be :rs, :r or :s, got :$method"))
     isfinite(step) && step > 0 || throw(ArgumentError("step must be finite and positive"))
     layout = nlme_layout(model)
@@ -181,7 +193,7 @@ function covariance_step(model, θ::AbstractVector, σ::AbstractVector, ω::Abst
     !isempty(free) && allunique(free) && all(i -> 1 <= i <= length(x̂), free) ||
         throw(ArgumentError("free must contain unique positions in 1:$(length(x̂))"))
     names = _population_coordinate_names(model)[free]
-    prepared = _prepare_marginal(approximation, model, θ, σ, ω, subjects, η0)
+    prepared = _prepare_marginal(approximation, model, θ, σ, ω, subjects, η0, rng)
     subject_ids = collect(Int, _marginal_subjects(prepared))
     split(x) = (x[1:nθ], x[nθ+1:nθ+nσ], x[nθ+nσ+1:end])
     lp0 = population_logprior(model, split(x̂)...)
