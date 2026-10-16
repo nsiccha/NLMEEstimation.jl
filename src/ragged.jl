@@ -171,7 +171,7 @@ function _saem_mh_round!(rng, model, subjects, θ, σ, prior::RaggedNormalREPrio
 end
 
 function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
-        second_phi, floor, subjects)
+        second_phi, floor, subjects, constraints = nothing)
     μ = copy(θ[indices])
     Ωnew = deepcopy(Ω)
     for _ in 1:100
@@ -203,11 +203,19 @@ function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
                 counts[family] += 1
             end
         end
-        all(>(0), counts) || throw(ArgumentError(
-            "SAEM selected subjects contain no instances of at least one covariance family"))
+        all(f -> counts[f] > 0 || _fully_fixed_family(constraints, f), eachindex(counts)) ||
+            throw(ArgumentError(
+                "SAEM selected subjects contain no instances of at least one estimated covariance family"))
         nextΩ = [begin
-            E = eigen(Symmetric(sums[f] / counts[f]))
-            Matrix(Symmetric(E.vectors * Diagonal(max.(E.values, floor)) * E.vectors'))
+            fam = _omega_family(constraints, f)
+            if fam === nothing
+                E = eigen(Symmetric(sums[f] / counts[f]))
+                Matrix(Symmetric(E.vectors * Diagonal(max.(E.values, floor)) * E.vectors'))
+            elseif fam.fully_fixed
+                copy(fam.covariance)
+            else
+                _fixed_family_update(fam, sums[f] / counts[f], Ωnew[f], floor)
+            end
         end for f in eachindex(sums)]
         if all(f -> maximum(abs, nextΩ[f] - Ωnew[f]) <=
                 1e-8 * max(1.0, maximum(abs, Ωnew[f])), eachindex(Ωnew))
@@ -251,18 +259,9 @@ function _saem_gaussian_map_value_gradient(layout::RaggedNLMELayout, θ, ω,
     gω = zeros(Float64, length(ω))
     omega_ranges = _ragged_family_ranges(layout)
     for f in eachindex(factors)
-        L = factors[f]
-        P = precisions[f]
-        c = counts[f]
-        S = sums[f]
-        value -= (c * (layout.family_sizes[f] * log(2π) + 2sum(log, diag(L))) +
-            sum(P .* S)) / 2
-        GL = (P * S * P - c * P) * L
-        cursor = first(omega_ranges[f])
-        for j in 1:layout.family_sizes[f], l in 1:j
-            gω[cursor] = j == l ? GL[j, l] * L[j, l] : GL[j, l]
-            cursor += 1
-        end
+        v, g = _gaussian_family_value_gradient(factors[f], precisions[f], sums[f], counts[f])
+        value += v
+        gω[omega_ranges[f]] = g
     end
     return value, gμ, gω
 end
@@ -291,6 +290,7 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
     _check_length("θ", θ0, layout.ntheta)
     _check_length("σ", σ0, layout.nsigma)
     _check_length("ω", ω0, nomega(layout))
+    constraints = _checked_omega_constraints(model, layout, ω0)
     ids = subjects === nothing ? collect(1:nsubjects(model)) : collect(Int, subjects)
     !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= nsubjects(model), ids) ||
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
@@ -348,11 +348,12 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
             if map_objective
                 θ, σ, ω = _saem_map_mstep(model, ids, layout, θ, σ, ω,
                     indices, design, bank, weights, mean_phi, second_phi,
-                    options.numeric_maxiter, numeric_mode, γ, options.omega_floor)
+                    options.numeric_maxiter, numeric_mode, γ, options.omega_floor,
+                    constraints)
             else
                 θ, Ω = _ragged_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
-                    design, mean_phi, second_phi, options.omega_floor, ids)
-                ω = omega_parameters(layout, Ω)
+                    design, mean_phi, second_phi, options.omega_floor, ids, constraints)
+                ω = _apply_omega_constraints(constraints, omega_parameters(layout, Ω))
                 θ, σ = numeric_update(model, ids, θ, σ, free, indices, design,
                     bank, weights, options.numeric_maxiter, γ)::Tuple{Vector{Float64},Vector{Float64}}
             end
@@ -385,6 +386,7 @@ function _check_ragged_protocol(model, layout::RaggedNLMELayout, θ, σ, ω;
     length(θ) == layout.ntheta || violation("θ length differs from layout")
     length(σ) == layout.nsigma || violation("σ length differs from layout")
     length(ω) == nomega(layout) || violation("ω length differs from layout")
+    _check_fixed_omega(violation, model, layout, ω)
     ids = subjects === nothing ? collect(1:n) : collect(Int, subjects)
     !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= n, ids) || violation(
         "subjects must be distinct valid model subject indices")

@@ -522,7 +522,8 @@ function _saem_moments!(mean_phi, second_phi, Φ, γ)
     return nothing
 end
 
-function _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi, floor)
+function _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi, floor,
+        constraints = nothing)
     m, n = size(mean_phi)
     μ = copy(θ[indices])
     Ωnew = copy(Ω)
@@ -548,9 +549,14 @@ function _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_
         end
         second_residual ./= n
         nextΩ = zeros(Float64, m, m)
-        for r in ranges
-            E = eigen(Symmetric(second_residual[r, r]))
-            nextΩ[r, r] = E.vectors * Diagonal(max.(E.values, floor)) * E.vectors'
+        for (b, r) in enumerate(ranges)
+            fam = _omega_family(constraints, b)
+            if fam === nothing
+                E = eigen(Symmetric(second_residual[r, r]))
+                nextΩ[r, r] = E.vectors * Diagonal(max.(E.values, floor)) * E.vectors'
+            else
+                nextΩ[r, r] = _fixed_family_update(fam, second_residual[r, r], Ωnew[r, r], floor)
+            end
         end
         if maximum(abs, nextΩ - Ωnew) <= 1.0e-8 * max(1.0, maximum(abs, Ωnew))
             Ωnew = nextΩ
@@ -778,54 +784,27 @@ function _saem_floor_omega(layout, ω, floor)
     return omega_parameters(layout, Ω)
 end
 
+# The joint MAP M-step searches θ, σ and the free Ω coordinates
+# (`_free_omega`); a fixed covariance family stays at its declared value.
 function _saem_map_mstep(model, subjects, layout, θ, σ, ω, indices, design,
-        bank, weights, mean_phi, second_phi, maxiter, mode::Val, γ, floor)
-    x0 = vcat(θ, σ, _saem_floor_omega(layout, ω, floor))
-    x = copy(x0)
-    objective(z) = _saem_map_value_gradient(z, model, subjects, layout,
-        indices, design, bank, weights, mean_phi, second_phi, mode)
-    value, gradient = objective(x)
-    isfinite(value) && all(isfinite, gradient) || throw(DomainError(value,
-        "SAEM MAP M-step has non-finite objective or gradient"))
-    B = Matrix{Float64}(I, length(x), length(x))
-    for _ in 1:maxiter
-        maximum(abs, gradient) < 1.0e-6 && break
-        direction = B * gradient
-        if dot(direction, gradient) <= 0
-            direction = copy(gradient)
-            B = Matrix{Float64}(I, length(x), length(x))
-        end
-        step = 1.0
-        accepted = false
-        while step >= 1.0e-8
-            candidate = x + step * direction
-            candidate_omega = view(candidate, layout.ntheta+layout.nsigma+1:length(candidate))
-            if !_saem_omega_above_floor(layout, candidate_omega, floor)
-                step /= 2
-                continue
-            end
-            next_value, next_gradient = objective(candidate)
-            if isfinite(next_value) && all(isfinite, next_gradient) &&
-                    next_value >= value + 1.0e-4 * step * dot(gradient, direction)
-                s = candidate - x
-                y = gradient - next_gradient
-                ys = dot(y, s)
-                if ys > 1.0e-12
-                    ρ = inv(ys)
-                    C = Matrix{Float64}(I, length(x), length(x)) - ρ * s * y'
-                    B = C * B * C' + ρ * s * s'
-                end
-                x, value, gradient = candidate, next_value, next_gradient
-                accepted = true
-                break
-            end
-            step /= 2
-        end
-        accepted || break
+        bank, weights, mean_phi, second_phi, maxiter, mode::Val, γ, floor,
+        constraints = nothing)
+    nθσ = layout.ntheta + layout.nsigma
+    x0 = vcat(θ, σ, _free_omega(constraints, _floor_omega(layout, constraints, ω, floor)))
+    full(x) = vcat(view(x, 1:nθσ), _constrained_omega(constraints, view(x, nθσ+1:length(x))))
+    function objective(x)
+        xf = full(x)
+        value, gradient = _saem_map_value_gradient(xf, model, subjects, layout,
+            indices, design, bank, weights, mean_phi, second_phi, mode)
+        return value, vcat(view(gradient, 1:nθσ), _free_omega_gradient(constraints,
+            view(xf, nθσ+1:length(xf)), view(gradient, nθσ+1:length(gradient))))
     end
+    admissible(x) = _omega_admissible(layout, constraints,
+        _constrained_omega(constraints, view(x, nθσ+1:length(x))), floor)
+    x = _bfgs_ascent(objective, x0, maxiter, admissible)
     mode isa Val{:online} && (x = x0 .+ γ .* (x .- x0))
-    return x[1:layout.ntheta], x[layout.ntheta+1:layout.ntheta+layout.nsigma],
-        x[layout.ntheta+layout.nsigma+1:end]
+    x = full(x)
+    return x[1:layout.ntheta], x[layout.ntheta+1:nθσ], x[nθσ+1:end]
 end
 
 _saem_numeric_update(::Val{:mixture}, model, subjects, θ, σ, free, indices,
@@ -878,6 +857,11 @@ When [`population_logprior`](@ref) is supplied, the M-step instead jointly
 optimizes θ, σ and ω, adding the prior once to the conditional and expected
 Gaussian random-effect objectives. The model supplies a population-prior
 gradient or an AD backend from which to derive it.
+Covariance families declared by [`fixed_omega`](@ref) keep their fixed parts:
+a fully fixed family is not updated, and a partially fixed family maximizes
+the expected Gaussian random-effect density over its estimated standard
+deviations and correlation. `ω0` must hold the fixed values
+([`apply_fixed_omega`](@ref)); `omega_floor` applies to estimated parts only.
 """
 function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVector;
         rng::AbstractRNG = Random.default_rng(), subjects = nothing, η0 = nothing,
@@ -895,6 +879,7 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
     _check_length("θ", θ0, layout.ntheta)
     _check_length("σ", σ0, layout.nsigma)
     _check_length("ω", ω0, nomega(layout))
+    constraints = _checked_omega_constraints(model, layout, ω0)
     ids = subjects === nothing ? collect(1:nsubjects(model)) : collect(Int, subjects)
     !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= nsubjects(model), ids) ||
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
@@ -976,11 +961,12 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                 if map_objective
                     θ, σ, ω = _saem_map_mstep(model, ids, layout, θ, σ, ω,
                         indices, design, bank, weights, mean_phi, second_phi,
-                        options.numeric_maxiter, numeric_mode, γ, options.omega_floor)
+                        options.numeric_maxiter, numeric_mode, γ, options.omega_floor,
+                        constraints)
                 else
                     θ, Ω = _saem_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
-                        design, mean_phi, second_phi, options.omega_floor)
-                    ω = omega_parameters(layout, Ω)
+                        design, mean_phi, second_phi, options.omega_floor, constraints)
+                    ω = _apply_omega_constraints(constraints, omega_parameters(layout, Ω))
                     θ, σ = numeric_update(model, ids, θ, σ, free, indices, design,
                         bank, weights, options.numeric_maxiter, γ)::Tuple{Vector{Float64},Vector{Float64}}
                 end
