@@ -529,12 +529,13 @@ _observation_moments(::BatchedEvaluation, model, i, θ, σ, η) =
     observation_moments(model, subjects, θ, σ, H)
 
 One `(mean, variance)` pair per subject in `subjects` order. Column `k` of `H`
-is the random effect for `subjects[k]`. A batched model implements this method
-for a joint-program pass.
+is the random effect for `subjects[k]` (entry `k`, a compact vector, under a
+[`RaggedNLMELayout`](@ref)). A batched model implements this method for a
+joint-program pass.
 """
-_observation_moments(::PerSubjectEvaluation, model, subjects::AbstractVector, θ, σ, H::AbstractMatrix) =
-    [observation_moments(model, i, θ, σ, view(H, :, k)) for (k, i) in enumerate(subjects)]
-_observation_moments(::BatchedEvaluation, model, subjects::AbstractVector, θ, σ, H::AbstractMatrix) = throw(ArgumentError(
+_observation_moments(::PerSubjectEvaluation, model, subjects::AbstractVector, θ, σ, H) =
+    [observation_moments(model, i, θ, σ, _eta_column(H, k)) for (k, i) in enumerate(subjects)]
+_observation_moments(::BatchedEvaluation, model, subjects::AbstractVector, θ, σ, H) = throw(ArgumentError(
     "$(typeof(model)) declares BatchedEvaluation but implements no `NLMEEstimation.observation_moments` for a batch"))
 
 """
@@ -575,13 +576,15 @@ end
         -> Vector{Tuple{μ_i, v_i, Jμ_i, Jv_i}}
 
 Batched observation moments and first-order η Jacobians. Result entry `k`
-belongs to `subjects[k]`, with `H[:, k]` as its random effect. Each Jacobian has
-`length(observations(model, subjects)[k])` rows and `size(H, 1)` columns. A
+belongs to `subjects[k]`, with `H[:, k]` as its random effect (`H[k]` under a
+[`RaggedNLMELayout`](@ref)). Each Jacobian has
+`length(observations(model, subjects)[k])` rows and one column per η component
+of that subject. A
 joint-program model provides this directly in one batched computation; a
 per-subject model uses the per-subject derivative method for each entry.
 """
 _observation_moments_and_jacobians(::PerSubjectEvaluation, model, subjects, θ, σ, H) =
-    [observation_moments_and_jacobians(model, i, θ, σ, view(H, :, k))
+    [observation_moments_and_jacobians(model, i, θ, σ, _eta_column(H, k))
         for (k, i) in enumerate(subjects)]
 _observation_moments_and_jacobians(::BatchedEvaluation, model, subjects, θ, σ, H) =
     throw(ArgumentError("$(typeof(model)) declares BatchedEvaluation with GaussianObservations " *
