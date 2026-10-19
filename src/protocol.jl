@@ -116,6 +116,23 @@ _conditional_loglikelihoods(::BatchedEvaluation, model, subjects, θ, σ, H) = t
     "$(typeof(model)) declares BatchedEvaluation but implements no " *
     "`NLMEEstimation.conditional_loglikelihoods(::$(typeof(model)), subjects, θ, σ, H)`"))
 
+# A model may signal that a point lies outside its domain by throwing one of
+# these, as a Stan-semantics model does (a matrix exponential of an overflowed
+# rate, a Cholesky factor of an indefinite matrix). Estimators reject such a
+# trial point like one with a non-finite density; at the point a search starts
+# from it remains an error.
+const _InfeasibleEvaluation = Union{DomainError, OverflowError, PosDefException}
+
+# `f(x)`, or `nothing` when the evaluation throws `_InfeasibleEvaluation`.
+function _feasible(f, x)
+    try
+        return f(x)
+    catch err
+        err isa _InfeasibleEvaluation || rethrow()
+        return nothing
+    end
+end
+
 # ── Derivatives: implement them, or declare an AD backend ─────────────────────
 
 """
