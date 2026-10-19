@@ -141,7 +141,7 @@ function _saem_mh_round!(rng, model, subjects, θ, σ, prior::RaggedNormalREPrio
         H::AbstractVector{<:AbstractVector}, ℓ, scale)
     n = length(subjects)
     proposal = [_ragged_sample_prior(rng, prior, i) for i in subjects]
-    proposed_ℓ = conditional_loglikelihoods(model, subjects, θ, σ, proposal)
+    proposed_ℓ = _proposal_loglikelihoods(model, subjects, θ, σ, proposal)
     length(proposed_ℓ) == n && all(x -> !isnan(x) && x != Inf, proposed_ℓ) ||
         throw(DomainError(proposed_ℓ, "prior MH proposal returned invalid densities"))
     prior_accepted = 0
@@ -154,7 +154,7 @@ function _saem_mh_round!(rng, model, subjects, θ, σ, prior::RaggedNormalREPrio
     end
     proposal = [H[k] + scale * _ragged_sample_prior(rng, prior, i)
         for (k, i) in enumerate(subjects)]
-    proposed_ℓ = conditional_loglikelihoods(model, subjects, θ, σ, proposal)
+    proposed_ℓ = _proposal_loglikelihoods(model, subjects, θ, σ, proposal)
     length(proposed_ℓ) == n && all(x -> !isnan(x) && x != Inf, proposed_ℓ) ||
         throw(DomainError(proposed_ℓ, "random-walk MH proposal returned invalid densities"))
     rw_accepted = 0

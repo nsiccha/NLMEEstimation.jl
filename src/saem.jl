@@ -175,7 +175,7 @@ function _saem_mala_proposal_gradients(model, subjects, θ, σ, prior, proposal,
         # Most proposals need only the two batched value/gradient calls. If one
         # proposal leaves the model's domain, identify it with a value batch,
         # replace it by its current position, then recompute the safe batch.
-        values = conditional_loglikelihoods(model, subjects, θ, σ, proposal)
+        values = _proposal_loglikelihoods(model, subjects, θ, σ, proposal)
         length(values) == n || throw(DimensionMismatch(
             "MALA proposal returned $(length(values)) values for $n subjects"))
         for j in 1:n
@@ -443,10 +443,23 @@ function _saem_check_options(o::SAEMOptions)
     return nothing
 end
 
+# Conditional log densities at proposed latent effects. If the batch throws
+# `_InfeasibleEvaluation`, each subject is evaluated alone, and one whose
+# evaluation still throws scores -Inf, so only its proposal is rejected.
+function _proposal_loglikelihoods(model, subjects, θ, σ, proposal)
+    batch = _feasible(H -> conditional_loglikelihoods(model, subjects, θ, σ, H), proposal)
+    batch === nothing || return batch
+    layout = nlme_layout(model)
+    single(i) = η -> only(conditional_loglikelihoods(model, [i], θ, σ,
+        _single_eta_batch(layout, η)))
+    return [something(_feasible(single(i), _eta_column(proposal, k)), -Inf)
+        for (k, i) in enumerate(subjects)]
+end
+
 function _saem_mh_round!(rng, model, subjects, θ, σ, prior, H, ℓ, scale)
     m, n = size(H)
     proposal = Matrix(prior.cholesky_factor * randn(rng, m, n))
-    proposed_ℓ = conditional_loglikelihoods(model, subjects, θ, σ, proposal)
+    proposed_ℓ = _proposal_loglikelihoods(model, subjects, θ, σ, proposal)
     length(proposed_ℓ) == n || throw(DimensionMismatch("prior MH proposal returned $(length(proposed_ℓ)) log densities for $n subjects"))
     all(x -> !isnan(x) && x != Inf, proposed_ℓ) || throw(DomainError(proposed_ℓ,
         "prior MH proposal returned NaN or +Inf log density"))
@@ -460,7 +473,7 @@ function _saem_mh_round!(rng, model, subjects, θ, σ, prior, H, ℓ, scale)
         end
     end
     proposal = H + scale * (prior.cholesky_factor * randn(rng, m, n))
-    proposed_ℓ = conditional_loglikelihoods(model, subjects, θ, σ, proposal)
+    proposed_ℓ = _proposal_loglikelihoods(model, subjects, θ, σ, proposal)
     length(proposed_ℓ) == n || throw(DimensionMismatch("random-walk MH proposal returned $(length(proposed_ℓ)) log densities for $n subjects"))
     all(x -> !isnan(x) && x != Inf, proposed_ℓ) || throw(DomainError(proposed_ℓ,
         "random-walk MH proposal returned NaN or +Inf log density"))
@@ -690,43 +703,12 @@ end
 
 function _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design, bank, weights, maxiter, mode::Val)
     isempty(free) && return θ, σ
-    z = vcat(θ, σ)[free]
     objective(z) = _saem_numeric_value_gradient(z, model, subjects, θ, σ,
         free, indices, design, bank, weights, mode)
-    value, gradient = objective(z)
-    isfinite(value) && all(isfinite, gradient) || throw(DomainError(value,
-        "SAEM numerical M-step has non-finite objective or gradient"))
-    B = Matrix{Float64}(I, length(z), length(z))
-    for _ in 1:maxiter
-        maximum(abs, gradient) < 1.0e-6 && break
-        direction = B * gradient
-        dot(direction, gradient) > 0 || (direction = copy(gradient); B = Matrix{Float64}(I, length(z), length(z)))
-        step = 1.0
-        accepted = false
-        while step >= 1.0e-8
-            candidate = z + step * direction
-            candidate_value = _saem_numeric_objective(candidate, model, subjects, θ, σ,
-                free, indices, design, bank, weights)
-            if isfinite(candidate_value) && candidate_value >= value + 1.0e-4 * step * dot(gradient, direction)
-                next_value, next_gradient = objective(candidate)
-                isfinite(next_value) && all(isfinite, next_gradient) || throw(DomainError(next_value,
-                    "SAEM numerical M-step has non-finite objective or gradient"))
-                s = candidate - z
-                y = gradient - next_gradient
-                ys = dot(y, s)
-                if ys > 1.0e-12
-                    ρ = inv(ys)
-                    C = Matrix{Float64}(I, length(z), length(z)) - ρ * s * y'
-                    B = C * B * C' + ρ * s * s'
-                end
-                z, value, gradient = candidate, next_value, next_gradient
-                accepted = true
-                break
-            end
-            step /= 2
-        end
-        accepted || break
-    end
+    screen(z) = _saem_numeric_objective(z, model, subjects, θ, σ,
+        free, indices, design, bank, weights)
+    z = _bfgs_ascent(objective, vcat(θ, σ)[free], maxiter, _ -> true;
+        screen, what = "SAEM numerical M-step")
     x = vcat(θ, σ)
     x[free] = z
     return x[1:length(θ)], x[length(θ)+1:end]
@@ -862,6 +844,11 @@ a fully fixed family is not updated, and a partially fixed family maximizes
 the expected Gaussian random-effect density over its estimated standard
 deviations and correlation. `ω0` must hold the fixed values
 ([`apply_fixed_omega`](@ref)); `omega_floor` applies to estimated parts only.
+A model rejects a point outside its domain by returning a log density of
+`-Inf` or by throwing a `DomainError`, `OverflowError` or `PosDefException`.
+The MH and MALA kernels then reject that subject's proposal alone, and the
+numerical and MAP M-steps halve their line-search step. The point each M-step
+starts from must evaluate finitely.
 """
 function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVector;
         rng::AbstractRNG = Random.default_rng(), subjects = nothing, η0 = nothing,

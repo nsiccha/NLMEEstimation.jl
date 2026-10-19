@@ -191,8 +191,7 @@ function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVec
             focei_evaluate(model, θx, σx, ωx; subjects, η0 = warm[],
                 interaction = options.interaction, ebe_options = options.ebe_options)
         catch err
-            err isa Union{DomainError, OverflowError, LinearAlgebra.PosDefException,
-                EBEConvergenceError} || rethrow()
+            err isa Union{_InfeasibleEvaluation, EBEConvergenceError} || rethrow()
             return 1.0e12 + sum(abs2, x .- x0)
         end
         isfinite(value.ofv) || return 1.0e12 + sum(abs2, x .- x0)

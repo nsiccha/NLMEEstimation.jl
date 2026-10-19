@@ -462,9 +462,12 @@ function _gaussian_family_value_gradient(L, P, S, count)
 end
 
 # Quasi-Newton ascent with backtracking Armijo steps. `admissible` rejects a
-# trial point before it is evaluated.
-function _bfgs_ascent(objective, x0, maxiter, admissible; gtol = 1.0e-6,
-        what = "SAEM MAP M-step")
+# trial point before it is evaluated. `screen`, if given, is a value-only form
+# of the objective that decides the Armijo test before the gradient is taken.
+# A trial point whose evaluation is non-finite or infeasible
+# (`_InfeasibleEvaluation`) halves the step; at `x0` either is an error.
+function _bfgs_ascent(objective, x0, maxiter, admissible; screen = nothing,
+        gtol = 1.0e-6, what = "SAEM MAP M-step")
     x = copy(x0)
     isempty(x) && return x
     value, gradient = objective(x)
@@ -482,13 +485,14 @@ function _bfgs_ascent(objective, x0, maxiter, admissible; gtol = 1.0e-6,
         accepted = false
         while step >= 1.0e-8
             candidate = x + step * direction
-            if !admissible(candidate)
-                step /= 2
-                continue
-            end
-            next_value, next_gradient = objective(candidate)
-            if isfinite(next_value) && all(isfinite, next_gradient) &&
-                    next_value >= value + 1.0e-4 * step * dot(gradient, direction)
+            threshold = value + 1.0e-4 * step * dot(gradient, direction)
+            screened = admissible(candidate) &&
+                (screen === nothing || _armijo(_feasible(screen, candidate), threshold))
+            trial = screened ? _feasible(objective, candidate) : nothing
+            # A screened trial already passed the Armijo test on its value.
+            if trial !== nothing && all(isfinite, last(trial)) &&
+                    _armijo(first(trial), screen === nothing ? threshold : -Inf)
+                next_value, next_gradient = trial
                 s = candidate - x
                 y = gradient - next_gradient
                 ys = dot(y, s)
@@ -507,6 +511,9 @@ function _bfgs_ascent(objective, x0, maxiter, admissible; gtol = 1.0e-6,
     end
     return x
 end
+
+# Whether a trial value passes the Armijo test; `nothing` is an infeasible trial.
+_armijo(value, threshold) = value !== nothing && isfinite(value) && value >= threshold
 
 # The covariance M-step of one constrained family from its mean outer product
 # `S̄`: a fully fixed family keeps its value; a partially fixed one maximizes the
