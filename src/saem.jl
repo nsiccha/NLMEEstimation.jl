@@ -342,7 +342,7 @@ end
 
 # A position outside the model's domain (its evaluation throws
 # `_InfeasibleEvaluation`) has conditional log-density -Inf and a zero conditional
-# gradient, so a NUTS trajectory reaching it diverges there.
+# gradient, as if the model had returned -Inf there.
 LDP.dimension(target::_SAEMSubjectTarget) = neta(target.prior)
 LDP.capabilities(::Type{<:_SAEMSubjectTarget}) = LDP.LogDensityOrder{1}()
 function LDP.logdensity(target::_SAEMSubjectTarget, η)

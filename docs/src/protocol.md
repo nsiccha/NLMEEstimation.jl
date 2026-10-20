@@ -15,7 +15,7 @@ A model rejects a point outside its domain by returning `-Inf`, or by throwing a
 
 - `empirical_bayes` (Newton and BFGS, and so the EBEs inside `focei`) rejects that subject's trial step and tries a shorter one; Newton's final polishing step is dropped.
 - `focei`'s search scores the evaluation as a very large objective.
-- SAEM's MH and MALA kernels reject that subject's proposal. A NUTS trajectory diverges at that position. SAEM's numerical and MAP M-steps halve their line-search step.
+- SAEM's MH and MALA kernels reject that subject's proposal. The NUTS kernel scores that position `-Inf`, exactly as if the model had returned it. SAEM's numerical and MAP M-steps halve their line-search step.
 - `marginal_loglikelihood` gives that importance-sampling or quadrature point zero density.
 
 The point a search starts from must evaluate finitely.
