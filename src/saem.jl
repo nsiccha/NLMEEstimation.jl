@@ -516,6 +516,22 @@ function _saem_eta(Φ, θ, indices, design)
     return H
 end
 
+# Conditional log densities of the chains' current latent effects at population
+# parameters an M-step just set. Under mu-referencing that update moves each
+# subject's φ = Dθ + η while its η stays put, so a chain can land outside the
+# model's domain (a non-finite density, or an `_InfeasibleEvaluation` throw). The
+# MH and NUTS kernels then stop here with one error naming those subjects; MALA
+# checks its own values each round.
+function _saem_current_loglikelihoods(model, ids, θ, σ, H)
+    ℓ = _proposal_loglikelihoods(model, ids, θ, σ, H)
+    length(ℓ) == length(ids) || throw(DimensionMismatch(
+        "returned $(length(ℓ)) conditional log densities for $(length(ids)) subjects"))
+    outside = [i for (i, l) in zip(ids, ℓ) if !isfinite(l)]
+    isempty(outside) || throw(DomainError(ℓ, "SAEM conditional log densities became " *
+        "non-finite after population update (subjects $(join(outside, ", ")))"))
+    return ℓ
+end
+
 function _saem_moments!(mean_phi, second_phi, Φ, γ)
     mean_phi .*= 1 - γ
     second_phi .*= 1 - γ
@@ -904,10 +920,8 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
         for iteration in 1:(options.mcmc_burnin + options.iterations)
             if iteration > options.mcmc_burnin
                 prior = re_prior(model, ω)
-                if kernel isa StandardSAEMMH
-                    ℓ = conditional_loglikelihoods(model, ids, θ, σ, H)
-                    length(ℓ) == length(ids) && all(isfinite, ℓ) || throw(DomainError(ℓ,
-                        "SAEM conditional log densities became non-finite after population update"))
+                if kernel isa StandardSAEMMH || kernel isa WarmupHMCNUTS
+                    ℓ = _saem_current_loglikelihoods(model, ids, θ, σ, H)
                 end
             end
             for _ in 1:options.mh_rounds
