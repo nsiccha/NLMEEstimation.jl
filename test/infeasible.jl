@@ -182,9 +182,14 @@ end
     # The modes lie within |η₁| < 2, but BFGS starts from the prior covariance, so
     # its first steps on informative data overshoot them far past the bound 2.5.
     # Batched: the whole trial batch throws and is re-evaluated subject by subject.
+    # The batched view is gradient-only, because Julia 1.13 Enzyme cannot take its
+    # Hessian-vector products of this fixture (Enzyme snag julia-1-13-enzym-f89a6f51);
+    # trial values need no second order.
     θ, σ = [1.0, 0.5], [log(0.3)]
     ω = omega_parameters(GROWTH_LAYOUT, [0.8 0.0; 0.0 0.3])
-    for method in (NewtonEBE(), QuasiNewtonEBE()), wrap in (identity, JointView)
+    batched(m) = JointView(m; hessian_backend = nothing)
+    for (method, wrap) in ((NewtonEBE(), identity), (QuasiNewtonEBE(), identity),
+            (QuasiNewtonEBE(), batched))
         result, reference, hits = bounded_ebes(
             throws -> wrap(Bounded(growth_model(); max_eta = 2.5, throws)), θ, σ, ω; method)
         method isa QuasiNewtonEBE && @test hits[2] > 0
