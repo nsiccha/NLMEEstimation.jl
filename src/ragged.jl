@@ -316,9 +316,7 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
     for iteration in 1:(options.mcmc_burnin + options.iterations)
         if iteration > options.mcmc_burnin
             prior = RaggedNormalREPrior(layout, ω)
-            ℓ = conditional_loglikelihoods(model, ids, θ, σ, H)
-            length(ℓ) == length(ids) && all(isfinite, ℓ) || throw(DomainError(ℓ,
-                "SAEM conditional log densities became non-finite after population update"))
+            ℓ = _saem_current_loglikelihoods(model, ids, θ, σ, H)
         end
         for _ in 1:options.mh_rounds
             ap, ar = _saem_mh_round!(rng, model, ids, θ, σ, prior, H, ℓ, exp(logscale))

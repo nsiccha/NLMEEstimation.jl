@@ -246,6 +246,59 @@ end
     @test fit.nuts_divergences == reference.nuts_divergences
 end
 
+# A mu-referenced model whose domain is bounded in φ₁ = θ₁ + η₁, so the domain
+# depends on θ at a fixed η. Outside it the density throws a `DomainError`, or is
+# -Inf for the twin (`throws = false`).
+struct PhiBounded{M}
+    inner::M
+    max_phi::Float64
+    throws::Bool
+end
+NE.nsubjects(m::PhiBounded) = nsubjects(m.inner)
+NE.nlme_layout(m::PhiBounded) = nlme_layout(m.inner)
+NE.mu_referencing(m::PhiBounded) = mu_referencing(m.inner)
+NE.ad_backend(::PhiBounded) = RUNTIME_REVERSE
+NE.hessian_ad_backend(::PhiBounded) = RUNTIME_HESSIAN
+
+function NE.conditional_loglikelihood(m::PhiBounded, i::Integer, θ, σ, η)
+    θ[1] + η[1] > m.max_phi || return conditional_loglikelihood(m.inner, i, θ, σ, η)
+    m.throws && throw(DomainError(θ[1] + η[1], "the model leaves its domain"))
+    return -Inf
+end
+
+@testset "infeasible trial points: a population update moves SAEM chains out of the domain" begin
+    # Started far below the data, the chains' η₁ grow during MCMC burn-in. The
+    # first M-step raises θ₁ by about their mean and keeps each η, so some
+    # subjects' φ₁ cross the bound. MH and NUTS (and ragged MH) stop with the same
+    # error naming those subjects, whether the model throws or returns -Inf there.
+    opts = SAEMOptions(; BOUNDED_OPTIONS...)
+    nuts = WarmupHMCNUTS(warmup_draws = 4, warmup_evaluations = 20,
+        stepsize_adaptation_limit = 5, max_tree_depth = 4)
+    growth = ([-3.0, 0.5], [log(0.5)],
+        omega_parameters(GROWTH_LAYOUT, [0.8 0.0; 0.0 0.3]))
+    cases = (("MH", growth_model, growth, StandardSAEMMH()),
+        ("NUTS", growth_model, growth, nuts),
+        ("ragged MH", occasions_model, ([-3.0], [log(0.5)], [log(0.8), log(0.4)]),
+            StandardSAEMMH()))
+    for (name, build, (θ0, σ0, ω0), kernel) in cases
+        fit(max_phi, throws) = saem(PhiBounded(build(), max_phi, throws), θ0, σ0, ω0;
+            rng = Xoshiro(3), options = opts, kernel)
+        errors = map(throws -> try
+                fit(3.0, throws)
+                nothing
+            catch err
+                err
+            end, (true, false))
+        @testset "$name" begin
+            @test isfinite(fit(Inf, true).theta[1])  # control: no bound, no error
+            @test all(err -> err isa DomainError, errors)
+            @test occursin("became non-finite after population update (subjects ",
+                sprint(showerror, errors[1]))
+            @test sprint(showerror, errors[1]) == sprint(showerror, errors[2])
+        end
+    end
+end
+
 @testset "infeasible trial points: marginal likelihood" begin
     # Importance-sampling draws outside the domain have zero density. The modes
     # lie within |η₁| < 2; the proposal's t tails reach past 2.2.
