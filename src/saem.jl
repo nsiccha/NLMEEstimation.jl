@@ -340,14 +340,19 @@ struct _SAEMSubjectTarget{M, P}
     prior::P
 end
 
+# A position outside the model's domain (its evaluation throws
+# `_InfeasibleEvaluation`) has conditional log-density -Inf and a zero conditional
+# gradient, as if the model had returned -Inf there.
 LDP.dimension(target::_SAEMSubjectTarget) = neta(target.prior)
 LDP.capabilities(::Type{<:_SAEMSubjectTarget}) = LDP.LogDensityOrder{1}()
-LDP.logdensity(target::_SAEMSubjectTarget, η) =
-    complete_data_loglikelihood(target.model, target.subject,
-        target.θ, target.σ, target.prior, η)
+function LDP.logdensity(target::_SAEMSubjectTarget, η)
+    ℓ = something(_feasible(η -> conditional_loglikelihood(target.model, target.subject,
+        target.θ, target.σ, η), η), -Inf)
+    return ℓ + re_logprior(target.prior, η)
+end
 function LDP.logdensity_and_gradient(target::_SAEMSubjectTarget, η)
-    ℓ, g = conditional_loglikelihood_and_gradient(target.model, target.subject,
-        target.θ, target.σ, η)
+    ℓ, g = something(_feasible(η -> conditional_loglikelihood_and_gradient(target.model,
+        target.subject, target.θ, target.σ, η), η), (-Inf, zero(η)))
     return ℓ + re_logprior(target.prior, η), g - target.prior.precision * η
 end
 
@@ -441,19 +446,6 @@ function _saem_check_options(o::SAEMOptions)
         throw(ArgumentError("numeric_mstep must be :auto, :online, or :mixture"))
     isfinite(o.omega_floor) && o.omega_floor > 0 || throw(ArgumentError("omega_floor must be finite and positive"))
     return nothing
-end
-
-# Conditional log densities at proposed latent effects. If the batch throws
-# `_InfeasibleEvaluation`, each subject is evaluated alone, and one whose
-# evaluation still throws scores -Inf, so only its proposal is rejected.
-function _proposal_loglikelihoods(model, subjects, θ, σ, proposal)
-    batch = _feasible(H -> conditional_loglikelihoods(model, subjects, θ, σ, H), proposal)
-    batch === nothing || return batch
-    layout = nlme_layout(model)
-    single(i) = η -> only(conditional_loglikelihoods(model, [i], θ, σ,
-        _single_eta_batch(layout, η)))
-    return [something(_feasible(single(i), _eta_column(proposal, k)), -Inf)
-        for (k, i) in enumerate(subjects)]
 end
 
 function _saem_mh_round!(rng, model, subjects, θ, σ, prior, H, ℓ, scale)

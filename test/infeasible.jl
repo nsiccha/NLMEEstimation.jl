@@ -5,6 +5,7 @@ using LinearAlgebra
 import NLMEEstimation as NE
 isdefined(@__MODULE__, :TestCommon) || include("common.jl")
 using .TestCommon
+using .TestCommon: DoubleWell
 
 # A model that leaves its domain the way a Stan-semantics model does: where the
 # residual SD is below `min_sd`, or a subject's first random effect exceeds
@@ -13,7 +14,8 @@ using .TestCommon
 # scores the same points -Inf. `hits` counts out-of-domain evaluations by cause
 # (residual SD, random effect). Derivatives come from Enzyme through the throw.
 # It declares no mu-referencing, so a population update never moves a chain's
-# η, and `prior_sd` adds an independent normal population prior (MAP).
+# η, and `prior_sd` adds an independent normal population prior (MAP). An inner
+# model without σ has only the random-effect bound.
 struct Bounded{M}
     inner::M
     min_sigma::Float64
@@ -27,6 +29,7 @@ Bounded(inner; min_sd = 0.1, max_eta = 1.5, throws = true, prior_sd = nothing) =
 NE.nsubjects(m::Bounded) = nsubjects(m.inner)
 NE.nlme_layout(m::Bounded) = nlme_layout(m.inner)
 NE.ad_backend(::Bounded) = RUNTIME_REVERSE
+NE.hessian_ad_backend(::Bounded) = RUNTIME_HESSIAN
 NE.population_logprior(m::Bounded, θ, σ, ω) = m.prior_sd === nothing ? nothing :
     -sum(abs2, vcat(θ, σ, ω)) / (2m.prior_sd^2)
 function NE.population_logprior_and_gradient(m::Bounded, θ, σ, ω)
@@ -36,10 +39,10 @@ function NE.population_logprior_and_gradient(m::Bounded, θ, σ, ω)
 end
 
 function NE.conditional_loglikelihood(m::Bounded, i::Integer, θ, σ, η)
-    cause = σ[1] < m.min_sigma ? 1 : abs(η[1]) > m.max_eta ? 2 : 0
+    cause = !isempty(σ) && σ[1] < m.min_sigma ? 1 : abs(η[1]) > m.max_eta ? 2 : 0
     cause == 0 && return conditional_loglikelihood(m.inner, i, θ, σ, η)
     m.hits[cause] += 1
-    m.throws && throw(DomainError(σ[1], "the model leaves its domain"))
+    m.throws && throw(DomainError(cause == 1 ? σ[1] : η[1], "the model leaves its domain"))
     return -Inf
 end
 
@@ -138,4 +141,99 @@ end
         @test all(>(0), hits)
         same_fit(fit, reference)
     end
+end
+
+# Empirical Bayes on the throwing model must retrace its -Inf twin: both reject
+# the same trial points, so every iteration takes the same step.
+function bounded_ebes(build, θ, σ, ω; kwargs...)
+    throwing, twin = build(true), build(false)
+    result = empirical_bayes(throwing, θ, σ, ω; kwargs...)
+    reference = empirical_bayes(twin, θ, σ, ω; kwargs...)
+    return result, reference, (twin isa JointView ? twin.inner : twin).hits
+end
+
+function same_ebes(result, reference)
+    @test all(result.converged)
+    @test result.modes == reference.modes
+    @test result.iterations == reference.iterations
+    @test result.complete_data_loglikelihood == reference.complete_data_loglikelihood
+end
+
+@testset "infeasible trial points: empirical Bayes" begin
+    # Unit-prior double wells with modes near η = 0.7. At the start η = 0.1 the
+    # density is not concave, so Newton's first trial goes one prior SD out, to
+    # 1.1, past the domain bound 1.0.
+    b = [0.05, 0.1, 0.2]
+    layouts = (NLMELayout(0, 0, [1]), RaggedNLMELayout(ntheta = 0, nsigma = 0,
+        family_sizes = [1], subject_families = [[1], [1], [1]]))
+    for layout in layouts
+        ω = layout isa NLMELayout ? omega_parameters(layout, [1.0;;]) :
+            omega_parameters(layout, [[1.0;;]])
+        η0 = layout isa NLMELayout ? fill(0.1, 1, 3) : [[0.1] for _ in 1:3]
+        for method in (NewtonEBE(), QuasiNewtonEBE())
+            result, reference, hits = bounded_ebes(
+                throws -> Bounded(DoubleWell(layout, 1.5, b); max_eta = 1.0, throws),
+                Float64[], Float64[], ω; η0, method)
+            method isa NewtonEBE && @test hits[2] > 0
+            same_ebes(result, reference)
+        end
+    end
+
+    # The modes lie within |η₁| < 2, but BFGS starts from the prior covariance, so
+    # its first steps on informative data overshoot them far past the bound 2.5.
+    # Batched: the whole trial batch throws and is re-evaluated subject by subject.
+    θ, σ = [1.0, 0.5], [log(0.3)]
+    ω = omega_parameters(GROWTH_LAYOUT, [0.8 0.0; 0.0 0.3])
+    for method in (NewtonEBE(), QuasiNewtonEBE()), wrap in (identity, JointView)
+        result, reference, hits = bounded_ebes(
+            throws -> wrap(Bounded(growth_model(); max_eta = 2.5, throws)), θ, σ, ω; method)
+        method isa QuasiNewtonEBE && @test hits[2] > 0
+        same_ebes(result, reference)
+    end
+
+    # A starting point outside the domain remains an error.
+    @test_throws DomainError empirical_bayes(Bounded(growth_model(); max_eta = 2.5), θ, σ, ω;
+        η0 = fill(3.0, 2, 12))
+
+    # Newton's polishing step is a trial point too. With the bound 0.8, the step
+    # from 0.6 lands at 0.83 and is dropped; the step from 0.65 lands at 0.78 and
+    # is kept.
+    well = Bounded(DoubleWell(NLMELayout(0, 0, [1]), 1.5, [0.05, 0.05]); max_eta = 0.8)
+    prior = re_prior(well, omega_parameters(nlme_layout(well), [1.0;;]))
+    H = [0.6 0.65]
+    ℓ, f, G = NE._complete_gradients(well, [1, 2], Float64[], Float64[], prior, H)
+    state = NE._initial_curvature(NewtonEBE(), well, [1, 2], Float64[], Float64[], prior, H, G)
+    iterations = [0, 0]
+    NE._polish!(NewtonEBE(), well, [1, 2], Float64[], Float64[], prior, H, ℓ, f, G, state,
+        iterations, [1, 2])
+    @test well.hits[2] > 0
+    @test H[1] == 0.6
+    @test 0.65 < H[2] < 0.8
+    @test iterations == [0, 1]
+end
+
+@testset "infeasible trial points: SAEM NUTS retraces the -Inf twin" begin
+    # A trajectory that reaches an infeasible position diverges there.
+    θ0, σ0 = [1.0, 0.5], [log(0.5)]
+    ω0 = omega_parameters(GROWTH_LAYOUT, [0.8 0.0; 0.0 0.3])
+    kernel = WarmupHMCNUTS(warmup_draws = 4, warmup_evaluations = 20,
+        stepsize_adaptation_limit = 5, max_tree_depth = 4)
+    fit, reference, hits = bounded_fits(
+        throws -> Bounded(growth_model(); max_eta = 0.6, throws), θ0, σ0, ω0; kernel)
+    @test hits[2] > 0
+    same_fit(fit, reference)
+    @test fit.nuts_divergences == reference.nuts_divergences
+end
+
+@testset "infeasible trial points: marginal likelihood" begin
+    # Importance-sampling draws outside the domain have zero density. The modes
+    # lie within |η₁| < 2; the proposal's t tails reach past 2.2.
+    θ, σ = [1.0, 0.5], [log(0.3)]
+    ω = omega_parameters(GROWTH_LAYOUT, [0.8 0.0; 0.0 0.3])
+    throwing, twin = (Bounded(growth_model(); max_eta = 2.2, throws) for throws in (true, false))
+    approximation = ImportanceSampling(draws = 500)
+    result = marginal_loglikelihood(throwing, θ, σ, ω; approximation, rng = Xoshiro(1))
+    reference = marginal_loglikelihood(twin, θ, σ, ω; approximation, rng = Xoshiro(1))
+    @test twin.hits[2] > 0
+    @test result.loglikelihood == reference.loglikelihood
 end

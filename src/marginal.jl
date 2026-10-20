@@ -185,7 +185,9 @@ _subject_logprior(prior::RaggedNormalREPrior, i, η) = re_logprior(prior, i, η)
 # Conditional log-likelihoods at every point. By mu-referencing they depend on
 # (θ, σ) only through the non-mu-referenced θ and σ, so evaluations that change
 # only mu-referenced θ or ω reuse them. Keys within one coordinate of the
-# reference are cached: those are the ones a covariance step revisits.
+# reference are cached: those are the ones a covariance step revisits. A point
+# outside the model's domain (its evaluation throws `_InfeasibleEvaluation`) has
+# zero density.
 function _conditional_point_values!(prepared::_PreparedPoints, θ, σ)
     nonmu = setdiff(1:prepared.layout.ntheta, prepared.indices)
     key = Float64.(vcat(θ[nonmu], σ))
@@ -198,7 +200,7 @@ function _conditional_point_values!(prepared::_PreparedPoints, θ, σ)
         ks = findall(>=(j), counts)
         batch = _eta_batch(prepared.layout, [prepared.phi[k][:, j] - prepared.design[k] * θμ
             for k in ks])
-        v = conditional_loglikelihoods(prepared.model, prepared.subjects[ks], θ, σ, batch)
+        v = _proposal_loglikelihoods(prepared.model, prepared.subjects[ks], θ, σ, batch)
         prepared.calls[] += 1
         length(v) == length(ks) || throw(DimensionMismatch(
             "conditional_loglikelihoods returned $(length(v)) values for $(length(ks)) subjects"))
