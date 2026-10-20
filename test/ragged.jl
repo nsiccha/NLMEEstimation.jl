@@ -6,7 +6,7 @@ using DifferentiationInterface: AutoEnzyme
 import Enzyme
 import NLMEEstimation as NE
 isdefined(@__MODULE__, :TestCommon) || include("common.jl")
-using .TestCommon: DoubleWell
+using .TestCommon: DoubleWell, SteepWell
 
 struct RaggedGaussianFixture
     layout::RaggedNLMELayout
@@ -185,8 +185,8 @@ NE.population_prior_provenance(::RaggedMAPFixture) = "synthetic Normal(0, 0.5) c
     @test all(isapprox.(newton.modes, result.modes; atol=1e-6))
     @test length.(ebe_covariances(newton)) == [4, 16, 9]
 
-    # Newton raises its damping until -H + λI is positive definite (three retries at
-    # η0 here; see the equal-size test), instead of accepting a zero step.
+    # Newton leaves a start where the density is not concave (see the equal-size
+    # test) instead of accepting a zero step.
     well_layout = RaggedNLMELayout(ntheta=0, nsigma=0, family_sizes=[1],
         subject_families=[[1], [1], [1]])
     well = DoubleWell(well_layout, 1.5, [0.05, 0.1, 0.2])
@@ -201,6 +201,22 @@ NE.population_prior_provenance(::RaggedMAPFixture) = "synthetic Normal(0, 0.5) c
     @test well_η ≈ vec(empirical_bayes(well_equal, Float64[], Float64[],
         omega_parameters(nlme_layout(well_equal), [1.0;;]); η0=fill(0.1, 1, 3),
         method=NewtonEBE()).modes) atol=1e-12
+    # The trust region is measured in prior standard deviations of each block
+    # instance, so it leaves a saddle as the equal-size layout with the same Ω does.
+    steep_layout = RaggedNLMELayout(ntheta=0, nsigma=0, family_sizes=[1, 1],
+        subject_families=[[1, 2], [1, 2], [1, 2]])
+    steep = SteepWell(steep_layout, 1.0e4, 1.5, [0.0, 1.0e-6, 1.0e-2], 0.3)
+    steep_newton = empirical_bayes(steep, Float64[], Float64[],
+        omega_parameters(steep_layout, [[1.0;;], [4.0;;]]);
+        η0=[[0.0, 1.0e-6] for _ in 1:3], method=NewtonEBE())
+    @test all(steep_newton.converged)
+    @test maximum(steep_newton.iterations) <= 10
+    steep_η = reduce(hcat, steep_newton.modes)
+    @test maximum(abs, -steep_η[2, :] .^ 3 .+ 1.25 .* steep_η[2, :] .+ steep.b) < 1e-12
+    steep_equal = SteepWell(NLMELayout(0, 0, [1, 1]), steep.D, steep.a, steep.b, steep.c)
+    @test steep_η ≈ empirical_bayes(steep_equal, Float64[], Float64[],
+        omega_parameters(nlme_layout(steep_equal), [1.0 0.0; 0.0 4.0]);
+        η0=[zeros(1, 3); fill(1.0e-6, 1, 3)], method=NewtonEBE()).modes atol=1e-12
     batched_result = empirical_bayes(batched, Float64[], Float64[], ω;
         method=QuasiNewtonEBE())
     @test all(batched_result.converged)

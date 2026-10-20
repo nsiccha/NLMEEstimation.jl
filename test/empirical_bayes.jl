@@ -162,13 +162,12 @@ end
         @test sum(i -> sse(i, r.modes[:, i]), 1:12) < sum(i -> sse(i, zeros(3)), 1:12) / 2
     end
 
-    @testset "Newton damping rises past non-positive-definite trials" begin
+    @testset "Newton from a start where the density is not concave" begin
         model = DoubleWell(NLMELayout(0, 0, [1]), 1.5, [0.05, 0.1, 0.2])
         ω = omega_parameters(nlme_layout(model), [1.0;;])
         η0 = fill(0.1, 1, 3)
         # At η0 the complete-data Hessian is +0.47 for every subject: the Newton step
-        # does not exist, and -H + λI has no step for λ = 1e-3, 1e-2, 0.1. A trial
-        # table typed from those first trials could not store the step at λ = 1.
+        # does not exist, so the first step goes to the trust region's boundary.
         for i in 1:3
             _, _, _, H = complete_data_loglikelihood_gradient_and_hessian(model, i, Float64[], Float64[], ω, η0[:, i])
             @test H[1, 1] ≈ 0.47
@@ -181,6 +180,26 @@ end
         @test maximum(abs, -η .^ 3 .+ 0.5 .* η .+ model.b) < 1.0e-12
         @test all(H -> H[1, 1] < 0, newton.hessians)
         @test maximum(abs, newton.modes - bfgs.modes) < 1.0e-7
+    end
+
+    @testset "Newton leaves saddle points along their upward curvature" begin
+        # η₂ starts at the saddle (subjects 1 and 2, where b = 0 makes its gradient
+        # exactly zero) or next to it. Levenberg–Marquardt damping with λ ≈ 1e-3·D
+        # left it by a factor of about 1.05 per iteration and ran out of iterations
+        # with a small gradient (snag newton-ebe-stall-9d3fb9ab).
+        model = SteepWell(NLMELayout(0, 0, [1, 1]), 1.0e4, 1.5, [0.0, 0.0, 1.0e-6, 1.0e-4, 1.0e-2], 0.3)
+        ω = omega_parameters(nlme_layout(model), Matrix(1.0I, 2, 2))
+        η0 = [0.0 0.3 0.0 0.0 0.0; 0.0 0.0 1.0e-6 1.0e-6 1.0e-6]
+        r = empirical_bayes(model, Float64[], Float64[], ω; η0, method = NewtonEBE())
+        @test all(r.converged)
+        @test maximum(r.iterations) <= 10
+        # The modes are stationary and the density is concave there: η₁ = Dc/(D + 1),
+        # and η₂ solves -η³ + (a - 1)η + b = 0 away from the saddle.
+        @test r.modes[1, :] ≈ fill(model.D * model.c / (model.D + 1), 5) rtol = 1.0e-12
+        η₂ = r.modes[2, :]
+        @test maximum(abs, -η₂ .^ 3 .+ 0.5 .* η₂ .+ model.b) < 1.0e-12
+        @test all(>(0.7), abs.(η₂))
+        @test all(H -> isposdef(Symmetric(-H)), r.hessians)
     end
 
     @testset "failures are reported, never silent" begin
@@ -200,6 +219,16 @@ end
             @test partial.subjects[.!partial.converged] == err.subjects
             @test all(==(1), partial.iterations[.!partial.converged])
         end
+        # The report says when the density is not concave at the last point.
+        well = DoubleWell(NLMELayout(0, 0, [1]), 1.5, [0.05])
+        err = try
+            empirical_bayes(well, Float64[], Float64[], [0.0]; η0 = [0.1;;],
+                method = NewtonEBE(), options = EBEOptions(; maxiter = 0))
+        catch e
+            e
+        end
+        @test err isa EBEConvergenceError
+        @test occursin("not concave", sprint(showerror, err))
         # A zero residual variance makes the log-density non-finite at the start.
         @test_throws DomainError empirical_bayes(model, θ_SIM, [-400.0, -400.0], ω)
     end
