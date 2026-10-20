@@ -217,6 +217,22 @@ end
     @test iterations == [0, 1]
 end
 
+@testset "infeasible trial points: BFGS curvature check without Hessian blocks" begin
+    # A gradient-only model's curvature check differences gradients a step of 1e-4
+    # beyond each point. With the domain bound 5e-5 past the mode, that step leaves
+    # the domain at convergence: the subject keeps no block and converges on the
+    # gradient test, at the mode found without the bound.
+    layout = NLMELayout(0, 0, [1])
+    ω = omega_parameters(layout, [1.0;;])
+    well = DoubleWell(layout, 1.5, [0.05])
+    free = empirical_bayes(GradientOnly(well), Float64[], Float64[], ω; η0 = [0.1;;])
+    bounded = Bounded(well; max_eta = free.modes[1] + 5.0e-5)
+    result = empirical_bayes(GradientOnly(bounded), Float64[], Float64[], ω; η0 = [0.1;;])
+    @test bounded.hits[2] > 0
+    @test all(result.converged)
+    @test result.modes ≈ free.modes atol = 1.0e-8
+end
+
 @testset "infeasible trial points: SAEM NUTS retraces the -Inf twin" begin
     # A trajectory that reaches an infeasible position diverges there.
     θ0, σ0 = [1.0, 0.5], [log(0.5)]

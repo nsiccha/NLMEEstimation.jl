@@ -19,7 +19,7 @@ export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH,
     JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN,
     LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
-    DoubleWell, SteepWell
+    DoubleWell, SteepWell, GradientOnly
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -86,6 +86,18 @@ NE.conditional_loglikelihood_and_gradient(m::SteepWell, i, θ, σ, η) =
 NE.conditional_loglikelihood_gradient_and_hessian(m::SteepWell, i, θ, σ, η) =
     (NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η)..., [-m.D 0.0; 0.0 m.a - 3 * η[2]^2])
 NE.provides_eta_hessian(::SteepWell) = true
+
+# A gradient-only view of a per-subject model with closed-form gradients (such as
+# `DoubleWell` or `SteepWell`): the same values and gradients, no Hessian blocks.
+struct GradientOnly{M}
+    inner::M
+end
+NE.nsubjects(m::GradientOnly) = NE.nsubjects(m.inner)
+NE.nlme_layout(m::GradientOnly) = NE.nlme_layout(m.inner)
+NE.conditional_loglikelihood(m::GradientOnly, i, θ, σ, η) = NE.conditional_loglikelihood(m.inner, i, θ, σ, η)
+NE.conditional_loglikelihood_and_gradient(m::GradientOnly, i, θ, σ, η) =
+    NE.conditional_loglikelihood_and_gradient(m.inner, i, θ, σ, η)
+NE.provides_eta_hessian(::GradientOnly) = false
 
 # Typical-value parameters of the standard one-compartment Theoph fit (no weight
 # effect), additive error.

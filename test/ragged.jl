@@ -6,7 +6,7 @@ using DifferentiationInterface: AutoEnzyme
 import Enzyme
 import NLMEEstimation as NE
 isdefined(@__MODULE__, :TestCommon) || include("common.jl")
-using .TestCommon: DoubleWell, SteepWell
+using .TestCommon: DoubleWell, SteepWell, GradientOnly
 
 struct RaggedGaussianFixture
     layout::RaggedNLMELayout
@@ -213,6 +213,15 @@ NE.population_prior_provenance(::RaggedMAPFixture) = "synthetic Normal(0, 0.5) c
     @test maximum(steep_newton.iterations) <= 10
     steep_η = reduce(hcat, steep_newton.modes)
     @test maximum(abs, -steep_η[2, :] .^ 3 .+ 1.25 .* steep_η[2, :] .+ steep.b) < 1e-12
+    # BFGS leaves it as well, by the Hessian block or, gradient-only, by forward
+    # differences on the compact vectors.
+    for well_model in (steep, GradientOnly(steep))
+        steep_bfgs = empirical_bayes(well_model, Float64[], Float64[],
+            omega_parameters(steep_layout, [[1.0;;], [4.0;;]]);
+            η0=[[0.0, 1.0e-6] for _ in 1:3], method=QuasiNewtonEBE())
+        @test all(steep_bfgs.converged)
+        @test reduce(hcat, steep_bfgs.modes) ≈ steep_η atol=1e-8
+    end
     steep_equal = SteepWell(NLMELayout(0, 0, [1, 1]), steep.D, steep.a, steep.b, steep.c)
     @test steep_η ≈ empirical_bayes(steep_equal, Float64[], Float64[],
         omega_parameters(nlme_layout(steep_equal), [1.0 0.0; 0.0 4.0]);
