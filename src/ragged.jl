@@ -12,7 +12,7 @@ function _ragged_validate_batch(layout::RaggedNLMELayout, subjects, H)
 end
 
 function _complete_values(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
-    ℓ = conditional_loglikelihoods(model, subjects, θ, σ, H)
+    ℓ = _proposal_loglikelihoods(model, subjects, θ, σ, H)
     length(ℓ) == length(subjects) || throw(DimensionMismatch(
         "conditional likelihood returned $(length(ℓ)) values for $(length(subjects)) subjects"))
     return ℓ, [ℓ[k] + re_logprior(prior, i, H[k]) for (k, i) in enumerate(subjects)]

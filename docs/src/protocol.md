@@ -11,7 +11,14 @@ Every model implements `nsubjects(model)` and `nlme_layout(model)`. It can use e
 
 The likelihood excludes the η prior. Derivatives may be provided directly or obtained through `ad_backend(model)` with DifferentiationInterface. Reverse-mode Enzyme is the tested backend. Per-subject η Hessian blocks are optional; set `hessian_ad_backend(model) = nothing` for a gradient-only model. [PPL and AD requirements](requirements.md) lists which derivatives each estimator uses; every method runs on first-order AD.
 
-A model rejects a point outside its domain by returning `-Inf`, or by throwing a `DomainError`, `OverflowError` or `PosDefException` as a Stan-semantics model does (a matrix exponential of an overflowed rate, the Cholesky factor of an indefinite matrix). At a trial point the estimators treat both alike. `focei`'s search scores the evaluation as a very large objective. SAEM's MH and MALA kernels reject that subject's proposal; when a batched evaluation throws, they evaluate the subjects one at a time to find which ones. SAEM's numerical and MAP M-steps halve their line-search step. The point a search starts from must evaluate finitely.
+A model rejects a point outside its domain by returning `-Inf`, or by throwing a `DomainError`, `OverflowError` or `PosDefException` as a Stan-semantics model does (a matrix exponential of an overflowed rate, the Cholesky factor of an indefinite matrix). At a trial point the estimators treat both alike. Where each subject has its own trial point (EBE steps, MCMC proposals, quadrature points) and a batched evaluation throws, the subjects are evaluated one at a time to find which ones.
+
+- `empirical_bayes` (Newton and BFGS, and so the EBEs inside `focei`) rejects that subject's trial step and tries a shorter one; Newton's final polishing step is dropped.
+- `focei`'s search scores the evaluation as a very large objective.
+- SAEM's MH and MALA kernels reject that subject's proposal. The NUTS kernel scores that position `-Inf`, exactly as if the model had returned it. SAEM's numerical and MAP M-steps halve their line-search step.
+- `marginal_loglikelihood` gives that importance-sampling or quadrature point zero density.
+
+The point a search starts from must evaluate finitely.
 
 FOCE and FOCEI require `observation_model(model) = GaussianObservations()` and observation means, variances, and first η Jacobians. SAEM can use `mu_referencing(model)` for a closed-form update of the corresponding fixed effects and Ω; remaining population coordinates use a numerical M-step.
 

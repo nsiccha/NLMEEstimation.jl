@@ -133,6 +133,20 @@ function _feasible(f, x)
     end
 end
 
+# Conditional log densities at proposed latent effects (MCMC proposals, line-search
+# trial points, quadrature points). If the batch throws `_InfeasibleEvaluation`,
+# each subject is evaluated alone, and one whose evaluation still throws scores
+# -Inf, so only its proposal is rejected.
+function _proposal_loglikelihoods(model, subjects, θ, σ, proposal)
+    batch = _feasible(H -> conditional_loglikelihoods(model, subjects, θ, σ, H), proposal)
+    batch === nothing || return batch
+    layout = nlme_layout(model)
+    single(i) = η -> only(conditional_loglikelihoods(model, [i], θ, σ,
+        _single_eta_batch(layout, η)))
+    return [something(_feasible(single(i), _eta_column(proposal, k)), -Inf)
+        for (k, i) in enumerate(subjects)]
+end
+
 # ── Derivatives: implement them, or declare an AD backend ─────────────────────
 
 """
