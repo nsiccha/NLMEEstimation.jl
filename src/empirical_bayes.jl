@@ -29,11 +29,25 @@ struct NewtonEBE <: EBEMethod end
 """
     QuasiNewtonEBE()
 
-BFGS per subject on η gradients only, starting from the prior covariance Ω as the
+BFGS per subject on η gradients, starting from the prior covariance Ω as the
 inverse-Hessian approximation (rescaled to the observed curvature at the first
 update), with backtracking (halving) to the Armijo condition.
 A subject converges once its standardized gradient `‖Lᵀg‖∞ ≤ gtol`, with `Ω = LLᵀ`
-(the gradient with respect to the standardized random effects `L⁻¹η`).
+(the gradient with respect to the standardized random effects `L⁻¹η`), and the
+complete-data density is concave there.
+
+BFGS keeps a positive-definite curvature model, so on its own it cannot follow a
+direction in which the density curves upward: a saddle point passes the gradient
+test, and next to one the steps along that direction stay tiny. The solver therefore
+checks the complete-data Hessian block where BFGS meets upward curvature (a curvature
+pair with `sᵀy ≤ 0`, which BFGS skips) and, once no subject is still iterating, at
+every subject that passed the gradient test. The block is the model's own when it
+[`provides_eta_hessian`](@ref) (the one the result reports, so the check adds no model
+calls), and otherwise forward differences of batched gradients (`neta` batched
+gradient calls per check, not reported in the result). Where `-H` is not positive
+definite, the next step is [`NewtonEBE`](@ref)'s trust-region step with a radius of
+one prior standard deviation, halved until the density increases, and BFGS restarts
+from Ω.
 """
 struct QuasiNewtonEBE <: EBEMethod end
 
@@ -234,7 +248,9 @@ end
 # direction for every active subject, evaluates all trial points in batched value
 # calls (retrying rejected subjects with more damping or a shorter step), then
 # evaluates gradients (and Newton's Hessian blocks) at the accepted points in one
-# batched call. The prior's type selects the layout's complete-data evaluations.
+# batched call. Once no subject iterates, the method may reopen converged subjects
+# that are not at a mode. The prior's type selects the layout's complete-data
+# evaluations.
 
 function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, opt::EBEOptions)
     T = float(promote_type(_eta_eltype(H0), eltype(θ), eltype(σ), _prior_eltype(prior)))
@@ -254,7 +270,11 @@ function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, op
         converged[done] .= true
         _polish!(method, model, subjects, θ, σ, prior, H, ℓ, f, G, curvature, iterations, done)
         active = setdiff(active, done)
-        isempty(active) && break
+        if isempty(active)
+            active = _reopen_nonconcave!(method, curvature, model, subjects, θ, σ, prior, H, G, converged)
+            converged[active] .= false
+            isempty(active) && break
+        end
         exhausted = filter(k -> iterations[k] >= opt.maxiter, active)
         failed[exhausted] .= true
         active = setdiff(active, exhausted)
@@ -339,7 +359,7 @@ _prior_covariance(prior, i) = (L = _prior_factor(prior, i); Matrix(L * L'))
 _standardized_norm(prior, i, g) = maximum(abs, _prior_factor(prior, i)' * g; init = zero(eltype(g)))
 
 # Sufficient increase: at least 1e-4 of the predicted increase (the Armijo test for
-# BFGS's linear prediction, the ratio test for Newton's quadratic model) — or, for a
+# a BFGS step's linear prediction, the ratio test for a quadratic model) — or, for a
 # full step whose predicted increase is below what f resolves, no measurable decrease.
 function _accepts(trial, f, ft, g)
     isfinite(ft) || return false
@@ -347,7 +367,6 @@ function _accepts(trial, f, ft, g)
     ft - f >= 1.0e-4 * predicted && return true
     return trial.full && predicted <= sqrt(eps(typeof(f))) * max(one(f), abs(f)) && ft >= f - _roundoff(f)
 end
-_predicted(trial, g) = dot(g, trial.step)
 
 # Changes of f below this are not resolved by evaluating f.
 _roundoff(f) = 16 * eps(typeof(f)) * max(one(f), abs(f))
@@ -502,32 +521,91 @@ end
 
 _final_hessians(::NewtonEBE, state, model, subjects, θ, σ, prior, H) = state.hessians
 
+# Newton converges only where -H is positive definite, so every converged subject is
+# at a mode.
+_reopen_nonconcave!(::NewtonEBE, state, model, subjects, θ, σ, prior, H, G, converged) = Int[]
+
 # ── Quasi-Newton (BFGS) ───────────────────────────────────────────────────────
 
 # Per-subject inverse-Hessian approximations of -f. They start from the prior
 # covariance Ω (the exact inverse Hessian when the data are uninformative), rescaled
 # at the first update by sᵀy / yᵀΩy (Shanno–Phua) to the curvature actually observed.
-struct BFGSState{T}
+# Alongside: the prior's Cholesky factor L per subject, and the complete-data Hessian
+# block at the subject's current point where it has been computed (`nothing`
+# otherwise; a step discards it).
+struct BFGSState{T, FS}
     inverse_hessians::Vector{Matrix{T}}
     rescaled::Vector{Bool}
+    factors::FS
+    hessians::Vector{Union{Nothing, Matrix{T}}}
 end
 
-_initial_curvature(::QuasiNewtonEBE, model, subjects, θ, σ, prior, H, G) =
-    BFGSState([_prior_covariance(prior, i) for i in subjects], fill(false, length(subjects)))
+function _initial_curvature(::QuasiNewtonEBE, model, subjects, θ, σ, prior, H, G)
+    T = _eta_eltype(H)
+    n = length(subjects)
+    return BFGSState([Matrix{T}(_prior_covariance(prior, i)) for i in subjects], fill(false, n),
+        [_prior_factor(prior, i) for i in subjects], Vector{Union{Nothing, Matrix{T}}}(nothing, n))
+end
 
-_is_converged(::QuasiNewtonEBE, state, k, g, prior, i, opt) = _standardized_norm(prior, i, g) <= opt.gtol
+# Whether subject k's Hessian block shows that the density is not concave at its
+# current point.
+function _nonconcave(state::BFGSState, k)
+    Hk = state.hessians[k]
+    return Hk !== nothing && !issuccess(cholesky(Symmetric(-Hk); check = false))
+end
 
-_first_trial(::QuasiNewtonEBE, state, k, g) = (step = state.inverse_hessians[k] * g, full = true)
-_next_trial(::QuasiNewtonEBE, trial, state, k, g) = (step = trial.step / 2, full = false)
+_is_converged(::QuasiNewtonEBE, state, k, g, prior, i, opt) =
+    !_nonconcave(state, k) && _standardized_norm(prior, i, g) <= opt.gtol
 
-# BFGS update of the inverse Hessian of -f with s = Δη, y = Δ(-g); skipped when the
-# curvature condition sᵀy > 0 fails.
+# A quasi-Newton trial: the step p and the predicted increase of f along it,
+# `slope + curvature / 2` with slope gᵀp and curvature pᵀHp. A BFGS step predicts with
+# the slope alone (the Armijo test). An escape step from a non-concave point uses the
+# quadratic model of the Hessian block, and BFGS restarts after it. `full` marks the
+# unhalved step.
+struct QuasiNewtonTrial{T}
+    step::Vector{T}
+    slope::T
+    curvature::T
+    full::Bool
+    escape::Bool
+end
+_predicted(trial::QuasiNewtonTrial, g) = trial.slope + trial.curvature / 2
+
+# The escape step is Newton's trust-region step over one prior standard deviation:
+# where -H is not positive definite it follows the directions in which the density
+# curves upward, out to the radius (along the most upward one at a zero gradient).
+function _first_trial(::QuasiNewtonEBE, state, k, g)
+    if _nonconcave(state, k)
+        Hk = state.hessians[k]
+        step = _trust_region_trial(Hk, state.factors[k], g, one(eltype(Hk))).step
+        return QuasiNewtonTrial(step, dot(g, step), dot(step, Hk * step), true, true)
+    end
+    step = state.inverse_hessians[k] * g
+    return QuasiNewtonTrial(step, dot(g, step), zero(eltype(step)), true, false)
+end
+_next_trial(::QuasiNewtonEBE, trial, state, k, g) =
+    QuasiNewtonTrial(trial.step / 2, trial.slope / 2, trial.curvature / 4, false, trial.escape)
+
+# BFGS update of the inverse Hessian of -f with s = Δη, y = Δ(-g). A pair with
+# sᵀy ≤ 0 shows the density curving upward along s: BFGS cannot represent that, so the
+# update is skipped and the Hessian block at the new point is checked. After an escape
+# step BFGS restarts from Ω.
 function _update_curvature!(::QuasiNewtonEBE, state, model, subjects, θ, σ, prior, H, accepted, trials, gains, previous_G, Ga)
+    upward = Int[]
     for (j, k) in enumerate(accepted)
+        state.hessians[k] = nothing
+        if trials[j].escape
+            state.inverse_hessians[k] = _prior_covariance(prior, subjects[k])
+            state.rescaled[k] = false
+            continue
+        end
         s = trials[j].step
         y = _column(previous_G, j) - _column(Ga, j)
         sy = dot(s, y)
-        sy > 0 || continue
+        if sy <= 0
+            push!(upward, j)
+            continue
+        end
         B = state.inverse_hessians[k]
         if !state.rescaled[k]
             B = (sy / dot(y, B * y)) * B
@@ -537,10 +615,39 @@ function _update_curvature!(::QuasiNewtonEBE, state, model, subjects, θ, σ, pr
         V = I - ρ * y * s'
         state.inverse_hessians[k] = V' * B * V + ρ * s * s'
     end
+    ks = accepted[upward]
+    _store_hessians!(state, model, subjects, θ, σ, prior, ks, _columns(H, ks), _columns(Ga, upward))
+    return state
+end
+
+# Once no subject iterates, the converged subjects whose Hessian block is not yet
+# known are checked; those where the density is not concave are reopened and take an
+# escape step.
+function _reopen_nonconcave!(::QuasiNewtonEBE, state, model, subjects, θ, σ, prior, H, G, converged)
+    ks = findall(k -> converged[k] && state.hessians[k] === nothing, eachindex(subjects))
+    _store_hessians!(state, model, subjects, θ, σ, prior, ks, _columns(H, ks), _columns(G, ks))
+    return filter(k -> _nonconcave(state, k), ks)
+end
+
+# The complete-data Hessian blocks of subjects `ks` at their points `Hks` (with
+# complete-data gradients `Gks` there): the model's own when it provides them, or
+# else forward differences of batched gradients (`_difference_eta_hessians`).
+function _store_hessians!(state::BFGSState, model, subjects, θ, σ, prior, ks, Hks, Gks)
+    isempty(ks) && return state
+    state.hessians[ks] = provides_eta_hessian(model) ?
+        _complete_hessians(model, subjects[ks], θ, σ, prior, Hks) :
+        _difference_eta_hessians(model, nlme_layout(model), subjects[ks], θ, σ, prior,
+            [Vector(_column(Hks, j)) for j in eachindex(ks)], [Vector(_column(Gks, j)) for j in eachindex(ks)])
     return state
 end
 
 _polish!(::QuasiNewtonEBE, model, subjects, θ, σ, prior, H, ℓ, f, G, state, iterations, done) = nothing
 
-_final_hessians(::QuasiNewtonEBE, state, model, subjects, θ, σ, prior, H) =
-    provides_eta_hessian(model) ? _complete_hessians(model, subjects, θ, σ, prior, H) : nothing
+# The model's Hessian blocks at the final points, computing those not yet known;
+# none for a gradient-only model, whose difference blocks served only the checks.
+function _final_hessians(::QuasiNewtonEBE, state::BFGSState{T}, model, subjects, θ, σ, prior, H) where {T}
+    provides_eta_hessian(model) || return nothing
+    ks = findall(isnothing, state.hessians)
+    isempty(ks) || (state.hessians[ks] = _complete_hessians(model, subjects[ks], θ, σ, prior, _columns(H, ks)))
+    return Vector{Matrix{T}}(state.hessians)
+end

@@ -202,6 +202,43 @@ end
         @test all(H -> isposdef(Symmetric(-H)), r.hessians)
     end
 
+    @testset "BFGS leaves saddle points, with or without Hessian blocks" begin
+        # BFGS keeps a positive-definite curvature model. It reported the exact saddle
+        # start (subject 1, where b = 0 makes the gradient zero) as converged after 0
+        # iterations, and likewise the start η = 0 (subject 2), from which η₂ stays
+        # exactly 0 while η₁ converges. Next to the saddle (the others) its steps along
+        # η₂ stayed about 1e-4 of the gradient, since every curvature pair along η₂ has
+        # sᵀy < 0 and is skipped, until maxiter (todo 2026-10-20T07-55-53-251-1569zus).
+        # The solver checks the Hessian block at skipped pairs and at convergence (the
+        # model's, or forward differences for a gradient-only model) and leaves by a
+        # trust-region step.
+        model = SteepWell(NLMELayout(0, 0, [1, 1]), 1.0e4, 1.5,
+            [0.0, 0.0, 0.0, 1.0e-6, 1.0e-4, 1.0e-3, 1.0e-2], 0.3)
+        ω = omega_parameters(nlme_layout(model), Matrix(1.0I, 2, 2))
+        η★ = model.D * model.c / (model.D + 1)
+        η0 = [η★ 0.0 0.0 0.0 0.0 0.0 0.0; 0.0 0.0 1.0e-6 1.0e-6 1.0e-6 1.0e-6 1.0e-6]
+        newton = empirical_bayes(model, Float64[], Float64[], ω; η0, method = NewtonEBE())
+        bfgs = empirical_bayes(model, Float64[], Float64[], ω; η0, method = QuasiNewtonEBE())
+        gradient_only = GradientOnly(model)
+        @test default_ebe_method(gradient_only) === QuasiNewtonEBE()
+        differences = empirical_bayes(gradient_only, Float64[], Float64[], ω; η0)
+        @test differences.hessians === nothing
+        for r in (bfgs, differences)
+            @test all(r.converged)
+            @test minimum(r.iterations) > 0
+            @test maximum(r.iterations) <= 20
+            # Stationary where the density is concave: η₁ = Dc/(D + 1), and η₂ solves
+            # -η³ + (a - 1)η + b = 0 away from the saddle; from η₂ > 0 the same mode
+            # as Newton's.
+            @test r.modes[1, :] ≈ fill(η★, 7) rtol = 1.0e-10
+            η₂ = r.modes[2, :]
+            @test maximum(abs, -η₂ .^ 3 .+ 0.5 .* η₂ .+ model.b) < 1.0e-8
+            @test all(>(0.7), abs.(η₂))
+            @test maximum(abs, r.modes[:, 3:end] - newton.modes[:, 3:end]) < 1.0e-8
+        end
+        @test all(H -> isposdef(Symmetric(-H)), bfgs.hessians)
+    end
+
     @testset "failures are reported, never silent" begin
         model, _ = simulated_model()
         ω = omega_parameters(nlme_layout(model), Ω_SIM)

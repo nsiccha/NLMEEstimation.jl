@@ -76,7 +76,7 @@ function _prepare_marginal(approximation::Union{ImportanceSampling, AdaptiveGaus
     indices, design = _saem_mu_trait(model, ids, layout)
     modes = [Vector{Float64}(_eta_column(ebe.modes, k)) for k in eachindex(ids)]
     hessians = ebe.hessians === nothing ?
-        _central_eta_hessians(model, layout, ids, θ, σ, re_prior(model, ω), modes) :
+        _difference_eta_hessians(model, layout, ids, θ, σ, re_prior(model, ω), modes) :
         [Matrix{Float64}(H) for H in ebe.hessians]
     θμ = Float64.(θ[indices])
     phi = Matrix{Float64}[]
@@ -148,24 +148,29 @@ function _loggamma_half(k::Integer)
     return sum(log, 1:2m; init = 0.0) - m * log(4) - sum(log, 1:m; init = 0.0) + log(π) / 2
 end
 
-# η Hessian blocks of the complete-data log-density from central differences of
-# batched gradients. Component c moves in every subject that has it at once,
-# which conditional independence makes one batched call per direction.
-function _central_eta_hessians(model, layout, ids, θ, σ, prior, modes)
-    dims = length.(modes)
+# η Hessian blocks of the complete-data log-density at `points` (one vector per
+# subject) from differences of batched gradients, with steps h = 1e-4·max(1, |η_c|):
+# central differences, or forward differences from the complete-data `gradients` at
+# the points when they are given (as in the EBE solver's curvature check). Component
+# c moves in every subject that has it at once, which conditional independence makes
+# one batched call per direction and side.
+function _difference_eta_hessians(model, layout, ids, θ, σ, prior, points, gradients = nothing)
+    dims = length.(points)
     hessians = [zeros(d, d) for d in dims]
     for c in 1:maximum(dims)
         ks = findall(>=(c), dims)
-        h = [1.0e-4 * max(1.0, abs(modes[k][c])) for k in ks]
+        h = [1.0e-4 * max(1.0, abs(points[k][c])) for k in ks]
         shifted(sign) = _eta_batch(layout, [begin
-            η = copy(modes[k])
+            η = copy(points[k])
             η[c] += sign * h[j]
             η
         end for (j, k) in enumerate(ks)])
         _, _, Gup = _complete_gradients(model, ids[ks], θ, σ, prior, shifted(1))
-        _, _, Gdown = _complete_gradients(model, ids[ks], θ, σ, prior, shifted(-1))
+        Gback, width = gradients === nothing ?
+            (last(_complete_gradients(model, ids[ks], θ, σ, prior, shifted(-1))), 2) :
+            (_eta_batch(layout, gradients[ks]), 1)
         for (j, k) in enumerate(ks)
-            hessians[k][:, c] = (_eta_column(Gup, j) - _eta_column(Gdown, j)) / (2h[j])
+            hessians[k][:, c] = (_eta_column(Gup, j) - _eta_column(Gback, j)) / (width * h[j])
         end
     end
     return [(H + H') / 2 for H in hessians]
