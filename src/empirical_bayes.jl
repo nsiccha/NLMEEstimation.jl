@@ -158,7 +158,9 @@ one vector per subject, or an earlier [`EBEResult`](@ref) covering these subject
 Throws an [`EBEConvergenceError`](@ref) if some subject's mode is not found, unless
 `require_convergence = false`, in which case the result records the failure in
 `converged`. A non-finite complete-data log-density at the starting point is always
-an error.
+an error. A trial point at which the model returns `-Inf` or throws a `DomainError`,
+`OverflowError` or `PosDefException` (a point outside its domain) is rejected, and
+a shorter step is tried.
 """
 function empirical_bayes(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η0 = nothing, method::EBEMethod = default_ebe_method(model),
