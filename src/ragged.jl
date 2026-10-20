@@ -65,22 +65,14 @@ _ragged_start(η0, layout, subjects) = throw(ArgumentError(
 
 _prior_eltype(::RaggedNormalREPrior{T}) where {T} = T
 
-function _prior_covariance(prior::RaggedNormalREPrior, i)
+# Block diagonal: one family factor per block instance.
+function _prior_factor(prior::RaggedNormalREPrior{T}, i) where {T}
     n = neta(prior.layout, i)
-    Ω = zeros(Float64, n, n)
+    L = zeros(T, n, n)
     for (family, r) in _ragged_subject_blocks(prior.layout, i)
-        L = prior.cholesky_factors[family]
-        Ω[r, r] = L * L'
+        L[r, r] = prior.cholesky_factors[family]
     end
-    return Ω
-end
-
-function _standardized_norm(prior::RaggedNormalREPrior, i, g)
-    norm = 0.0
-    for (family, r) in _ragged_subject_blocks(prior.layout, i)
-        norm = max(norm, maximum(abs, prior.cholesky_factors[family]' * view(g, r); init=0.0))
-    end
-    return norm
+    return LowerTriangular(L)
 end
 
 function _empirical_bayes(layout::RaggedNLMELayout, model, θ, σ, ω, subjects, η0,

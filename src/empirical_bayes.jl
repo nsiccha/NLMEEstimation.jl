@@ -14,11 +14,15 @@ abstract type EBEMethod end
 """
     NewtonEBE()
 
-Newton's method on the complete-data Hessian blocks with Levenberg–Marquardt
-damping (λ increased tenfold) when `-H` is not positive definite or a step fails the
-Armijo test. A subject converges once `gᵀ(-H)⁻¹g / 2 ≤ decrement_tol`; the Newton
-step from there is taken as a final polishing step, so the returned mode is
-stationary to roundoff.
+Trust-region Newton on the complete-data Hessian blocks. Each step maximizes the
+local quadratic model of the complete-data log-density over a ball in the
+standardized coordinates `L⁻¹η`, with `Ω = LLᵀ`. Inside the ball that is the full
+Newton step when `-H` is positive definite; where `-H` is indefinite (a saddle or a
+non-concave region) the step follows the directions in which the density curves
+upward, out to the radius. The radius shrinks after a rejected step or a poor
+prediction and grows after a good step that reached it. A subject converges once
+`gᵀ(-H)⁻¹g / 2 ≤ decrement_tol`; the Newton step from there is taken as a final
+polishing step, so the returned mode is stationary to roundoff.
 """
 struct NewtonEBE <: EBEMethod end
 
@@ -49,8 +53,9 @@ Settings of [`empirical_bayes`](@ref).
 - `decrement_tol`: [`NewtonEBE`](@ref) convergence, half the Newton decrement in
   log-density units.
 - `gtol`: [`QuasiNewtonEBE`](@ref) convergence, the standardized gradient `‖Lᵀg‖∞`.
-- `max_backtracks`: maximum damping increases or step halvings per iteration before
-  a subject is reported as not converged.
+- `max_backtracks`: maximum trust-region reductions ([`NewtonEBE`](@ref)) or step
+  halvings ([`QuasiNewtonEBE`](@ref)) per iteration before a subject is reported as
+  not converged.
 """
 Base.@kwdef struct EBEOptions
     maxiter::Int = 200
@@ -124,6 +129,8 @@ function Base.showerror(io::IO, e::EBEConvergenceError)
         k = findfirst(==(i), r.subjects)
         print(io, "\n  subject ", i, ": ", r.iterations[k], " iterations, standardized gradient ",
             r.gradient_norm[k], ", complete-data log-density ", r.complete_data_loglikelihood[k])
+        r.hessians === nothing || isposdef(Symmetric(-r.hessians[k])) ||
+            print(io, "; the density is not concave there (its η Hessian is not negative definite)")
     end
     print(io, "\nPass `require_convergence = false` to inspect the partial result, or a warm start `η0`.")
 end
@@ -237,7 +244,7 @@ function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, op
     bad = findall(!isfinite, f)
     isempty(bad) || throw(DomainError(f[bad], "empirical_bayes: the complete-data log-density is " *
         "not finite at the starting point for subject(s) $(subjects[bad])"))
-    curvature = _initial_curvature(method, model, subjects, θ, σ, prior, H)
+    curvature = _initial_curvature(method, model, subjects, θ, σ, prior, H, G)
     converged = falses(n)
     failed = falses(n)
     iterations = zeros(Int, n)
@@ -252,12 +259,12 @@ function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, op
         failed[exhausted] .= true
         active = setdiff(active, exhausted)
         isempty(active) && break
-        accepted, steps, rejected = _search_steps(method, model, subjects, θ, σ, prior, H, f, G,
+        accepted, trials, gains, rejected = _search_steps(method, model, subjects, θ, σ, prior, H, f, G,
             curvature, active, opt)
         failed[rejected] .= true
         isempty(accepted) && continue
         previous_G = _columns(G, accepted)
-        Ha = _from_columns(H, [_column(H, k) + step for (k, step) in zip(accepted, steps)])
+        Ha = _from_columns(H, [_column(H, k) + trial.step for (k, trial) in zip(accepted, trials)])
         _set_columns!(H, accepted, Ha)
         ℓa, fa, Ga = _complete_gradients(model, subjects[accepted], θ, σ, prior, Ha)
         ℓ[accepted] = ℓa
@@ -265,7 +272,7 @@ function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, op
         _set_columns!(G, accepted, Ga)
         iterations[accepted] .+= 1
         _update_curvature!(method, curvature, model, subjects, θ, σ, prior, H, accepted,
-            steps, previous_G, Ga)
+            trials, gains, previous_G, Ga)
     end
     hessians = _final_hessians(method, curvature, model, subjects, θ, σ, prior, H)
     gradient_norm = [_standardized_norm(prior, i, _column(G, k)) for (k, i) in enumerate(subjects)]
@@ -273,29 +280,29 @@ function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, op
         gradient_norm, method)
 end
 
-# Trial steps for the active subjects: a direction each, then batched value calls
-# until every subject either passes the sufficient-increase test or exhausts its
-# retries. Returns the subjects that found an ascent step (in `active` order), their
-# steps, and the subjects that found none.
+# Trial steps for the active subjects: a step each, then batched value calls until
+# every subject either passes the sufficient-increase test or exhausts its retries.
+# Returns the subjects that found an ascent step (in `active` order), their accepted
+# trials and increases of f, and the subjects that found none.
 function _search_steps(method, model, subjects, θ, σ, prior, H, f, G, curvature, active, opt)
     trials = Dict(k => _first_trial(method, curvature, k, _column(G, k)) for k in active)
+    gains = Dict{Int, eltype(f)}()
     pending = collect(active)
     for _ in 0:opt.max_backtracks
         isempty(pending) && break
-        proposals = filter(k -> trials[k].step !== nothing, pending)
-        if !isempty(proposals)
-            trial_H = _from_columns(H, [_column(H, k) + trials[k].step for k in proposals])
-            _, ft = _complete_values(model, subjects[proposals], θ, σ, prior, trial_H)
-            for (j, k) in enumerate(proposals)
-                _accepts(trials[k], f[k], ft[j], _column(G, k)) && filter!(!=(k), pending)
-            end
+        trial_H = _from_columns(H, [_column(H, k) + trials[k].step for k in pending])
+        _, ft = _complete_values(model, subjects[pending], θ, σ, prior, trial_H)
+        for (j, k) in enumerate(copy(pending))
+            _accepts(trials[k], f[k], ft[j], _column(G, k)) || continue
+            gains[k] = ft[j] - f[k]
+            filter!(!=(k), pending)
         end
         for k in pending
             trials[k] = _next_trial(method, trials[k], curvature, k, _column(G, k))
         end
     end
     accepted = setdiff(active, pending)
-    return accepted, [trials[k].step for k in accepted], pending
+    return accepted, [trials[k] for k in accepted], [gains[k] for k in accepted], pending
 end
 
 # η storage: a neta × n matrix for an equal-size layout, one compact vector per
@@ -324,31 +331,52 @@ function _ebe_result(H::AbstractVector{<:AbstractVector}, subjects, hessians, �
         Vector{T}(gradient_norm), method)
 end
 
-# The prior's covariance of subject i's η, and the standardized gradient ‖Lᵀg‖∞.
+# The lower Cholesky factor L of the prior covariance of subject i's η, Ω_i = LLᵀ;
+# from it the covariance and the standardized gradient ‖Lᵀg‖∞.
 _prior_eltype(prior::NormalREPrior) = eltype(prior.precision)
-_prior_covariance(prior::NormalREPrior, i) = Matrix(prior.cholesky_factor * prior.cholesky_factor')
-_standardized_norm(prior::NormalREPrior, i, g) =
-    maximum(abs, prior.cholesky_factor' * g; init = zero(eltype(g)))
+_prior_factor(prior::NormalREPrior, i) = prior.cholesky_factor
+_prior_covariance(prior, i) = (L = _prior_factor(prior, i); Matrix(L * L'))
+_standardized_norm(prior, i, g) = maximum(abs, _prior_factor(prior, i)' * g; init = zero(eltype(g)))
 
-# Sufficient increase (Armijo, c = 1e-4) — or, for an undamped full step whose
-# predicted increase is below what f resolves, no measurable decrease.
+# Sufficient increase: at least 1e-4 of the predicted increase (the Armijo test for
+# BFGS's linear prediction, the ratio test for Newton's quadratic model) — or, for a
+# full step whose predicted increase is below what f resolves, no measurable decrease.
 function _accepts(trial, f, ft, g)
     isfinite(ft) || return false
-    predicted = dot(g, trial.step)
+    predicted = _predicted(trial, g)
     ft - f >= 1.0e-4 * predicted && return true
     return trial.full && predicted <= sqrt(eps(typeof(f))) * max(one(f), abs(f)) && ft >= f - _roundoff(f)
 end
+_predicted(trial, g) = dot(g, trial.step)
 
 # Changes of f below this are not resolved by evaluating f.
 _roundoff(f) = 16 * eps(typeof(f)) * max(one(f), abs(f))
 
 # ── Newton ────────────────────────────────────────────────────────────────────
 
-_initial_curvature(::NewtonEBE, model, subjects, θ, σ, prior, H) =
-    _complete_hessians(model, subjects, θ, σ, prior, H)
+# Newton's state per subject: the complete-data Hessian block, the prior's Cholesky
+# factor L (the trust region is a ball in the standardized coordinates L⁻¹η, where
+# the prior is N(0, I)), and the trust-region radius. The first radius is the length
+# of the full Newton step where that step exists, so a concave start takes it, and
+# one prior standard deviation elsewhere.
+struct NewtonState{HS, FS, R}
+    hessians::HS
+    factors::FS
+    radii::R
+end
 
-function _is_converged(::NewtonEBE, hessians, k, g, prior, i, opt)
-    p, decrement = _newton_step(g, hessians[k])
+function _initial_curvature(::NewtonEBE, model, subjects, θ, σ, prior, H, G)
+    hessians = _complete_hessians(model, subjects, θ, σ, prior, H)
+    factors = [_prior_factor(prior, i) for i in subjects]
+    radii = map(eachindex(subjects)) do k
+        p, _ = _newton_step(_column(G, k), hessians[k])
+        p === nothing ? one(eltype(hessians[k])) : norm(factors[k] \ p)
+    end
+    return NewtonState(hessians, factors, radii)
+end
+
+function _is_converged(::NewtonEBE, state, k, g, prior, i, opt)
+    p, decrement = _newton_step(g, state.hessians[k])
     return p !== nothing && decrement / 2 <= opt.decrement_tol
 end
 
@@ -361,45 +389,101 @@ function _newton_step(g, Hk)
     return p, dot(g, p)
 end
 
-# A Newton trial: the full step (λ = 0) or a Levenberg–Marquardt step (-H + λI)⁻¹g.
-# `step` is `nothing` while -H + λI is not positive definite (the next retry raises
-# λ). Every state has this one concrete type, so `_search_steps` can store any retry
-# in the table it builds from the first trials.
-struct DampedTrial{T}
-    step::Union{Nothing, Vector{T}}
+# A Newton trial: the maximizer `step` of the quadratic model f + gᵀp + pᵀHp/2 over
+# the trust region ‖L⁻¹p‖ ≤ `radius`, the model's increase `predicted` there, whether
+# it is the full Newton step from inside the region, and its standardized length.
+struct TrustRegionTrial{T}
+    step::Vector{T}
+    predicted::T
     full::Bool
-    λ::T
-    λ0::T
+    radius::T
+    length::T
 end
-DampedTrial(step, full, λ::T, λ0::T) where {T} = DampedTrial{T}(step, full, λ, λ0)
+_predicted(trial::TrustRegionTrial, g) = trial.predicted
 
-function _first_trial(::NewtonEBE, hessians, k, g)
-    p, _ = _newton_step(g, hessians[k])
-    λ0 = 1.0e-3 * max(one(eltype(hessians[k])), maximum(abs, diag(hessians[k])))
-    p === nothing && return _damped_trial(hessians[k], g, λ0, λ0)
-    return DampedTrial(p, true, zero(λ0), λ0)
+_first_trial(::NewtonEBE, state, k, g) =
+    _trust_region_trial(state.hessians[k], state.factors[k], g, state.radii[k])
+
+# A rejected step shrinks the region to a quarter of that step's length.
+_next_trial(::NewtonEBE, trial, state, k, g) =
+    _trust_region_trial(state.hessians[k], state.factors[k], g, trial.length / 4)
+
+# The trust-region subproblem in standardized coordinates q = L⁻¹p: maximize
+# aᵀc - Σⱼ λⱼcⱼ²/2 over ‖c‖ ≤ Δ in the eigenbasis -LᵀHL = Q Diagonal(λ) Qᵀ, with
+# a = QᵀLᵀg and q = Qc. Outside the full-Newton case the maximizer is
+# cⱼ = aⱼ / (λⱼ + ν) on the boundary, for the ν > max(0, -λ₁) solving ‖c‖ = Δ (Moré &
+# Sorensen 1983). In t = ν - max(0, -λ₁) the shifted eigenvalues dⱼ = λⱼ + max(0, -λ₁)
+# are ≥ 0, with d₁ = 0 when -H is not positive definite, so the root stays resolved
+# however close it lies to that bound. If a has no component where d = 0 and the
+# other components fit inside the region (the hard case, e.g. a start exactly at a
+# saddle point), the remaining length goes along the first eigenvector.
+function _trust_region_trial(Hk, L, g, Δ)
+    λ, Q = eigen(Symmetric(-(L' * Hk * L)))
+    a = Q' * (L' * g)
+    if first(λ) > 0
+        c = a ./ λ
+        norm(c) <= Δ && return _trust_region_trial(L, Q, λ, a, c, Δ, true)
+    end
+    d = λ .+ max(zero(eltype(λ)), -first(λ))
+    flat = iszero.(d)
+    if all(iszero, a[flat])
+        c = [iszero(dⱼ) ? zero(aⱼ) : aⱼ / dⱼ for (aⱼ, dⱼ) in zip(a, d)]
+        if norm(c) <= Δ
+            c[1] = sqrt(max(Δ^2 - sum(abs2, c), zero(Δ)))
+            return _trust_region_trial(L, Q, λ, a, c, Δ, false)
+        end
+    end
+    c = a ./ (d .+ _boundary_shift(a, d, Δ))
+    return _trust_region_trial(L, Q, λ, a, c, Δ, false)
 end
 
-function _next_trial(::NewtonEBE, trial, hessians, k, g)
-    λ = iszero(trial.λ) ? trial.λ0 : 10 * trial.λ
-    return _damped_trial(hessians[k], g, λ, trial.λ0)
+function _trust_region_trial(L, Q, λ, a, c, Δ, full)
+    predicted = dot(a, c) - sum(λ .* c .^ 2) / 2
+    return TrustRegionTrial(L * (Q * c), predicted, full, Δ, norm(c))
 end
 
-function _damped_trial(Hk, g, λ, λ0)
-    ch = cholesky(Symmetric(-Hk + λ * I); check = false)
-    return DampedTrial(issuccess(ch) ? ch \ g : nothing, false, λ, λ0)
+# The t ≥ 0 with ‖a ./ (d .+ t)‖ = Δ, by Newton's method on 1/‖c(t)‖ - 1/Δ, which is
+# concave and increasing in t: from a start left of the root the iterates increase
+# monotonically to it (Moré & Sorensen 1983). Zero is left of the root unless some
+# dⱼ = 0, and then ‖a_flat‖ / 2Δ is.
+function _boundary_shift(a, d, Δ)
+    flat = iszero.(d)
+    t = any(flat) ? norm(a[flat]) / (2 * Δ) : zero(Δ)
+    for _ in 1:100
+        φ = norm(a ./ (d .+ t))
+        φ - Δ <= 1.0e-12 * Δ && break
+        slope = sum(abs2.(a) ./ (d .+ t) .^ 3) / φ^3
+        next = t + (φ - Δ) / (Δ * φ * slope)
+        next <= t && break
+        t = next
+    end
+    return t
 end
 
-function _update_curvature!(::NewtonEBE, hessians, model, subjects, θ, σ, prior, H, accepted, steps, previous_G, Ga)
-    hessians[accepted] = _complete_hessians(model, subjects[accepted], θ, σ, prior, _columns(H, accepted))
-    return hessians
+# Nocedal & Wright (2006), Algorithm 4.1, on the ratio ρ of the actual to the
+# predicted increase: shrink after a poor prediction, grow after a good step that
+# reached the boundary. A step accepted only because its prediction is below what f
+# resolves (ρ < 1e-4, see `_accepts`) leaves the radius as it was.
+function _updated_radius(trial::TrustRegionTrial, gain)
+    ρ = gain / trial.predicted
+    ρ < 1.0e-4 && return trial.radius
+    ρ < 0.25 && return trial.length / 4
+    ρ > 0.75 && !trial.full && return 2 * trial.radius
+    return trial.radius
+end
+
+function _update_curvature!(::NewtonEBE, state, model, subjects, θ, σ, prior, H, accepted, trials, gains, previous_G, Ga)
+    state.hessians[accepted] = _complete_hessians(model, subjects[accepted], θ, σ, prior, _columns(H, accepted))
+    state.radii[accepted] = _updated_radius.(trials, gains)
+    return state
 end
 
 # Converged subjects take the Newton step from the converged point (accurate to
 # second order); it is kept unless f drops measurably or -H stops being positive
 # definite at the new point.
-function _polish!(::NewtonEBE, model, subjects, θ, σ, prior, H, ℓ, f, G, hessians, iterations, done)
+function _polish!(::NewtonEBE, model, subjects, θ, σ, prior, H, ℓ, f, G, state, iterations, done)
     isempty(done) && return nothing
+    hessians = state.hessians
     Hp = _from_columns(H, [_column(H, k) + first(_newton_step(_column(G, k), hessians[k])) for k in done])
     ℓp, fp, Gp = _complete_gradients(model, subjects[done], θ, σ, prior, Hp)
     Hessp = _complete_hessians(model, subjects[done], θ, σ, prior, Hp)
@@ -416,7 +500,7 @@ function _polish!(::NewtonEBE, model, subjects, θ, σ, prior, H, ℓ, f, G, hes
     return nothing
 end
 
-_final_hessians(::NewtonEBE, hessians, model, subjects, θ, σ, prior, H) = hessians
+_final_hessians(::NewtonEBE, state, model, subjects, θ, σ, prior, H) = state.hessians
 
 # ── Quasi-Newton (BFGS) ───────────────────────────────────────────────────────
 
@@ -428,7 +512,7 @@ struct BFGSState{T}
     rescaled::Vector{Bool}
 end
 
-_initial_curvature(::QuasiNewtonEBE, model, subjects, θ, σ, prior, H) =
+_initial_curvature(::QuasiNewtonEBE, model, subjects, θ, σ, prior, H, G) =
     BFGSState([_prior_covariance(prior, i) for i in subjects], fill(false, length(subjects)))
 
 _is_converged(::QuasiNewtonEBE, state, k, g, prior, i, opt) = _standardized_norm(prior, i, g) <= opt.gtol
@@ -438,9 +522,9 @@ _next_trial(::QuasiNewtonEBE, trial, state, k, g) = (step = trial.step / 2, full
 
 # BFGS update of the inverse Hessian of -f with s = Δη, y = Δ(-g); skipped when the
 # curvature condition sᵀy > 0 fails.
-function _update_curvature!(::QuasiNewtonEBE, state, model, subjects, θ, σ, prior, H, accepted, steps, previous_G, Ga)
+function _update_curvature!(::QuasiNewtonEBE, state, model, subjects, θ, σ, prior, H, accepted, trials, gains, previous_G, Ga)
     for (j, k) in enumerate(accepted)
-        s = steps[j]
+        s = trials[j].step
         y = _column(previous_G, j) - _column(Ga, j)
         sy = dot(s, y)
         sy > 0 || continue

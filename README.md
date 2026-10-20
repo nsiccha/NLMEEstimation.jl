@@ -148,10 +148,11 @@ r.hessians     # nothing for this gradient-only model
 ```
 
 `empirical_bayes` solves all subjects in lockstep. Each iteration makes one batched
-gradient call, plus batched value calls for its line search.
+gradient call, plus batched value calls for its trial steps.
 
-- **`NewtonEBE()`**: damped Newton on the Hessian blocks. This is the default when
-  the model provides Hessian blocks.
+- **`NewtonEBE()`**: trust-region Newton on the Hessian blocks, which also leaves
+  saddle points and non-concave regions of a subject's density. This is the default
+  when the model provides Hessian blocks.
 - **`QuasiNewtonEBE()`**: BFGS on gradients alone. This is the default for
   gradient-only models.
 

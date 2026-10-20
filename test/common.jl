@@ -19,7 +19,7 @@ export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH,
     JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN,
     LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
-    DoubleWell
+    DoubleWell, SteepWell
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -48,8 +48,8 @@ end
 
 # One η per subject, ℓ_i(η) = -(η² - a)²/4 + b_i η, with closed-form derivatives, for
 # either layout. With a unit prior variance and a > 1 the complete-data density is
-# convex near η = 0 and concave at its maximum, so Newton's damping must rise past
-# trials where -H + λI is not positive definite.
+# convex near η = 0 and concave at its maximum, so the Newton step does not exist at
+# a start near 0.
 struct DoubleWell{L}
     layout::L
     a::Float64
@@ -63,6 +63,29 @@ NE.conditional_loglikelihood_and_gradient(m::DoubleWell, i, θ, σ, η) =
 NE.conditional_loglikelihood_gradient_and_hessian(m::DoubleWell, i, θ, σ, η) =
     (NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η)..., fill(m.a - 3 * η[1]^2, 1, 1))
 NE.provides_eta_hessian(::DoubleWell) = true
+
+# Two η per subject, a steep concave coordinate and a double well,
+# ℓ_i(η) = -D(η₁ - c)²/2 - (η₂² - a)²/4 + b_i η₂, for either layout. With unit prior
+# variances, a > 1 and a small |b_i|, a start with η₂ at or near 0 lies at or next to
+# a saddle point of the complete-data density, which curves upward along η₂ with
+# curvature a - 1. A Levenberg–Marquardt step (-H + λI)⁻¹g whose λ scales with the
+# steep curvature D leaves that saddle only by a factor λ/(λ - a + 1) per iteration.
+struct SteepWell{L}
+    layout::L
+    D::Float64
+    a::Float64
+    b::Vector{Float64}
+    c::Float64
+end
+NE.nsubjects(m::SteepWell) = length(m.b)
+NE.nlme_layout(m::SteepWell) = m.layout
+NE.conditional_loglikelihood(m::SteepWell, i, θ, σ, η) =
+    -m.D * (η[1] - m.c)^2 / 2 - (η[2]^2 - m.a)^2 / 4 + m.b[i] * η[2]
+NE.conditional_loglikelihood_and_gradient(m::SteepWell, i, θ, σ, η) =
+    (NE.conditional_loglikelihood(m, i, θ, σ, η), [-m.D * (η[1] - m.c), -(η[2]^2 - m.a) * η[2] + m.b[i]])
+NE.conditional_loglikelihood_gradient_and_hessian(m::SteepWell, i, θ, σ, η) =
+    (NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η)..., [-m.D 0.0; 0.0 m.a - 3 * η[2]^2])
+NE.provides_eta_hessian(::SteepWell) = true
 
 # Typical-value parameters of the standard one-compartment Theoph fit (no weight
 # effect), additive error.
