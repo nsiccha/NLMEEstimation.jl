@@ -1,5 +1,6 @@
 using NLMEEstimation
 using NLMEEstimation.ReferenceModels
+import NLMEEstimation as NE
 import DifferentiationInterface as DI
 using LinearAlgebra
 using Random
@@ -46,6 +47,49 @@ function check_against_joint_reference(model, θ, σ, ω; method = default_ebe_m
         end
     end
     return r
+end
+
+# Observations near 400 with a residual SD of 0.3, as for a QT interval in ms:
+# y_ij ~ N(30 exp(η₁) x_j / (1 + x_j) + 400 exp(η₂), 0.3²). Each residual y - μ rounds
+# off at about 400 eps, so evaluating f, about -15 per subject, rounds off by tens of
+# ulps of f.
+struct HighBaseline
+    y::Vector{Vector{Float64}}
+    x::Vector{Float64}
+end
+const HIGH_BASELINE_SD = 0.3
+NE.nsubjects(m::HighBaseline) = length(m.y)
+NE.nlme_layout(::HighBaseline) = NLMELayout(0, 0, [1, 1])
+NE.provides_eta_hessian(::HighBaseline) = true
+# The two mean terms; each is also its own first and second derivative in its η.
+_high_baseline_terms(η, x) = (30 * exp(η[1]) * x / (1 + x), 400 * exp(η[2]))
+function NE.conditional_loglikelihood(m::HighBaseline, i, θ, σ, η)
+    return sum(zip(m.y[i], m.x)) do (y, x)
+        -((y - sum(_high_baseline_terms(η, x))) / HIGH_BASELINE_SD)^2 / 2 - log(HIGH_BASELINE_SD) - log(2π) / 2
+    end
+end
+function NE.conditional_loglikelihood_gradient_and_hessian(m::HighBaseline, i, θ, σ, η)
+    g = zeros(2)
+    H = zeros(2, 2)
+    for (y, x) in zip(m.y[i], m.x)
+        J = collect(_high_baseline_terms(η, x))
+        r = (y - sum(J)) / HIGH_BASELINE_SD^2
+        g .+= r .* J
+        H .+= r .* Diagonal(J) .- J * J' ./ HIGH_BASELINE_SD^2
+    end
+    return conditional_loglikelihood(m, i, θ, σ, η), g, H
+end
+NE.conditional_loglikelihood_and_gradient(m::HighBaseline, i, θ, σ, η) =
+    conditional_loglikelihood_gradient_and_hessian(m, i, θ, σ, η)[1:2]
+const Ω_HIGH_BASELINE = Matrix(Diagonal([0.3, 0.03] .^ 2))
+function high_baseline_model(rng, n)
+    x = collect(range(0.1, 5.0; length = 12))
+    L = cholesky(Ω_HIGH_BASELINE).L
+    y = map(1:n) do _
+        η = L * randn(rng, 2)
+        [sum(_high_baseline_terms(η, xj)) + HIGH_BASELINE_SD * randn(rng) for xj in x]
+    end
+    return HighBaseline(y, x)
 end
 
 @testset "empirical_bayes" begin
@@ -237,6 +281,35 @@ end
             @test maximum(abs, r.modes[:, 3:end] - newton.modes[:, 3:end]) < 1.0e-8
         end
         @test all(H -> isposdef(Symmetric(-H)), bfgs.hessians)
+    end
+
+    @testset "modes are found where evaluating f rounds off by many ulps" begin
+        # A decrease of f was tolerated only up to 16 ulps of f, so a point whose
+        # rounding came out high rejected every later step, and subjects at their
+        # modes were reported unconverged with standardized gradients near 1e-6:
+        # subject 5 for Newton, 18 of 40 for BFGS (snag run-empirical-ba-6d5b89f0).
+        model = high_baseline_model(Xoshiro(1), 40)
+        ω = omega_parameters(nlme_layout(model), Ω_HIGH_BASELINE)
+        newton = empirical_bayes(model, Float64[], Float64[], ω; method = NewtonEBE(), require_convergence = false)
+        bfgs = empirical_bayes(model, Float64[], Float64[], ω; method = QuasiNewtonEBE(), require_convergence = false)
+        @test all(newton.converged)
+        @test all(bfgs.converged)
+        # f rounds off by more than 16 ulps around the modes: its values a 1e-9 step
+        # away depart from its quadratic model by more than that.
+        η = newton.modes[:, 5]
+        _, f, g, H = complete_data_loglikelihood_gradient_and_hessian(model, 5, Float64[], Float64[], ω, η)
+        departures = map(1:50) do j
+            δ = 1.0e-9 .* [cos(j), sin(j)]
+            complete_data_loglikelihood(model, 5, Float64[], Float64[], ω, η + δ) - (f + dot(g, δ) + dot(δ, H * δ) / 2)
+        end
+        @test maximum(abs, departures) > 16 * eps(abs(f))
+        # Newton's polishing step is kept, so its modes are stationary to roundoff;
+        # BFGS's agree with them to its gradient tolerance.
+        for k in 1:40
+            _, _, g, H = complete_data_loglikelihood_gradient_and_hessian(model, k, Float64[], Float64[], ω, newton.modes[:, k])
+            @test dot(g, -H \ g) / 2 < 1.0e-20
+        end
+        @test maximum(abs, newton.modes - bfgs.modes) < 1.0e-8
     end
 
     @testset "failures are reported, never silent" begin

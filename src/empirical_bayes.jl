@@ -175,6 +175,12 @@ Throws an [`EBEConvergenceError`](@ref) if some subject's mode is not found, unl
 an error. A trial point at which the model returns `-Inf` or throws a `DomainError`,
 `OverflowError` or `PosDefException` (a point outside its domain) is rejected, and
 a shorter step is tried.
+
+Evaluating the complete-data log-density f can round off by many ulps of f when f
+sums terms much larger than itself, such as observations far from zero with a small
+residual SD. Near a mode, a full step whose predicted increase is below
+`√eps · max(1, |f|)` is therefore accepted unless f decreases by more than that. The
+convergence tests use gradients and Hessian blocks, which stay accurate there.
 """
 function empirical_bayes(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η0 = nothing, method::EBEMethod = default_ebe_method(model),
@@ -362,16 +368,20 @@ _standardized_norm(prior, i, g) = maximum(abs, _prior_factor(prior, i)' * g; ini
 
 # Sufficient increase: at least 1e-4 of the predicted increase (the Armijo test for
 # a BFGS step's linear prediction, the ratio test for a quadratic model) — or, for a
-# full step whose predicted increase is below what f resolves, no measurable decrease.
+# full step whose predicted increase is below what f resolves, no decrease beyond that.
 function _accepts(trial, f, ft, g)
     isfinite(ft) || return false
     predicted = _predicted(trial, g)
     ft - f >= 1.0e-4 * predicted && return true
-    return trial.full && predicted <= sqrt(eps(typeof(f))) * max(one(f), abs(f)) && ft >= f - _roundoff(f)
+    return trial.full && predicted <= _resolution(f) && ft >= f - _resolution(f)
 end
 
-# Changes of f below this are not resolved by evaluating f.
-_roundoff(f) = 16 * eps(typeof(f)) * max(one(f), abs(f))
+# Changes of f below this are not resolved by evaluating f. Its rounding error is
+# relative to the terms it sums, which can be far larger than f itself (observations
+# far from zero with a small residual SD), and then reaches many ulps of f. Near a
+# mode the derivatives stay accurate, so a full step predicted to gain less than this
+# is judged by its prediction, and f only rejects a drop beyond this.
+_resolution(f) = sqrt(eps(typeof(f))) * max(one(f), abs(f))
 
 # ── Newton ────────────────────────────────────────────────────────────────────
 
@@ -500,10 +510,10 @@ function _update_curvature!(::NewtonEBE, state, model, subjects, θ, σ, prior, 
 end
 
 # Converged subjects take the Newton step from the converged point (accurate to
-# second order); it is kept unless f drops measurably or -H stops being positive
-# definite at the new point. A step that leaves the model's domain is dropped too:
-# if the batch throws `_InfeasibleEvaluation`, the subjects whose step values are
-# not finite are left at their converged points.
+# second order); it is kept unless f drops by more than it resolves (`_resolution`)
+# or -H stops being positive definite at the new point. A step that leaves the
+# model's domain is dropped too: if the batch throws `_InfeasibleEvaluation`, the
+# subjects whose step values are not finite are left at their converged points.
 function _polish!(::NewtonEBE, model, subjects, θ, σ, prior, H, ℓ, f, G, state, iterations, done)
     isempty(done) && return nothing
     hessians = state.hessians
@@ -520,7 +530,7 @@ function _polish!(::NewtonEBE, model, subjects, θ, σ, prior, H, ℓ, f, G, sta
     end
     ℓp, fp, Gp, Hessp = evaluated
     for (j, k) in enumerate(done)
-        keep = isfinite(fp[j]) && fp[j] >= f[k] - _roundoff(f[k]) &&
+        keep = isfinite(fp[j]) && fp[j] >= f[k] - _resolution(f[k]) &&
             issuccess(cholesky(Symmetric(-Hessp[j]); check = false))
         keep || continue
         _set_column!(H, k, _column(Hp, j))
