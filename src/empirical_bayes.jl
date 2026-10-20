@@ -644,14 +644,27 @@ end
 
 # The complete-data Hessian blocks of subjects `ks` at their points `Hks` (with
 # complete-data gradients `Gks` there): the model's own when it provides them, or
-# else forward differences of batched gradients (`_difference_eta_hessians`).
+# else forward differences of batched gradients.
 function _store_hessians!(state::BFGSState, model, subjects, θ, σ, prior, ks, Hks, Gks)
     isempty(ks) && return state
     state.hessians[ks] = provides_eta_hessian(model) ?
         _complete_hessians(model, subjects[ks], θ, σ, prior, Hks) :
-        _difference_eta_hessians(model, nlme_layout(model), subjects[ks], θ, σ, prior,
+        _difference_blocks(model, subjects[ks], θ, σ, prior,
             [Vector(_column(Hks, j)) for j in eachindex(ks)], [Vector(_column(Gks, j)) for j in eachindex(ks)])
     return state
+end
+
+# Forward-difference blocks (`_difference_eta_hessians`) take gradients a step away
+# from each point. If that batch throws `_InfeasibleEvaluation` (a step left the
+# model's domain), each subject is differenced alone, and one whose step still
+# throws gets no block: its curvature is unknown, so it converges on the gradient
+# test alone.
+function _difference_blocks(model, subjects, θ, σ, prior, points, gradients)
+    layout = nlme_layout(model)
+    blocks(ks) = _difference_eta_hessians(model, layout, subjects[ks], θ, σ, prior, points[ks], gradients[ks])
+    batch = _feasible(blocks, eachindex(subjects))
+    batch === nothing || return batch
+    return [_feasible(k -> only(blocks([k])), k) for k in eachindex(subjects)]
 end
 
 _polish!(::QuasiNewtonEBE, model, subjects, θ, σ, prior, H, ℓ, f, G, state, iterations, done) = nothing
