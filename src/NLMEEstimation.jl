@@ -37,6 +37,7 @@ import DifferentiationInterface as DI
 import NLopt
 import LogDensityProblems as LDP
 import WarmupHMC
+using Serialization: deserialize
 
 export NLMELayout, RaggedNLMELayout, neta, nomega, omega_cholesky, omega_matrix, omega_parameters,
     FixedOmega, fixed_omega, apply_fixed_omega

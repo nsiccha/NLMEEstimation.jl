@@ -113,6 +113,15 @@ _saem_phi(H::AbstractVector{<:AbstractVector}, θ, indices, design) =
 _saem_eta(Φ::AbstractVector{<:AbstractVector}, θ, indices, design) =
     [Φ[k] - design[k] * view(θ, indices) for k in eachindex(Φ)]
 
+function _saem_recenter!(H::AbstractVector{<:AbstractVector}, θ_old, θ_new, indices, design)
+    Δ = θ_new[indices] - θ_old[indices]
+    all(iszero, Δ) && return false
+    for k in eachindex(H)
+        H[k] -= design[k] * Δ
+    end
+    return true
+end
+
 function _ragged_moments!(mean_phi, second_phi, Φ, γ)
     for k in eachindex(Φ)
         mean_phi[k] = (1 - γ) * mean_phi[k] + γ * Φ[k]
@@ -335,6 +344,7 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
         _ragged_moments!(mean_phi, second_phi, Φ, γ)
         _saem_record!(numeric_mode, bank, weights, Φ, γ)
         if k % options.mstep_interval == 0 || k == options.iterations
+            θ_before = copy(θ)
             if map_objective
                 θ, σ, ω = _saem_map_mstep(model, ids, layout, θ, σ, ω,
                     indices, design, bank, weights, mean_phi, second_phi,
@@ -347,6 +357,7 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
                 θ, σ = numeric_update(model, ids, θ, σ, free, indices, design,
                     bank, weights, options.numeric_maxiter, γ)::Tuple{Vector{Float64},Vector{Float64}}
             end
+            _saem_recenter!(H, θ_before, θ, indices, design)
         end
     end
     denom = sweeps * length(ids)

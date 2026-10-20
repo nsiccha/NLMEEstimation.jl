@@ -376,7 +376,7 @@ end
 
 function _saem_nuts_warmup!(rng, kernel::WarmupHMCNUTS,
         root, model, ids, θ, σ, prior, H)
-    return [begin
+    payloads = [begin
         target = _saem_target(model, i, θ, σ, prior)
         η = copy(view(H, :, k))
         Σ = _saem_hessian_metric(model, i, θ, σ, prior, η;
@@ -395,9 +395,22 @@ function _saem_nuts_warmup!(rng, kernel::WarmupHMCNUTS,
             target_acceptance_rate=kernel.target_acceptance_rate,
             nonlinear_adapt=false,
             monitor_ess=false)
-        WarmupHMC.FixedKernelNUTSState(joinpath(warm_dir, "cp_latest.jls");
-            max_tree_depth=kernel.max_tree_depth)
+        deserialize(joinpath(warm_dir, "cp_latest.jls"))::NamedTuple
     end for (k, i) in enumerate(ids)]
+    states = [WarmupHMC.FixedKernelNUTSState(payload; max_tree_depth=kernel.max_tree_depth)
+        for payload in payloads]
+    return (; payloads, states, kernel.max_tree_depth)
+end
+
+# Restart each subject's fixed NUTS kernel at its re-centred η (WarmupHMC's
+# checkpoint-payload restart, so the metric and step size stay those of its
+# warmup), continuing the subject's random stream.
+function _saem_nuts_restart!(nuts, H)
+    for k in eachindex(nuts.states)
+        nuts.states[k] = WarmupHMC.FixedKernelNUTSState(nuts.payloads[k];
+            nuts.max_tree_depth, position=H[:, k], rng=nuts.states[k].rng)
+    end
+    return nuts
 end
 
 function _saem_nuts_round!(states, model, ids, θ, σ, prior, H)
@@ -517,11 +530,12 @@ function _saem_eta(Φ, θ, indices, design)
 end
 
 # Conditional log densities of the chains' current latent effects at population
-# parameters an M-step just set. Under mu-referencing that update moves each
-# subject's φ = Dθ + η while its η stays put, so a chain can land outside the
-# model's domain (a non-finite density, or an `_InfeasibleEvaluation` throw). The
-# MH and NUTS kernels then stop here with one error naming those subjects; MALA
-# checks its own values each round.
+# parameters an M-step just set. The update keeps every chain's φ (re-centring)
+# and its numerical part rejects trial points where a current chain leaves the
+# model's domain, so this is the safety net for a chain that still ends up there
+# (a non-finite density, or an `_InfeasibleEvaluation` throw). The MH and NUTS
+# kernels then stop here with one error naming those subjects; MALA checks its
+# own values each round.
 function _saem_current_loglikelihoods(model, ids, θ, σ, H)
     ℓ = _proposal_loglikelihoods(model, ids, θ, σ, H)
     length(ℓ) == length(ids) || throw(DimensionMismatch(
@@ -530,6 +544,21 @@ function _saem_current_loglikelihoods(model, ids, θ, σ, H)
     isempty(outside) || throw(DomainError(ℓ, "SAEM conditional log densities became " *
         "non-finite after population update (subjects $(join(outside, ", ")))"))
     return ℓ
+end
+
+# Keep each chain's φ = Dθ + η fixed across a population update, as saemix does:
+# shift η by −D(θ_new − θ_old) on the mu-referenced coordinates. Each subject's
+# likelihood is then unchanged and its kernel continues where the chain had
+# settled. Holding η fixed instead moved every φ by DΔθ, and at gain 1 a slowly
+# mixing kernel then drifted θ by about mean(η) at every M-step (brief
+# `dqtdys`). Returns whether any chain moved.
+function _saem_recenter!(H::AbstractMatrix, θ_old, θ_new, indices, design)
+    Δ = θ_new[indices] - θ_old[indices]
+    all(iszero, Δ) && return false
+    for k in axes(H, 2)
+        H[:, k] .-= design[k] * Δ
+    end
+    return true
 end
 
 function _saem_moments!(mean_phi, second_phi, Φ, γ)
@@ -915,7 +944,7 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
     mala_metrics = kernel isa DualAveragingMALA ?
         _saem_mala_metrics(kernel, model, ids, θ, σ, prior, H) : nothing
     try
-        nuts_state = kernel isa WarmupHMCNUTS ? _saem_nuts_warmup!(rng, kernel,
+        nuts = kernel isa WarmupHMCNUTS ? _saem_nuts_warmup!(rng, kernel,
             root, model, ids, θ, σ, prior, H) : nothing
         for iteration in 1:(options.mcmc_burnin + options.iterations)
             if iteration > options.mcmc_burnin
@@ -930,7 +959,7 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                     nprior += ap
                     nrw += ar
                 elseif kernel isa WarmupHMCNUTS
-                    ndivergent += _saem_nuts_round!(nuts_state, model, ids, θ, σ, prior, H)
+                    ndivergent += _saem_nuts_round!(nuts.states, model, ids, θ, σ, prior, H)
                 elseif kernel isa DualAveragingMALA
                     _saem_mala_round!(rng, kernel, mala_states, model, ids, θ, σ,
                         prior, H; metrics=mala_metrics, cache=mala_cache)
@@ -950,7 +979,7 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
             _saem_moments!(mean_phi, second_phi, Φ, γ)
             _saem_record!(numeric_mode, bank, weights, Φ, γ)
             if k % options.mstep_interval == 0 || k == options.iterations
-                θ_before, σ_before = θ, σ
+                θ_before, σ_before = copy(θ), copy(σ)
                 if map_objective
                     θ, σ, ω = _saem_map_mstep(model, ids, layout, θ, σ, ω,
                         indices, design, bank, weights, mean_phi, second_phi,
@@ -970,6 +999,9 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                     else
                         mala_cache.valid = false
                     end
+                end
+                if _saem_recenter!(H, θ_before, θ, indices, design) && nuts !== nothing
+                    _saem_nuts_restart!(nuts, H)
                 end
             end
         end
