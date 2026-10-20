@@ -10,6 +10,7 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
 NLopt = "76087f3c-5699-56af-9a33-bf431cd00edd"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [compat]

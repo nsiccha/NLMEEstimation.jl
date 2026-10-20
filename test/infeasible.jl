@@ -266,11 +266,12 @@ function NE.conditional_loglikelihood(m::PhiBounded, i::Integer, θ, σ, η)
     return -Inf
 end
 
-@testset "infeasible trial points: a population update moves SAEM chains out of the domain" begin
-    # Started far below the data, the chains' η₁ grow during MCMC burn-in. The
-    # first M-step raises θ₁ by about their mean and keeps each η, so some
-    # subjects' φ₁ cross the bound. MH and NUTS (and ragged MH) stop with the same
-    # error naming those subjects, whether the model throws or returns -Inf there.
+@testset "infeasible trial points: a population update keeps SAEM chains in the domain" begin
+    # Started far below the data, the chains' η₁ grow during MCMC burn-in and the
+    # first M-step raises θ₁ by about their mean. SAEM keeps each subject's φ₁
+    # across that update, so no chain crosses the bound; when η was held fixed
+    # instead, some chains' φ₁ landed outside it and the fit stopped. MH, NUTS and
+    # ragged MH fit, and the throwing model retraces its -Inf twin.
     opts = SAEMOptions(; BOUNDED_OPTIONS...)
     nuts = WarmupHMCNUTS(warmup_draws = 4, warmup_evaluations = 20,
         stepsize_adaptation_limit = 5, max_tree_depth = 4)
@@ -281,22 +282,38 @@ end
         ("ragged MH", occasions_model, ([-3.0], [log(0.5)], [log(0.8), log(0.4)]),
             StandardSAEMMH()))
     for (name, build, (θ0, σ0, ω0), kernel) in cases
-        fit(max_phi, throws) = saem(PhiBounded(build(), max_phi, throws), θ0, σ0, ω0;
+        fit(throws) = saem(PhiBounded(build(), 3.0, throws), θ0, σ0, ω0;
             rng = Xoshiro(3), options = opts, kernel)
-        errors = map(throws -> try
-                fit(3.0, throws)
-                nothing
-            catch err
-                err
-            end, (true, false))
         @testset "$name" begin
-            @test isfinite(fit(Inf, true).theta[1])  # control: no bound, no error
-            @test all(err -> err isa DomainError, errors)
-            @test occursin("became non-finite after population update (subjects ",
-                sprint(showerror, errors[1]))
-            @test sprint(showerror, errors[1]) == sprint(showerror, errors[2])
+            throwing, twin = fit(true), fit(false)
+            @test all(isfinite, throwing.theta)
+            same_fit(throwing, twin)
         end
     end
+end
+
+@testset "infeasible trial points: SAEM's post-update check names the subjects" begin
+    # The safety net for a chain that is outside the domain after a population
+    # update anyway: one error naming the subjects, whether the model throws or
+    # returns -Inf there.
+    m = growth_model()
+    ids = collect(1:nsubjects(m))
+    θ, σ = [1.0, 0.5], [log(0.3)]
+    H = zeros(2, length(ids))
+    H[1, [2, 5]] .= 5.0
+    for throws in (true, false)
+        err = try
+            NE._saem_current_loglikelihoods(PhiBounded(m, 3.0, throws), ids, θ, σ, H)
+            nothing
+        catch e
+            e
+        end
+        @test err isa DomainError
+        @test occursin("became non-finite after population update (subjects 2, 5)",
+            sprint(showerror, err))
+    end
+    @test length(NE._saem_current_loglikelihoods(PhiBounded(m, Inf, true), ids, θ, σ,
+        zeros(2, length(ids)))) == length(ids)
 end
 
 @testset "infeasible trial points: marginal likelihood" begin

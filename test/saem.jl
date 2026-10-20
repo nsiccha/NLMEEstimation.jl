@@ -227,3 +227,37 @@ end
     @test 0 < result.acceptance.random_walk < 1
     @test result.rw_scale > 0
 end
+
+@testset "SAEM keeps each subject's φ across the mu-referenced update" begin
+    # Re-centring shifts η so that φ = Dθ + η is unchanged, in both layouts, and
+    # leaves η alone when no mu-referenced coordinate moved.
+    θ_old, θ_new, indices = [0.2, -0.1, 0.4], [0.5, 0.3, 0.4], [1, 2]
+    design = [[1.0 0.0; 0.0 2.0], [0.5 1.0; 0.0 1.0]]
+    H = [0.1 -0.2; 0.3 0.4]
+    Φ = NE._saem_phi(H, θ_old, indices, design)
+    @test NE._saem_recenter!(H, θ_old, θ_new, indices, design)
+    @test NE._saem_phi(H, θ_new, indices, design) ≈ Φ
+    @test !NE._saem_recenter!(H, θ_new, θ_new, indices, design)
+    @test !NE._saem_recenter!(H, θ_old, θ_new, Int[], [zeros(2, 0), zeros(2, 0)])
+    ragged = [[0.1, 0.3], [-0.2, 0.4, 0.7]]
+    ragged_design = [[1.0 0.0; 0.0 1.0], [1.0 0.0; 0.0 1.0; 0.0 0.0]]
+    Φr = NE._saem_phi(ragged, θ_old, indices, ragged_design)
+    @test NE._saem_recenter!(ragged, θ_old, θ_new, indices, ragged_design)
+    @test all(NE._saem_phi(ragged, θ_new, indices, ragged_design) .≈ Φr)
+
+    # From a far start with an M-step every iteration, holding η fixed let θ
+    # drift by about mean(η) per update while MALA's small steps barely moved the
+    # chains: none of 18 such simulated fits converged (brief `dqtdys`; this
+    # seed went to log ka ≈ -2.6). Keeping φ, MALA converges, and NUTS restarts
+    # its fixed kernels at the shifted positions.
+    model, _ = simulated_model(seed = 21, nsubjects = 24)
+    θ0 = θ_SIM .+ [1.2, 0.7, 0.7, 0.0]
+    ω0 = omega_parameters(nlme_layout(model), Ω_SIM)
+    options = SAEMOptions(iterations = 120, burnin = 40, mcmc_burnin = 20,
+        mh_rounds = 2, adapt_iterations = 80, numeric_maxiter = 4)
+    for kernel in (DualAveragingMALA(), WarmupHMCNUTS(warmup_draws = 8,
+            warmup_evaluations = 50, stepsize_adaptation_limit = 10, max_tree_depth = 6))
+        fit = saem(model, θ0, σ_SIM, ω0; rng = MersenneTwister(21001), options, kernel)
+        @test maximum(abs.(fit.theta[1:3] - θ_SIM[1:3])) < 0.3
+    end
+end

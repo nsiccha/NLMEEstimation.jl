@@ -20,7 +20,7 @@ A model rejects a point outside its domain by returning `-Inf`, or by throwing a
 
 The point a search starts from must evaluate finitely.
 
-SAEM's chains are checked the same way after each population update. Under mu-referencing, the closed-form update moves each subject's φ = Dθ + η while its η stays where it was, so a chain can end up outside the domain. The MH and NUTS kernels then raise a `DomainError` naming those subjects, and the MALA kernel raises its own `DomainError`.
+A population update keeps SAEM's chains inside the domain: it keeps each subject's φ = Dθ + η where it was, and its numerical M-step rejects trial parameters at which a current chain would leave the domain. If a chain's density is still non-finite after an update, the MH and NUTS kernels raise a `DomainError` naming those subjects, and the MALA kernel raises its own `DomainError`.
 
 FOCE and FOCEI require `observation_model(model) = GaussianObservations()` and observation means, variances, and first η Jacobians. SAEM can use `mu_referencing(model)` for a closed-form update of the corresponding fixed effects and Ω; remaining population coordinates use a numerical M-step.
 
