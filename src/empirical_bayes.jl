@@ -480,13 +480,24 @@ end
 
 # Converged subjects take the Newton step from the converged point (accurate to
 # second order); it is kept unless f drops measurably or -H stops being positive
-# definite at the new point.
+# definite at the new point. A step that leaves the model's domain is dropped too:
+# if the batch throws `_InfeasibleEvaluation`, the subjects whose step values are
+# not finite are left at their converged points.
 function _polish!(::NewtonEBE, model, subjects, θ, σ, prior, H, ℓ, f, G, state, iterations, done)
     isempty(done) && return nothing
     hessians = state.hessians
     Hp = _from_columns(H, [_column(H, k) + first(_newton_step(_column(G, k), hessians[k])) for k in done])
-    ℓp, fp, Gp = _complete_gradients(model, subjects[done], θ, σ, prior, Hp)
-    Hessp = _complete_hessians(model, subjects[done], θ, σ, prior, Hp)
+    evaluate(ks, Hk) = (_complete_gradients(model, subjects[ks], θ, σ, prior, Hk)...,
+        _complete_hessians(model, subjects[ks], θ, σ, prior, Hk))
+    evaluated = _feasible(Hk -> evaluate(done, Hk), Hp)
+    if evaluated === nothing
+        _, fp = _complete_values(model, subjects[done], θ, σ, prior, Hp)
+        inside = findall(isfinite, fp)
+        isempty(inside) && return nothing
+        done, Hp = done[inside], _columns(Hp, inside)
+        evaluated = evaluate(done, Hp)
+    end
+    ℓp, fp, Gp, Hessp = evaluated
     for (j, k) in enumerate(done)
         keep = isfinite(fp[j]) && fp[j] >= f[k] - _roundoff(f[k]) &&
             issuccess(cholesky(Symmetric(-Hessp[j]); check = false))
