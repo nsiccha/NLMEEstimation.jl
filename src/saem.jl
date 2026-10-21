@@ -13,7 +13,10 @@ and one random-walk proposal for every subject, each evaluated in one batch.
 The random-walk scale adapts toward 0.3 acceptance for the first
 `adapt_iterations` sweeps and is then frozen. With `WarmupHMCNUTS`, each round
 makes one fixed-kernel NUTS transition per subject. `omega_floor` is a
-covariance eigenvalue floor in the M-step.
+covariance eigenvalue floor in the M-step. With few subjects for the
+mu-referenced coefficients, the covariance that maximizes an M-step's Gaussian
+term can be singular; its closed-form update moves towards the floor by at most
+100 coordinate updates per M-step, so Ω may approach it over several iterations.
 `numeric_mstep=:auto` uses an online update for remaining σ coordinates when
 all θ coordinates have a closed-form `MuReferencing` update; otherwise it uses
 the historical running-mixture objective. `:online` explicitly applies the
@@ -593,13 +596,21 @@ function _saem_moments!(mean_phi, second_phi, Φ, γ)
     return nothing
 end
 
+# The closed-form Gaussian block alternates the generalized-least-squares
+# mu-referenced θ at fixed Ω with the floored covariance at fixed θ. Each update
+# maximizes its block, so the expected Gaussian density never decreases. Where
+# Ω's maximizer is singular, as when few subjects carry the mu-referenced
+# coefficients and the γ = 1 statistics come from one draw, the updates approach
+# `floor` ever more slowly (7659 updates to settle at 1e-8 on three PK subjects
+# with a weight slope). After 100 updates the step returns its iterate, as the budgeted
+# searches of the other blocks do, and the next M-step continues from it; a MAP
+# M-step only starts its Gaussian block there.
 function _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi, floor,
         constraints = nothing)
     m, n = size(mean_phi)
     μ = copy(θ[indices])
     Ωnew = copy(Ω)
     ranges, _ = _block_ranges(layout)
-    converged = false
     for _ in 1:100
         if !isempty(indices)
             P = inv(Symmetric(Ωnew))
@@ -629,14 +640,10 @@ function _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_
                 nextΩ[r, r] = _fixed_family_update(fam, second_residual[r, r], Ωnew[r, r], floor)
             end
         end
-        if maximum(abs, nextΩ - Ωnew) <= 1.0e-8 * max(1.0, maximum(abs, Ωnew))
-            Ωnew = nextΩ
-            converged = true
-            break
-        end
+        converged = maximum(abs, nextΩ - Ωnew) <= 1.0e-8 * max(1.0, maximum(abs, Ωnew))
         Ωnew = nextΩ
+        converged && break
     end
-    converged || throw(ErrorException("SAEM Gaussian M-step did not converge in 100 coordinate updates"))
     θnew = copy(θ)
     θnew[indices] = μ
     return θnew, Ωnew
@@ -810,9 +817,10 @@ end
 # The Gaussian block of a MAP M-step: the mu-referenced θ and the free Ω
 # coordinates (`_free_omega`) maximize the expected Gaussian random-effect
 # density plus the population prior at the current remaining θ and σ. Neither
-# term evaluates the model. The search starts at the closed-form maximizer of
-# the Gaussian term, with that term's inverse curvature as its quasi-Newton
-# matrix, so a prior that is weak against the data moves it in a few steps.
+# term evaluates the model. The search starts where the Gaussian term's
+# closed-form updates (`_saem_gaussian_mstep`) stopped, with that term's inverse
+# curvature as its quasi-Newton matrix, so a prior that is weak against the data
+# moves it in a few steps.
 function _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
         mean_phi, second_phi, subjects, floor, constraints)
     nμ = length(indices)
@@ -899,7 +907,8 @@ _saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
 # does not depend on the mu-referenced θ, and Ω enters only the expected Gaussian
 # random-effect density, so the update separates into a Gaussian block
 # (mu-referenced θ and Ω) and a numerical block (the remaining θ and σ). Without
-# a population prior the Gaussian block has a closed-form maximizer. A prior
+# a population prior the Gaussian block takes closed-form coordinate updates
+# (`_saem_gaussian_mstep`). A prior
 # couples the blocks only through its own density: the MAP update moves the
 # Gaussian block on to its maximizer with the prior, without evaluating the
 # model, and adds the prior to the numerical update. With `:online`, only the

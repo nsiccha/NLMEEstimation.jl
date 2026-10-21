@@ -164,6 +164,92 @@ end
     @test Ω ≈ ones(1, 1)
 end
 
+# Linear growth with a subject covariate on the intercept and a dense 2 × 2 Ω.
+# With three subjects, the intercept, covariate slope and growth rate can make
+# one draw's residuals collinear, so the covariance maximizer of a γ = 1 M-step
+# is singular. `prior` adds a population prior (a MAP fit).
+struct CovariateGrowth
+    t::Vector{Vector{Float64}}
+    w::Vector{Float64}
+    y::Vector{Vector{Float64}}
+    prior::Bool
+end
+
+function covariate_growth_model(prior; seed = 5)
+    rng = Xoshiro(seed)
+    w = [0.1, -0.2, 0.3]
+    t = [[0.5, 1.0, 2.0, 4.0] for _ in w]
+    y = [(1.0 + 0.8w[i] + 0.4randn(rng)) .+ (0.5 + 0.2randn(rng)) .* t[i] .+
+        0.1 .* randn(rng, 4) for i in eachindex(w)]
+    return CovariateGrowth(t, w, y, prior)
+end
+
+NE.nsubjects(m::CovariateGrowth) = length(m.y)
+NE.nlme_layout(::CovariateGrowth) = NLMELayout(3, 1, [2])
+NE.mu_referencing(m::CovariateGrowth) =
+    MuReferencing([1, 2, 3], [[1.0 0.0 w; 0.0 1.0 0.0] for w in m.w])
+covariate_growth_residuals(m, i, θ, η) =
+    m.y[i] .- (θ[1] + θ[3] * m.w[i] + η[1]) .- (θ[2] + η[2]) .* m.t[i]
+
+function NE.conditional_loglikelihood(m::CovariateGrowth, i, θ, σ, η)
+    r = covariate_growth_residuals(m, i, θ, η)
+    return -sum(abs2, r) / (2exp(2σ[1])) - length(r) * (log(2π) / 2 + σ[1])
+end
+
+function NE.conditional_loglikelihood_and_population_gradient(m::CovariateGrowth,
+        i, θ, σ, η)
+    r = covariate_growth_residuals(m, i, θ, η)
+    v = exp(2σ[1])
+    return NE.conditional_loglikelihood(m, i, θ, σ, η),
+        [sum(r), dot(r, m.t[i]), m.w[i] * sum(r)] ./ v, [sum(abs2, r) / v - length(r)]
+end
+
+NE.population_logprior(m::CovariateGrowth, θ, σ, ω) =
+    m.prior ? -sum(abs2, vcat(θ, σ, ω)) / 2 : nothing
+NE.population_logprior_and_gradient(m::CovariateGrowth, θ, σ, ω) =
+    (population_logprior(m, θ, σ, ω), -θ, -σ, -ω)
+
+@testset "SAEM Gaussian M-step returns its iterate where Ω's maximizer is singular" begin
+    # One draw's statistics, as at γ = 1: the residuals of three subjects can be
+    # made collinear, so the floored covariance maximizer is singular and the
+    # coordinate updates creep towards the floor.
+    layout = NLMELayout(3, 0, [2])
+    w = [0.1, -0.2, 0.3]
+    design = [[1.0 0.0 x; 0.0 1.0 0.0] for x in w]
+    mean_phi = [1.3 0.7 1.6; 0.4 0.9 0.2]
+    second_phi = zeros(2, 2, 3)
+    for k in 1:3
+        second_phi[:, :, k] = mean_phi[:, k] * mean_phi[:, k]'
+    end
+    θ0, Ω0 = zeros(3), Matrix(0.25I, 2, 2)
+    gaussian(θ, Ω) = first(NE._saem_gaussian_map_value_gradient(layout, θ,
+        omega_parameters(layout, Ω), 1:3, design, mean_phi, second_phi))
+    θ1, Ω1 = NE._saem_gaussian_mstep(layout, θ0, Ω0, 1:3, design, mean_phi, second_phi, 1e-8)
+    θ2, Ω2 = NE._saem_gaussian_mstep(layout, θ1, Ω1, 1:3, design, mean_phi, second_phi, 1e-8)
+    @test gaussian(θ1, Ω1) > gaussian(θ0, Ω0)
+    # The step stopped on its budget, not at the maximizer: the next one moves on.
+    @test gaussian(θ2, Ω2) > gaussian(θ1, Ω1) + 0.1
+    @test eigmin(Symmetric(Ω2)) < eigmin(Symmetric(Ω1))
+    @test eigmin(Symmetric(Ω1)) >= 1e-8
+    ragged = RaggedNLMELayout(ntheta = 3, nsigma = 0, family_sizes = [2],
+        subject_families = [[1], [1], [1]])
+    θr, Ωr = NE._ragged_gaussian_mstep(ragged, θ0, [Ω0], 1:3, design,
+        collect(eachcol(mean_phi)), [second_phi[:, :, k] for k in 1:3], 1e-8, 1:3)
+    @test θr ≈ θ1
+    @test only(Ωr) ≈ Ω1
+end
+
+@testset "SAEM fits three subjects whose γ = 1 covariance maximizer is singular" begin
+    θ0, σ0, ω0 = [1.0, 0.5, 0.0], [log(0.2)], [log(0.5), 0.0, log(0.5)]
+    for prior in (false, true)
+        fit = saem(covariate_growth_model(prior), θ0, σ0, ω0; rng = Xoshiro(1),
+            options = SAEMOptions(iterations = 10, burnin = 5, mcmc_burnin = 5))
+        @test fit.objective == (prior ? :MAP : :ML)
+        @test all(isfinite, vcat(fit.theta, fit.sigma, fit.omega))
+        @test eigmin(Symmetric(fit.omega_matrix)) >= 1e-8
+    end
+end
+
 @testset "SAEM online numerical M-step" begin
     model = LinearSAEM([[0.2, 0.5], [1.0, 1.3]])
     θ = [0.6]
