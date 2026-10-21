@@ -2,6 +2,7 @@ using NLMEEstimation
 using Test
 using Random
 using LinearAlgebra
+using Statistics: var
 using DelimitedFiles
 using ADTypes
 using Enzyme
@@ -104,11 +105,13 @@ end
     H = zeros(1, 7)
     ℓ = zeros(7)
     prior = re_prior(model, [log(0.5)])
-    ap, ar = NE._saem_mh_round!(MersenneTwister(7), model, 1:7,
-        Float64[], Float64[], prior, H, ℓ, 0.5)
+    ap, ar, ac, apc = NE._saem_mh_round!(MersenneTwister(7), model, 1:7,
+        Float64[], Float64[], prior, H, ℓ, 0.5, [0.5])
     @test ap == 7
     @test 0 <= ar <= 7
-    @test model.calls[] == 2
+    @test apc == [7] && 0 <= only(ac) <= 7
+    # One batch each for the prior, joint and per-coordinate proposals.
+    @test model.calls[] == 3
     @test all(isfinite, H)
 end
 
@@ -261,7 +264,8 @@ end
     @test length(bank) == 1
     @test weights == [1.0]
     θnext, σnext = NE._saem_numeric_update(Val(:online), model, 1:2,
-        θ, σ, [2], [1], [ones(1, 1), ones(1, 1)], bank, weights, 25, 0.25)
+        θ, σ, [2], [1], [ones(1, 1), ones(1, 1)], bank, weights, 25, 0.25, nothing,
+        Ref{Union{Nothing, Matrix{Float64}}}(nothing))
     residuals = [0.2 - 0.1, 0.5 - 0.1, 1.0 + 0.2, 1.3 + 0.2]
     optimum = log(sqrt(sum(abs2, residuals) / length(residuals)))
     @test θnext == θ
@@ -364,4 +368,148 @@ end
         fit = saem(model, θ0, σ_SIM, ω0; rng = MersenneTwister(21001), options, kernel)
         @test maximum(abs.(fit.theta[1:3] - θ_SIM[1:3])) < 0.3
     end
+end
+
+# A population rate in σ that trades off against a mu-referenced random effect:
+# μ = b_i + A_i (1 - exp(-κ x)) ≈ b_i + A_i κ x, with log A_i = θ[2] + η[2] and
+# κ = exp(σ[1]). Each subject pins A_i κ, so a numerical M-step that holds every
+# φ fixed cannot move κ, and the chains cannot move A_i until κ does.
+struct SaturatingSAEM
+    x::Vector{Vector{Float64}}
+    y::Vector{Vector{Float64}}
+end
+NE.nsubjects(m::SaturatingSAEM) = length(m.y)
+NE.nlme_layout(::SaturatingSAEM) = NLMELayout(2, 2, [1, 1])
+NE.mu_referencing(m::SaturatingSAEM) = MuReferencing([1, 2], [Matrix(1.0I, 2, 2) for _ in m.y])
+NE.observation_model(::SaturatingSAEM) = GaussianObservations()
+NE.observations(m::SaturatingSAEM, i::Integer) = m.y[i]
+function saturating_parts(m, i, θ, σ, η)
+    A, κ = exp(θ[2] + η[2]), exp(σ[1])
+    e = exp.(-κ .* m.x[i])
+    return A, κ, exp(σ[2]), e, (θ[1] + η[1]) .+ A .* (1 .- e)
+end
+function NE.conditional_loglikelihood(m::SaturatingSAEM, i::Integer, θ, σ, η)
+    _, _, s, _, μ = saturating_parts(m, i, θ, σ, η)
+    return -sum(abs2, m.y[i] .- μ) / (2s^2) - length(μ) * (log(2π) / 2 + log(s))
+end
+function NE.conditional_loglikelihood_and_gradient(m::SaturatingSAEM, i::Integer, θ, σ, η)
+    A, _, s, e, μ = saturating_parts(m, i, θ, σ, η)
+    w = (m.y[i] .- μ) ./ s^2
+    return NE.conditional_loglikelihood(m, i, θ, σ, η), [sum(w), dot(w, A .* (1 .- e))]
+end
+function NE.conditional_loglikelihood_and_population_gradient(m::SaturatingSAEM, i::Integer,
+        θ, σ, η)
+    A, κ, s, e, μ = saturating_parts(m, i, θ, σ, η)
+    r = m.y[i] .- μ
+    w = r ./ s^2
+    return NE.conditional_loglikelihood(m, i, θ, σ, η), [sum(w), dot(w, A .* (1 .- e))],
+        [dot(w, A .* κ .* m.x[i] .* e), sum(abs2, r) / s^2 - length(r)]
+end
+NE.observation_moments(m::SaturatingSAEM, i::Integer, θ, σ, η) =
+    let (_, _, s, _, μ) = saturating_parts(m, i, θ, σ, η)
+        (μ, fill(s^2, length(μ)))
+    end
+function NE.observation_moments_and_jacobians(m::SaturatingSAEM, i::Integer, θ, σ, η)
+    A, _, s, e, μ = saturating_parts(m, i, θ, σ, η)
+    n = length(μ)
+    return μ, fill(s^2, n), hcat(ones(n), A .* (1 .- e)), zeros(n, 2)
+end
+
+@testset "SAEM moves a σ rate along its random-effect ridge" begin
+    rng = Xoshiro(11)
+    x = [sort(6 .* rand(rng, 30)) for _ in 1:40]
+    y = map(x) do xi
+        A = exp(log(2.0) + 0.3randn(rng))
+        (1.0 + 0.3randn(rng)) .+ A .* (1 .- exp.(-0.15 .* xi)) .+ 0.1 .* randn(rng, 30)
+    end
+    model = SaturatingSAEM(x, y)
+    θ0, σ0, ω0 = [0.0, 0.0], [0.0, log(0.5)], [0.0, 0.0]
+    reference = focei(model, θ0, σ0, ω0; options = FOCEOptions(maxeval = 3000))
+    # Holding each φ fixed, the default fit ended at κ 0.24 and A 1.51 against
+    # FOCE(I)'s 0.146 and 1.98, 38 log-likelihood units short; 3000 iterations
+    # reached it (snag `saem-population-8975f340`).
+    for seed in (1, 2)
+        fit = saem(model, θ0, σ0, ω0; rng = Xoshiro(seed))
+        @test abs(fit.sigma[1] - reference.sigma[1]) < 0.1
+        @test abs(fit.theta[2] - reference.theta[2]) < 0.1
+        @test 0 < fit.acceptance.coordinates < 1
+    end
+end
+
+@testset "SAEM statistics follow the numerical step's move of the mu-referenced θ" begin
+    # Holding η, a move δ of the mu-referenced θ moves every φ by D δ. The
+    # transported statistics then give the closed-form step θ + δ and the same Ω.
+    rng = Xoshiro(3)
+    layout = NLMELayout(2, 0, [2])
+    design = [[1.0 0.0; 0.0 1.0], [1.0 0.0; 0.5 1.0], [2.0 0.0; 0.0 1.0]]
+    draws = [randn(rng, 2, 3) for _ in 1:4]
+    mean_phi, second_phi = zeros(2, 3), zeros(2, 2, 3)
+    for (j, Φ) in enumerate(draws)
+        NE._saem_moments!(mean_phi, second_phi, Φ, 1 / j)
+    end
+    θ1, Ω1 = NE._saem_closed_form_mstep(layout, [0.0, 0.0], Matrix(1.0I, 2, 2), [1, 2],
+        design, mean_phi, second_phi, 1e-8, 1:3, nothing)
+    δ = [0.3, -0.2]
+    bank = deepcopy(draws)
+    NE._saem_transport!(mean_phi, second_phi, bank, design, δ)
+    θ2, Ω2 = NE._saem_closed_form_mstep(layout, θ1, Ω1, [1, 2], design, mean_phi,
+        second_phi, 1e-8, 1:3, nothing)
+    @test θ2 ≈ θ1 + δ
+    @test Ω2 ≈ Ω1
+    @test all(bank[j] ≈ draws[j] + reduce(hcat, [X * δ for X in design]) for j in 1:4)
+
+    ragged = RaggedNLMELayout(ntheta=1, nsigma=0, family_sizes=[1],
+        subject_families=[[1], [1, 1], [1, 1, 1]])
+    rdesign = [ones(1, 1), ones(2, 1), ones(3, 1)]
+    rdraws = [[randn(rng, n) for n in 1:3] for _ in 1:4]
+    rmean = [zeros(n) for n in 1:3]
+    rsecond = [zeros(n, n) for n in 1:3]
+    for (j, Φ) in enumerate(rdraws)
+        NE._ragged_moments!(rmean, rsecond, Φ, 1 / j)
+    end
+    rΩ = [ones(1, 1)]
+    θr1, Ωr1 = NE._saem_closed_form_mstep(ragged, [0.0], rΩ, [1], rdesign, rmean,
+        rsecond, 1e-8, 1:3, nothing)
+    rbank = deepcopy(rdraws)
+    NE._saem_transport!(rmean, rsecond, rbank, rdesign, [0.4])
+    θr2, Ωr2 = NE._saem_closed_form_mstep(ragged, θr1, Ωr1, [1], rdesign, rmean,
+        rsecond, 1e-8, 1:3, nothing)
+    @test θr2 ≈ θr1 .+ 0.4
+    @test Ωr2[1] ≈ Ωr1[1]
+    @test all(rbank[j][k] ≈ rdraws[j][k] .+ 0.4 for j in 1:4, k in 1:3)
+end
+
+# η[1] is pinned to within 0.001 of its observation and η[2] has no likelihood,
+# so its posterior is its N(0, 1) prior. The joint random walk's one scale
+# follows η[1]; the coordinate sweep gives η[2] its own.
+struct TwoWidthsSAEM
+    y::Vector{Float64}
+end
+NE.nsubjects(m::TwoWidthsSAEM) = length(m.y)
+NE.nlme_layout(::TwoWidthsSAEM) = NLMELayout(0, 0, [1, 1])
+NE.conditional_loglikelihood(m::TwoWidthsSAEM, i::Integer, θ, σ, η) =
+    -0.5e6 * (m.y[i] - η[1])^2
+
+@testset "SAEM MH coordinate sweep follows each coordinate's width" begin
+    rng = Xoshiro(5)
+    model = TwoWidthsSAEM(randn(rng, 20))
+    prior = NE.re_prior(model, [0.0, 0.0])
+    ids = collect(1:20)
+    H = vcat(model.y', zeros(1, 20))
+    ℓ = NE.conditional_loglikelihoods(model, ids, Float64[], Float64[], H)
+    logscale, logscales = log(0.5), fill(log(0.5), 2)
+    second = Float64[]
+    for sweep in 1:1200
+        _, ar, ac, apc = NE._saem_mh_round!(rng, model, ids, Float64[], Float64[],
+            prior, H, ℓ, exp(logscale), exp.(logscales))
+        @test apc == [20, 20]
+        if sweep <= 400
+            logscale = NE._saem_adapt_mh_scales!(logscale, logscales, ar, 20, ac, apc, sweep)
+        else
+            append!(second, H[2, :])
+        end
+    end
+    @test exp(logscales[2]) > 100 * exp(logscales[1])
+    @test exp(logscale) < 0.01
+    @test 0.8 < var(second) < 1.25
 end

@@ -255,6 +255,22 @@ NE.population_prior_provenance(::RaggedMAPFixture) = "synthetic Normal(0, 0.5) c
     @test all(M -> isposdef(Symmetric(M)), fitted.omega_matrix)
     @test 0 <= fitted.acceptance.prior <= 1
     @test 0 <= fitted.acceptance.random_walk <= 1
+    @test 0 < fitted.acceptance.coordinates < 1
+
+    # The coordinate sweep proposes a family's coordinate only to subjects that
+    # have the family, moving it in each of their instances.
+    sparse_layout = RaggedNLMELayout(ntheta=0, nsigma=0, family_sizes=[1, 2],
+        subject_families=[[1], [1, 2, 2], [1, 2]])
+    sparse = RaggedGaussianFixture(sparse_layout, [[0.2], [0.1, 0.4, -0.3, 0.2, 0.5], [-0.2, 0.3, 0.1]])
+    sparse_prior = RaggedNormalREPrior(sparse_layout, zeros(nomega(sparse_layout)))
+    Hs = [zeros(neta(sparse_layout, i)) for i in 1:3]
+    ℓs = NE.conditional_loglikelihoods(sparse, 1:3, Float64[], Float64[], Hs)
+    accepted, proposed = NE._saem_mh_component_sweep!(Xoshiro(2), sparse, [1, 2, 3],
+        Float64[], Float64[], sparse_prior, Hs, ℓs, [0.5, 0.5, 0.5])
+    @test proposed == [3, 2, 2]
+    @test all(0 .<= accepted .<= proposed) && sum(accepted) > 0
+    @test length.(Hs) == [1, 5, 3]
+    @test ℓs ≈ NE.conditional_loglikelihoods(sparse, 1:3, Float64[], Float64[], Hs)
 
     mu_layout = RaggedNLMELayout(ntheta=1, nsigma=0, family_sizes=[1],
         subject_families=[[1], [1, 1], [1, 1, 1]])

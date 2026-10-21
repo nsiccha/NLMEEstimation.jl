@@ -140,7 +140,7 @@ function _ragged_sample_prior(rng, prior::RaggedNormalREPrior, i)
 end
 
 function _saem_mh_round!(rng, model, subjects, θ, σ, prior::RaggedNormalREPrior,
-        H::AbstractVector{<:AbstractVector}, ℓ, scale)
+        H::AbstractVector{<:AbstractVector}, ℓ, scale, component_scales)
     n = length(subjects)
     proposal = [_ragged_sample_prior(rng, prior, i) for i in subjects]
     proposed_ℓ = _proposal_loglikelihoods(model, subjects, θ, σ, proposal)
@@ -169,7 +169,52 @@ function _saem_mh_round!(rng, model, subjects, θ, σ, prior::RaggedNormalREPrio
             rw_accepted += 1
         end
     end
-    return prior_accepted, rw_accepted
+    component_accepted, component_proposed = _saem_mh_component_sweep!(rng, model,
+        subjects, θ, σ, prior, H, ℓ, component_scales)
+    return prior_accepted, rw_accepted, component_accepted, component_proposed
+end
+
+# The coordinate sweep of a ragged layout has one scale per family coordinate,
+# shared by every instance of the family (coordinate `r` of family `f` is entry
+# `sum(family_sizes[1:f-1]) + r`). Each proposal moves that coordinate in all of
+# a subject's instances of the family, among the subjects that have one.
+function _saem_mh_component_sweep!(rng, model, subjects, θ, σ,
+        prior::RaggedNormalREPrior, H::AbstractVector{<:AbstractVector}, ℓ, scales)
+    layout = prior.layout
+    offsets = cumsum(vcat(0, layout.family_sizes[1:end-1]))
+    accepted = zeros(Int, sum(layout.family_sizes))
+    proposed = zeros(Int, length(accepted))
+    for (f, width) in enumerate(layout.family_sizes)
+        sd = sqrt.(vec(sum(abs2, Matrix(prior.cholesky_factors[f]); dims = 2)))
+        members = [k for (k, i) in enumerate(subjects) if f in layout.subject_families[i]]
+        isempty(members) && continue
+        for r in 1:width
+            c = offsets[f] + r
+            proposal = map(members) do k
+                η = copy(H[k])
+                for (family, block) in _ragged_subject_blocks(layout, subjects[k])
+                    family == f && (η[block[r]] += scales[c] * sd[r] * randn(rng))
+                end
+                η
+            end
+            proposed_ℓ = _proposal_loglikelihoods(model, subjects[members], θ, σ, proposal)
+            length(proposed_ℓ) == length(members) &&
+                all(x -> !isnan(x) && x != Inf, proposed_ℓ) || throw(DomainError(proposed_ℓ,
+                    "coordinate random-walk MH proposal returned invalid densities"))
+            for (j, k) in enumerate(members)
+                i = subjects[k]
+                ratio = proposed_ℓ[j] - ℓ[k] + re_logprior(prior, i, proposal[j]) -
+                    re_logprior(prior, i, H[k])
+                if log(rand(rng)) < ratio
+                    H[k] = proposal[j]
+                    ℓ[k] = proposed_ℓ[j]
+                    accepted[c] += 1
+                end
+            end
+            proposed[c] += length(members)
+        end
+    end
+    return accepted, proposed
 end
 
 # The ragged form of `_saem_gaussian_mstep`, which returns its iterate after 100
@@ -321,7 +366,8 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
     mean_phi = [zeros(length(h)) for h in H]
     second_phi = [zeros(length(h), length(h)) for h in H]
     logscale = log(options.rw_scale)
-    nprior = nrw = sweeps = 0
+    component_logscales = fill(log(options.rw_scale), sum(layout.family_sizes))
+    nprior = nrw = ncw = ncw_proposed = sweeps = 0
     phases = _saem_phases(node, kernel, options, length(ids))
     completed = 0
     interrupted = false
@@ -338,20 +384,23 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
             loglikelihood = sum(ℓ)
         end
         for _ in 1:options.mh_rounds
-            ap, ar = _saem_mh_round!(rng, model, ids, θ, σ, prior, H, ℓ, exp(logscale))
+            ap, ar, ac, apc = _saem_mh_round!(rng, model, ids, θ, σ, prior, H, ℓ,
+                exp(logscale), exp.(component_logscales))
             nprior += ap
             nrw += ar
+            ncw += sum(ac)
+            ncw_proposed += sum(apc)
             sweeps += 1
             if sweeps <= options.adapt_iterations
-                logscale = clamp(logscale + (ar / length(ids) - 0.3) / sqrt(sweeps),
-                    log(1e-3), log(1e2))
+                logscale = _saem_adapt_mh_scales!(logscale, component_logscales, ar,
+                    length(ids), ac, apc, sweeps)
             end
         end
         if iteration <= options.mcmc_burnin
             if phase !== nothing
                 update_progress!(phase, iteration)
                 _saem_report!(phase, nothing, nothing, nothing, _saem_kernel_stats(kernel,
-                    nprior, nrw, sweeps * length(ids), 0, nothing))
+                    nprior, nrw, ncw, ncw_proposed, sweeps * length(ids), 0, nothing))
             end
             continue
         end
@@ -362,18 +411,19 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
         _saem_record!(numeric_mode, bank, weights, Φ, γ)
         if k % options.mstep_interval == 0 || k == options.iterations
             phase === nothing || _saem_report!(phase, "M-step", γ, loglikelihood,
-                _saem_kernel_stats(kernel, nprior, nrw, sweeps * length(ids), 0, nothing))
+                _saem_kernel_stats(kernel, nprior, nrw, ncw, ncw_proposed,
+                    sweeps * length(ids), 0, nothing))
             θ_before = copy(θ)
-            θ, σ, ω = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
+            θ, σ, ω, θ_kept = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
                 indices, design, free, bank, weights, mean_phi, second_phi,
                 options, γ, constraints, map_objective)
-            _saem_recenter!(H, θ_before, θ, indices, design)
+            _saem_recenter!(H, θ_before, θ_kept, indices, design)
         end
         completed = k
         if phase !== nothing
             update_progress!(phase, k)
             _saem_report!(phase, nothing, γ, loglikelihood, _saem_kernel_stats(kernel,
-                nprior, nrw, sweeps * length(ids), 0, nothing))
+                nprior, nrw, ncw, ncw_proposed, sweeps * length(ids), 0, nothing))
         end
     end
     _saem_finish_phase!(phases.burnin)
@@ -384,7 +434,8 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
     final_lp isa Real && isfinite(final_lp) || throw(DomainError(final_lp,
         "SAEM final population log prior must be finite"))
     return RaggedSAEMResult(ids, θ, σ, ω, omega_matrix(layout, ω), H,
-        (prior=nprior / denom, random_walk=nrw / denom), exp(logscale),
+        (prior=nprior / denom, random_walk=nrw / denom, coordinates=ncw / ncw_proposed),
+        exp(logscale),
         :standard_mh, _saem_mode_name(numeric_mode), map_objective ? :MAP : :ML,
         final_lp, map_objective ? population_prior_provenance(model) : nothing,
         completed, interrupted)

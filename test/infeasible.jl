@@ -102,27 +102,31 @@ end
     @test NE._proposal_loglikelihoods(joint, 1:4, θ, σ, H) == ℓ
 end
 
+# The M-step's search starts from a curvature estimate and no longer overshoots
+# from σ0 to below log(0.1); a bound just under the fitted residual SD (about
+# 0.3, ragged 0.27) keeps its trial points crossing it.
 @testset "infeasible trial points: SAEM retraces the -Inf twin" begin
     θ0, σ0 = [1.0, 0.5], [log(0.5)]
     ω0 = omega_parameters(GROWTH_LAYOUT, [0.8 0.0; 0.0 0.3])
+    min_sd = 0.28
     for mode in (:online, :mixture)
         fit, reference, hits = bounded_fits(
-            throws -> Bounded(growth_model(); throws), θ0, σ0, ω0; numeric_mstep = mode)
+            throws -> Bounded(growth_model(); throws, min_sd), θ0, σ0, ω0; numeric_mstep = mode)
         @test all(>(0), hits)
         @test fit.objective == :ML
         same_fit(fit, reference)
-        @test fit.sigma[1] > log(0.1)
+        @test fit.sigma[1] > log(min_sd)
     end
 
     fit, reference, hits = bounded_fits(
-        throws -> Bounded(growth_model(); throws, prior_sd = 2.0), θ0, σ0, ω0)
+        throws -> Bounded(growth_model(); throws, min_sd, prior_sd = 2.0), θ0, σ0, ω0)
     @test all(>(0), hits)
     @test fit.objective == :MAP
     same_fit(fit, reference)
 
     # Batched evaluation: the whole batch throws, inside Enzyme for the M-step.
     fit, reference, hits = bounded_fits(
-        throws -> JointView(Bounded(growth_model(); throws)), θ0, σ0, ω0)
+        throws -> JointView(Bounded(growth_model(); throws, min_sd)), θ0, σ0, ω0)
     @test all(>(0), hits)
     same_fit(fit, reference)
 
@@ -137,7 +141,8 @@ end
     θ0, σ0, ω0 = [2.0], [log(0.5)], [log(0.8), log(0.4)]
     for mode in (:online, :mixture)
         fit, reference, hits = bounded_fits(
-            throws -> Bounded(occasions_model(); throws), θ0, σ0, ω0; numeric_mstep = mode)
+            throws -> Bounded(occasions_model(); throws, min_sd = 0.25), θ0, σ0, ω0;
+            numeric_mstep = mode)
         @test all(>(0), hits)
         same_fit(fit, reference)
     end
