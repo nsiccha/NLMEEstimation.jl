@@ -121,7 +121,7 @@ actual length of `subjects[k]`, and Hessian blocks have matching dimensions.
 `saem` with `StandardSAEMMH()` returns `RaggedSAEMResult`; its `eta[k]` is the
 compact final chain state and its `omega_matrix[f]` is the pooled covariance
 for family `f`. A model's optional `population_logprior` is included once in
-the joint MAP M-step and recorded by `objective` and `population_logprior`.
+the MAP M-step and recorded by `objective` and `population_logprior`.
 Mu-referencing designs have `neta(layout, i)` rows. When
 `parameter_names` is not supplied by the model, `eta[i]` contains the default
 names for subject `i`; a model can supply its own subject and nested-unit labels.
@@ -231,14 +231,15 @@ decisions per subject. The random-walk scale adapts for a finite initial period.
 After an optional MCMC burn-in, stochastic approximation averages latent-effect
 statistics with unit steps during exploration and decreasing steps thereafter.
 
-When a population prior is present, SAEM includes it once in a joint numerical
-M-step over θ, σ, and ω. The step combines the conditional objective, running
-Gaussian random-effect statistics, and the population prior, so priors on
-mu-referenced fixed effects and covariance coordinates also affect the estimate.
-The `:online` numerical mode blends the joint update with the SA gain; the
-`:mixture` mode optimizes the weighted retained-draw objective. The reported
-point and final subject states are estimates, not samples from a population
-posterior.
+When a population prior is present, SAEM includes it once in its M-step, which
+keeps the two blocks of the maximum-likelihood step described below. The
+mu-referenced fixed effects and Ω move from their closed-form update to the
+maximizer of the running Gaussian random-effect statistics plus the prior, a
+search that evaluates only the prior; the remaining θ and σ take the numerical
+update with the prior added. Priors on mu-referenced fixed effects and
+covariance coordinates therefore affect the estimate, and a prior adds no model
+evaluations to the step. The reported point and final subject states are
+estimates, not samples from a population posterior.
 
 `saem_fit.eta` contains the final Markov-chain states, not EBEs; call
 `empirical_bayes` as above when subject posterior modes are needed for app

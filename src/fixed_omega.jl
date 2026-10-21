@@ -409,24 +409,6 @@ function _partial_family_admissible(fam::_FixedFamily, segment, k, floor)
     return all(isfinite, R) && eigmin(Symmetric(R)) >= floor
 end
 
-_floor_omega(layout, ::Nothing, ω, floor) = _saem_floor_omega(layout, ω, floor)
-function _floor_omega(layout, c::_OmegaConstraints, ω, floor)
-    all(isfinite, ω) || throw(DomainError(ω, "SAEM MAP M-step starts with non-finite covariance"))
-    ω = Vector{Float64}(ω)
-    for (f, fam) in enumerate(c.families)
-        k = c.sizes[f]
-        r = c.ranges[f]
-        if fam === nothing
-            block = NLMELayout(0, 0, [k])
-            E = eigen(Symmetric(omega_matrix(block, view(ω, r))))
-            ω[r] = omega_parameters(block, E.vectors * Diagonal(max.(E.values, floor)) * E.vectors')
-        elseif !fam.fully_fixed
-            ω[r] = _floor_partial_family(fam, view(ω, r), k, floor)
-        end
-    end
-    return ω
-end
-
 function _floor_partial_family(fam::_FixedFamily, segment, k, floor)
     s, m = _scale_coordinates(segment, k)
     for j in 1:k
@@ -466,26 +448,37 @@ end
 # of the objective that decides the Armijo test before the gradient is taken.
 # A trial point whose evaluation is non-finite or infeasible
 # (`_InfeasibleEvaluation`) halves the step; at `x0` either is an error.
+# `inverse_hessian`, if given, is a positive-definite initial (and reset)
+# inverse curvature in place of the identity. Near the optimum a full step can
+# be predicted to gain less than f resolves; as in the EBE solver (`_accepts`),
+# such a step is judged by its prediction and f only rejects a drop beyond that
+# resolution, instead of halving to the minimum step through rounding noise.
 function _bfgs_ascent(objective, x0, maxiter, admissible; screen = nothing,
-        gtol = 1.0e-6, what = "SAEM MAP M-step")
+        gtol = 1.0e-6, inverse_hessian = nothing, what = "SAEM MAP M-step")
     x = copy(x0)
     isempty(x) && return x
     value, gradient = objective(x)
     isfinite(value) && all(isfinite, gradient) || throw(DomainError(value,
         "$what has non-finite objective or gradient"))
-    B = Matrix{Float64}(I, length(x), length(x))
+    B0 = inverse_hessian === nothing ? Matrix{Float64}(I, length(x), length(x)) :
+        Matrix{Float64}(inverse_hessian)
+    B = copy(B0)
     for _ in 1:maxiter
         maximum(abs, gradient) < gtol && break
         direction = B * gradient
         if dot(direction, gradient) <= 0
-            direction = copy(gradient)
-            B = Matrix{Float64}(I, length(x), length(x))
+            direction = B0 * gradient
+            B = copy(B0)
         end
         step = 1.0
         accepted = false
         while step >= 1.0e-8
             candidate = x + step * direction
-            threshold = value + 1.0e-4 * step * dot(gradient, direction)
+            predicted = step * dot(gradient, direction)
+            threshold = value + 1.0e-4 * predicted
+            if step == 1 && predicted <= _resolution(value)
+                threshold = min(threshold, value - _resolution(value))
+            end
             screened = admissible(candidate) &&
                 (screen === nothing || _armijo(_feasible(screen, candidate), threshold))
             trial = screened ? _feasible(objective, candidate) : nothing

@@ -195,6 +195,24 @@ end
     @test_throws ArgumentError NE._saem_check_options(SAEMOptions(numeric_mstep=:other))
 end
 
+@testset "SAEM M-step search reaches its optimum through rounding" begin
+    # f is a non-quadratic optimum under a large constant, plus a few ulps of
+    # rounding noise in either direction, as a long sum has. Near the optimum a
+    # full step's predicted gain is below that noise; it is judged by its
+    # prediction. Halving it until the noise happened to pass took 276 screens
+    # and stopped at a gradient of 4.8e-8.
+    M = [1.0 0.4; -0.3 0.8]
+    a = [0.4, -1.2]
+    gradient(x) = -M' * sinh.(M * (x - a))
+    noise(x) = eps(1e11) * (Int(reinterpret(UInt64, x[1] + x[2]) % 9) - 4)
+    objective(x) = (1e11 - sum(d -> cosh(d) - 1, M * (x - a)) + noise(x), gradient(x))
+    screens = Ref(0)
+    screen(x) = (screens[] += 1; first(objective(x)))
+    x = NE._bfgs_ascent(objective, [3.0, -2.0], 100, _ -> true; screen, gtol = 1e-9)
+    @test maximum(abs, gradient(x)) < 1e-9
+    @test screens[] < 40
+end
+
 @testset "SAEM Hessian warmup metric" begin
     model = LinearSAEM([[1.0, 2.0]])
     prior = re_prior(model, [log(0.5)])

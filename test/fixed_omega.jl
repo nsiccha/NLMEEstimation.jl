@@ -258,8 +258,8 @@ end
     @test isposdef(Symmetric(fit.omega_matrix[2:3, 2:3]))
 end
 
-# The same model with a population prior on θ and ω, so SAEM takes the joint
-# MAP M-step.
+# The same model with a population prior on θ and ω, so SAEM takes the MAP
+# M-step.
 struct ChannelGaussianMAP
     inner::ChannelGaussian
 end
@@ -340,6 +340,16 @@ NE.population_logprior_and_gradient(m::RaggedFixedFixture, θ, σ, ω) =
     fit = saem(model, Float64[], Float64[], apply_fixed_omega(model, zeros(2)); subjects = [1, 2],
         rng = Xoshiro(1), options = SAEMOptions(iterations = 10, burnin = 5, mcmc_burnin = 2))
     @test fit.omega_matrix[2] ≈ fill(0.5, 1, 1)
+    # An estimated family with no instances is not identified by ML; MAP
+    # estimates it from the prior alone, at that prior's mode ω = 0.
+    estimated(prior) = RaggedFixedFixture(lone, [[0.1], [-0.2], [0.3, 0.4]], nothing, prior)
+    @test_throws ArgumentError saem(estimated(false), Float64[], Float64[], [0.0, -0.5];
+        subjects = [1, 2], rng = Xoshiro(1),
+        options = SAEMOptions(iterations = 10, burnin = 5, mcmc_burnin = 2))
+    fit = saem(estimated(true), Float64[], Float64[], [0.0, -0.5]; subjects = [1, 2],
+        rng = Xoshiro(1), options = SAEMOptions(iterations = 10, burnin = 5, mcmc_burnin = 2))
+    @test fit.objective == :MAP
+    @test fit.omega[2] ≈ 0 atol = 1e-6
 end
 
 @testset "fixed Ω: covariance step" begin
