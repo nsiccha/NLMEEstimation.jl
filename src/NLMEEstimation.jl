@@ -27,6 +27,12 @@ Estimators:
 [`marginal_loglikelihood`](@ref) its likelihood, OFV, AIC and BIC (for SAEM, by
 importance sampling or adaptive Gauss–Hermite quadrature).
 [`residual_diagnostics`](@ref) gives PRED, IPRED, IWRES, CWRES and NPDE.
+
+Each of these functions takes `progress = nothing`: a Treebars node under which it
+builds its own labelled progress node, or a backend symbol such as `:term` for a new
+root. With `nothing` no node is created. `Treebars.request_interrupt!` on that node
+stops [`saem`](@ref) and [`focei`](@ref) early with their estimate so far; the other
+functions raise `Treebars.ProgressInterrupted`.
 """
 module NLMEEstimation
 
@@ -38,6 +44,9 @@ import NLopt
 import LogDensityProblems as LDP
 import WarmupHMC
 using Serialization: deserialize
+using Treebars: Fraction, ProgressInterrupted, finalize_progress!, interrupt_requested,
+    is_running, prepare_progress!, short_string, start_progress!, throw_if_interrupted,
+    update_progress!, with_progress
 
 export NLMELayout, RaggedNLMELayout, neta, nomega, omega_cholesky, omega_matrix, omega_parameters,
     FixedOmega, fixed_omega, apply_fixed_omega

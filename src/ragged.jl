@@ -76,7 +76,7 @@ function _prior_factor(prior::RaggedNormalREPrior{T}, i) where {T}
 end
 
 function _empirical_bayes(layout::RaggedNLMELayout, model, θ, σ, ω, subjects, η0,
-        method::EBEMethod, opt::EBEOptions, require_convergence)
+        method::EBEMethod, opt::EBEOptions, require_convergence, progress)
     length(layout.subject_families) == nsubjects(model) || throw(DimensionMismatch(
         "ragged layout has $(length(layout.subject_families)) subjects; model has $(nsubjects(model))"))
     _check_length("θ", θ, layout.ntheta)
@@ -86,7 +86,8 @@ function _empirical_bayes(layout::RaggedNLMELayout, model, θ, σ, ω, subjects,
     !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= nsubjects(model), ids) ||
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
     H = _ragged_start(η0, layout, ids)
-    result = _ebe_lockstep(method, model, ids, θ, σ, RaggedNormalREPrior(layout, ω), H, opt)
+    result = _ebe_lockstep(method, model, ids, θ, σ, RaggedNormalREPrior(layout, ω), H, opt,
+        progress)
     bad = ids[.!result.converged]
     require_convergence && !isempty(bad) && throw(EBEConvergenceError(bad, result))
     return result
@@ -284,7 +285,7 @@ function _saem_floor_omega(layout::RaggedNLMELayout, ω, floor)
 end
 
 function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
-        options::SAEMOptions, kernel::StandardSAEMMH)
+        options::SAEMOptions, kernel::StandardSAEMMH, node)
     _saem_check_options(options)
     length(layout.subject_families) == nsubjects(model) || throw(DimensionMismatch(
         "ragged layout has $(length(layout.subject_families)) subjects; model has $(nsubjects(model))"))
@@ -322,10 +323,20 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
     second_phi = [zeros(length(h), length(h)) for h in H]
     logscale = log(options.rw_scale)
     nprior = nrw = sweeps = 0
+    phases = _saem_phases(node, kernel, options, length(ids))
+    completed = 0
+    interrupted = false
+    loglikelihood = nothing
     for iteration in 1:(options.mcmc_burnin + options.iterations)
+        if interrupt_requested(node)
+            interrupted = true
+            break
+        end
+        phase = _saem_phase!(phases, iteration, options.mcmc_burnin)
         if iteration > options.mcmc_burnin
             prior = RaggedNormalREPrior(layout, ω)
             ℓ = _saem_current_loglikelihoods(model, ids, θ, σ, H)
+            loglikelihood = sum(ℓ)
         end
         for _ in 1:options.mh_rounds
             ap, ar = _saem_mh_round!(rng, model, ids, θ, σ, prior, H, ℓ, exp(logscale))
@@ -337,13 +348,22 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
                     log(1e-3), log(1e2))
             end
         end
-        iteration <= options.mcmc_burnin && continue
+        if iteration <= options.mcmc_burnin
+            if phase !== nothing
+                update_progress!(phase, iteration)
+                _saem_report!(phase, nothing, nothing, nothing, _saem_kernel_stats(kernel,
+                    nprior, nrw, sweeps * length(ids), 0, nothing))
+            end
+            continue
+        end
         k = iteration - options.mcmc_burnin
         γ = k <= options.burnin ? 1.0 : (k - options.burnin)^(-options.step_exponent)
         Φ = _saem_phi(H, θ, indices, design)
         _ragged_moments!(mean_phi, second_phi, Φ, γ)
         _saem_record!(numeric_mode, bank, weights, Φ, γ)
         if k % options.mstep_interval == 0 || k == options.iterations
+            phase === nothing || _saem_report!(phase, "M-step", γ, loglikelihood,
+                _saem_kernel_stats(kernel, nprior, nrw, sweeps * length(ids), 0, nothing))
             θ_before = copy(θ)
             if map_objective
                 θ, σ, ω = _saem_map_mstep(model, ids, layout, θ, σ, ω,
@@ -359,7 +379,16 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
             end
             _saem_recenter!(H, θ_before, θ, indices, design)
         end
+        completed = k
+        if phase !== nothing
+            update_progress!(phase, k)
+            _saem_report!(phase, nothing, γ, loglikelihood, _saem_kernel_stats(kernel,
+                nprior, nrw, sweeps * length(ids), 0, nothing))
+        end
     end
+    _saem_finish_phase!(phases.burnin)
+    _saem_finish_phase!(phases.sa)
+    interrupted && update_progress!(node, _saem_stop_message(completed, options))
     denom = sweeps * length(ids)
     final_lp = map_objective ? population_logprior(model, θ, σ, ω) : 0.0
     final_lp isa Real && isfinite(final_lp) || throw(DomainError(final_lp,
@@ -367,11 +396,12 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
     return RaggedSAEMResult(ids, θ, σ, ω, omega_matrix(layout, ω), H,
         (prior=nprior / denom, random_walk=nrw / denom), exp(logscale),
         :standard_mh, _saem_mode_name(numeric_mode), map_objective ? :MAP : :ML,
-        final_lp, map_objective ? population_prior_provenance(model) : nothing)
+        final_lp, map_objective ? population_prior_provenance(model) : nothing,
+        completed, interrupted)
 end
 
 _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
-    options::SAEMOptions, kernel::AbstractSAEMKernel) = throw(ArgumentError(
+    options::SAEMOptions, kernel::AbstractSAEMKernel, node) = throw(ArgumentError(
     "ragged SAEM currently supports StandardSAEMMH; got $(typeof(kernel))"))
 
 function _check_ragged_protocol(model, layout::RaggedNLMELayout, θ, σ, ω;

@@ -287,6 +287,10 @@ For MALA, `mala_stepsizes` and `mala_acceptance` hold per-subject final values;
 the resolved numerical M-step mode (`:online` or `:mixture`). `objective` is
 `:ML` without a model population prior and `:MAP` otherwise. The result is a
 population point estimate, not a draw from a population posterior.
+`iterations` counts the completed SA iterations; `interrupted` is `true` when a
+Treebars interrupt request (see `progress` in [`saem`](@ref)) stopped the run before
+`SAEMOptions.iterations`, so the estimate is that of the last completed iteration.
+The acceptance and MALA fields are `NaN` when no kernel sweep ran.
 """
 struct SAEMResult{T, A, R, P}
     subjects::Vector{Int}
@@ -306,6 +310,8 @@ struct SAEMResult{T, A, R, P}
     objective::Symbol
     population_logprior::T
     prior_provenance::P
+    iterations::Int
+    interrupted::Bool
 end
 
 """
@@ -314,7 +320,8 @@ end
 SAEM estimate for a [`RaggedNLMELayout`](@ref). `eta[k]` is subject
 `subjects[k]`'s compact latent vector. `omega_matrix[f]` is the shared
 covariance of random-effect family `f`. `objective` is `:MAP` when the model
-supplies a population prior and `:ML` otherwise.
+supplies a population prior and `:ML` otherwise. `iterations` and `interrupted`
+are as in [`SAEMResult`](@ref).
 """
 struct RaggedSAEMResult{T, P}
     subjects::Vector{Int}
@@ -330,6 +337,8 @@ struct RaggedSAEMResult{T, P}
     objective::Symbol
     population_logprior::T
     prior_provenance::P
+    iterations::Int
+    interrupted::Bool
 end
 
 struct _SAEMSubjectTarget{M, P}
@@ -374,9 +383,13 @@ function _saem_check_nuts(o::WarmupHMCNUTS)
     return nothing
 end
 
+# Each subject's WarmupHMC run reports under a transient child of `progress`, the
+# warmup phase. An interrupt request ends the warmup early and returns `nothing`.
 function _saem_nuts_warmup!(rng, kernel::WarmupHMCNUTS,
-        root, model, ids, θ, σ, prior, H)
-    payloads = [begin
+        root, model, ids, θ, σ, prior, H, progress = nothing)
+    start_progress!(progress)
+    payloads = NamedTuple[]
+    for (k, i) in enumerate(ids)
         target = _saem_target(model, i, θ, σ, prior)
         η = copy(view(H, :, k))
         Σ = _saem_hessian_metric(model, i, θ, σ, prior, η;
@@ -384,19 +397,27 @@ function _saem_nuts_warmup!(rng, kernel::WarmupHMCNUTS,
             diagonal=kernel.metric == :diagonal)
         warm_dir = joinpath(root, "warm_$(k)")
         subject_rng = Xoshiro(rand(rng, UInt64))
-        WarmupHMC.adaptive_warmup_mcmc(subject_rng, target;
-            init=(position=η, squared_scale=Σ),
-            checkpoint_dir=warm_dir,
-            n_draws=kernel.warmup_draws,
-            n_evaluations=kernel.warmup_evaluations,
-            recording_target=kernel.warmup_draws,
-            stepsize_adaptation_limit=kernel.stepsize_adaptation_limit,
-            max_tree_depth=kernel.max_tree_depth,
-            target_acceptance_rate=kernel.target_acceptance_rate,
-            nonlinear_adapt=false,
-            monitor_ess=false)
-        deserialize(joinpath(warm_dir, "cp_latest.jls"))::NamedTuple
-    end for (k, i) in enumerate(ids)]
+        with_progress(progress; description = "subject $i", transient = true) do subject
+            WarmupHMC.adaptive_warmup_mcmc(subject_rng, target;
+                init=(position=η, squared_scale=Σ),
+                checkpoint_dir=warm_dir,
+                n_draws=kernel.warmup_draws,
+                n_evaluations=kernel.warmup_evaluations,
+                recording_target=kernel.warmup_draws,
+                stepsize_adaptation_limit=kernel.stepsize_adaptation_limit,
+                max_tree_depth=kernel.max_tree_depth,
+                target_acceptance_rate=kernel.target_acceptance_rate,
+                nonlinear_adapt=false,
+                monitor_ess=false,
+                progress=subject)
+        end
+        # WarmupHMC stops at its next boundary on the same request, so this
+        # subject's checkpoint may be incomplete.
+        interrupt_requested(progress) && (finalize_progress!(progress); return nothing)
+        push!(payloads, deserialize(joinpath(warm_dir, "cp_latest.jls"))::NamedTuple)
+        progress === nothing || update_progress!(progress, k)
+    end
+    finalize_progress!(progress)
     states = [WarmupHMC.FixedKernelNUTSState(payload; max_tree_depth=kernel.max_tree_depth)
         for payload in payloads]
     return (; payloads, states, kernel.max_tree_depth)
@@ -855,9 +876,66 @@ function (update::_SAEMNumericUpdate)(model, subjects, θ, σ, free, indices,
         indices, design, bank, weights, maxiter, γ)
 end
 
+# Progress phases of an SAEM run under its node, prepared up front so that the
+# whole run shows from the start: the NUTS warmup, the MCMC burn-in and the SA
+# iterations. A phase is `nothing` when the run has none or progress is off.
+function _saem_phases(node, kernel, options, nsubjects)
+    warmup = kernel isa WarmupHMCNUTS ?
+        prepare_progress!(node, nsubjects; description = "NUTS warmup") : nothing
+    burnin = options.mcmc_burnin > 0 ?
+        prepare_progress!(node, options.mcmc_burnin; description = "MCMC burn-in") : nothing
+    sa = prepare_progress!(node, options.iterations; description = "Stochastic approximation")
+    return (; warmup, burnin, sa)
+end
+
+# Start the phase that `iteration` belongs to, finishing the burn-in where the SA
+# iterations begin, and return it.
+function _saem_phase!(phases, iteration, burnin)
+    if iteration == 1 && burnin > 0
+        start_progress!(phases.burnin)
+    elseif iteration == burnin + 1
+        finalize_progress!(phases.burnin)
+        start_progress!(phases.sa)
+    end
+    return iteration <= burnin ? phases.burnin : phases.sa
+end
+
+# Finish whichever phase was running when the iterations ended. Phases never
+# reached (after an interrupt) are skipped when the run's node finishes.
+_saem_finish_phase!(::Nothing) = nothing
+_saem_finish_phase!(phase) = is_running(phase) ? finalize_progress!(phase) : nothing
+
+# A phase's running message: the current stage, the SA step size γ, the summed
+# conditional log-density of the chains at the current population estimate,
+# and the kernel's statistics. Absent parts are `nothing`.
+function _saem_report!(phase, stage, γ, loglikelihood, kernel_stats)
+    parts = String[]
+    stage === nothing || push!(parts, stage)
+    γ === nothing || push!(parts, γ == 1 ? "γ = 1 (exploration)" :
+        "γ = $(short_string(γ; sigdigits = 3))")
+    loglikelihood === nothing || push!(parts,
+        "Σ log p(y|η) = $(short_string(loglikelihood; sigdigits = 7))")
+    push!(parts, kernel_stats)
+    update_progress!(phase, join(parts, " · "))
+    return nothing
+end
+
+_saem_kernel_stats(::StandardSAEMMH, nprior, nrw, denom, ndivergent, mala_states) =
+    "acceptance $(short_string(Fraction(nprior / denom))) prior, " *
+    "$(short_string(Fraction(nrw / denom))) random walk"
+_saem_kernel_stats(::WarmupHMCNUTS, nprior, nrw, denom, ndivergent, mala_states) =
+    "$ndivergent divergent transitions"
+_saem_kernel_stats(::DualAveragingMALA, nprior, nrw, denom, ndivergent, mala_states) =
+    "mean MALA step size $(short_string(
+        sum(s -> exp(s.log_stepsize), mala_states) / length(mala_states); sigdigits = 3))"
+
+_saem_stop_message(completed, options) =
+    "stopped by interrupt after $completed of $(options.iterations) SA iterations"
+
 """
     saem(model, θ0, σ0, ω0; rng=Random.default_rng(), subjects=nothing,
-         η0=nothing, options=SAEMOptions(), kernel=StandardSAEMMH()) -> SAEMResult
+         η0=nothing, options=SAEMOptions(), kernel=StandardSAEMMH(),
+         progress=nothing) -> SAEMResult
 
 Estimate population parameters using MCMC stochastic approximation. Subject
 chains persist across iterations. The Gaussian random-effect prior supplies a
@@ -886,17 +964,29 @@ A model rejects a point outside its domain by returning a log density of
 The MH and MALA kernels then reject that subject's proposal alone, and the
 numerical and MAP M-steps halve their line-search step. The point each M-step
 starts from must evaluate finitely.
+
+`progress` is a Treebars node (or a backend symbol such as `:term`) under which a
+`SAEM` node shows the run's phases: `NUTS warmup` (one transient WarmupHMC tree
+per subject), `MCMC burn-in` and `Stochastic approximation`, each counting its
+iterations. The running message gives the stage (`M-step` while it runs), the SA
+step size γ, the chains' summed conditional log-density at the current population
+estimate (MH and NUTS) and the kernel's acceptance, divergences or mean step size.
+`Treebars.request_interrupt!` on that node stops the run at the next iteration
+boundary: `saem` returns the estimate of the last completed iteration with
+`interrupted = true` and `iterations` counting the completed SA iterations.
 """
 function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVector;
         rng::AbstractRNG = Random.default_rng(), subjects = nothing, η0 = nothing,
         options::SAEMOptions = SAEMOptions(),
-        kernel::AbstractSAEMKernel = StandardSAEMMH())
-    return _saem(nlme_layout(model), model, θ0, σ0, ω0, rng, subjects, η0,
-        options, kernel)
+        kernel::AbstractSAEMKernel = StandardSAEMMH(), progress = nothing)
+    return with_progress(progress; description = "SAEM") do node
+        _saem(nlme_layout(model), model, θ0, σ0, ω0, rng, subjects, η0,
+            options, kernel, node)
+    end
 end
 
 function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
-        options, kernel)
+        options, kernel, node)
     _saem_check_options(options)
     kernel isa WarmupHMCNUTS && _saem_check_nuts(kernel)
     kernel isa DualAveragingMALA && _saem_check_mala(kernel)
@@ -943,14 +1033,25 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
     mala_cache = kernel isa DualAveragingMALA ? _saem_mala_cache(H) : nothing
     mala_metrics = kernel isa DualAveragingMALA ?
         _saem_mala_metrics(kernel, model, ids, θ, σ, prior, H) : nothing
+    phases = _saem_phases(node, kernel, options, length(ids))
+    completed = 0
+    interrupted = false
+    loglikelihood = nothing
     try
         nuts = kernel isa WarmupHMCNUTS ? _saem_nuts_warmup!(rng, kernel,
-            root, model, ids, θ, σ, prior, H) : nothing
-        for iteration in 1:(options.mcmc_burnin + options.iterations)
+            root, model, ids, θ, σ, prior, H, phases.warmup) : nothing
+        interrupted = kernel isa WarmupHMCNUTS && nuts === nothing
+        for iteration in 1:(interrupted ? 0 : options.mcmc_burnin + options.iterations)
+            if interrupt_requested(node)
+                interrupted = true
+                break
+            end
+            phase = _saem_phase!(phases, iteration, options.mcmc_burnin)
             if iteration > options.mcmc_burnin
                 prior = re_prior(model, ω)
                 if kernel isa StandardSAEMMH || kernel isa WarmupHMCNUTS
                     ℓ = _saem_current_loglikelihoods(model, ids, θ, σ, H)
+                    loglikelihood = sum(ℓ)
                 end
             end
             for _ in 1:options.mh_rounds
@@ -972,13 +1073,23 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                         log(1.0e-3), log(1.0e2))
                 end
             end
-            iteration <= options.mcmc_burnin && continue
+            if iteration <= options.mcmc_burnin
+                if phase !== nothing
+                    update_progress!(phase, iteration)
+                    _saem_report!(phase, nothing, nothing, nothing, _saem_kernel_stats(kernel,
+                        nprior, nrw, sweeps * length(ids), ndivergent, mala_states))
+                end
+                continue
+            end
             k = iteration - options.mcmc_burnin
             γ = k <= options.burnin ? 1.0 : (k - options.burnin)^(-options.step_exponent)
             Φ = _saem_phi(H, θ, indices, design)
             _saem_moments!(mean_phi, second_phi, Φ, γ)
             _saem_record!(numeric_mode, bank, weights, Φ, γ)
             if k % options.mstep_interval == 0 || k == options.iterations
+                phase === nothing || _saem_report!(phase, "M-step", γ, loglikelihood,
+                    _saem_kernel_stats(kernel, nprior, nrw, sweeps * length(ids),
+                        ndivergent, mala_states))
                 θ_before, σ_before = copy(θ), copy(σ)
                 if map_objective
                     θ, σ, ω = _saem_map_mstep(model, ids, layout, θ, σ, ω,
@@ -1004,7 +1115,16 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                     _saem_nuts_restart!(nuts, H)
                 end
             end
+            completed = k
+            if phase !== nothing
+                update_progress!(phase, k)
+                _saem_report!(phase, nothing, γ, loglikelihood, _saem_kernel_stats(kernel,
+                    nprior, nrw, sweeps * length(ids), ndivergent, mala_states))
+            end
         end
+        _saem_finish_phase!(phases.burnin)
+        _saem_finish_phase!(phases.sa)
+        interrupted && update_progress!(node, _saem_stop_message(completed, options))
     finally
         root === nothing || _saem_remove_nuts_tempdir(root)
     end
@@ -1024,7 +1144,8 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
         is_mala ? [s.accepted / s.count for s in mala_states] : missing,
         is_mala ? first(mala_states).count : 0,
         _saem_mode_name(numeric_mode), map_objective ? :MAP : :ML,
-        final_lp, map_objective ? population_prior_provenance(model) : nothing)
+        final_lp, map_objective ? population_prior_provenance(model) : nothing,
+        completed, interrupted)
 end
 
 function _saem_remove_nuts_tempdir(root::AbstractString)

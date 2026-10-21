@@ -68,10 +68,11 @@ end
 _marginal_subjects(prepared::_PreparedPoints) = prepared.subjects
 
 function _prepare_marginal(approximation::Union{ImportanceSampling, AdaptiveGaussHermite},
-        model, θ, σ, ω, subjects, η0, rng)
+        model, θ, σ, ω, subjects, η0, rng, progress = nothing)
     _check_approximation(approximation)
     layout = nlme_layout(model)
-    ebe = empirical_bayes(model, θ, σ, ω; subjects, η0)
+    ebe = _run_empirical_bayes(model, θ, σ, ω, subjects, η0, default_ebe_method(model),
+        EBEOptions(), true, progress, false)
     ids = collect(Int, ebe.subjects)
     indices, design = _saem_mu_trait(model, ids, layout)
     modes = [Vector{Float64}(_eta_column(ebe.modes, k)) for k in eachindex(ids)]
@@ -187,8 +188,8 @@ _subject_logprior(prior::RaggedNormalREPrior, i, η) = re_logprior(prior, i, η)
 # only mu-referenced θ or ω reuse them. Keys within one coordinate of the
 # reference are cached: those are the ones a covariance step revisits. A point
 # outside the model's domain (its evaluation throws `_InfeasibleEvaluation`) has
-# zero density.
-function _conditional_point_values!(prepared::_PreparedPoints, θ, σ)
+# zero density. Under `progress` a transient counter tracks the batched calls.
+function _conditional_point_values!(prepared::_PreparedPoints, θ, σ, progress = nothing)
     nonmu = setdiff(1:prepared.layout.ntheta, prepared.indices)
     key = Float64.(vcat(θ[nonmu], σ))
     cached = get(prepared.cache, key, nothing)
@@ -196,28 +197,36 @@ function _conditional_point_values!(prepared::_PreparedPoints, θ, σ)
     θμ = θ[prepared.indices]
     counts = [size(Φ, 2) for Φ in prepared.phi]
     values = [fill(NaN, n) for n in counts]
-    for j in 1:maximum(counts)
-        ks = findall(>=(j), counts)
-        batch = _eta_batch(prepared.layout, [prepared.phi[k][:, j] - prepared.design[k] * θμ
-            for k in ks])
-        v = _proposal_loglikelihoods(prepared.model, prepared.subjects[ks], θ, σ, batch)
-        prepared.calls[] += 1
-        length(v) == length(ks) || throw(DimensionMismatch(
-            "conditional_loglikelihoods returned $(length(v)) values for $(length(ks)) subjects"))
-        for (m, k) in enumerate(ks)
-            (isnan(v[m]) || v[m] == Inf) && throw(DomainError(v[m],
-                "subject $(prepared.subjects[k]): conditional log-likelihood is NaN or +Inf at a quadrature point"))
-            values[k][j] = v[m]
+    with_progress(progress, maximum(counts);
+            description = _points_label(prepared.approximation), transient = true) do points
+        for j in 1:maximum(counts)
+            throw_if_interrupted(points)
+            ks = findall(>=(j), counts)
+            batch = _eta_batch(prepared.layout, [prepared.phi[k][:, j] - prepared.design[k] * θμ
+                for k in ks])
+            v = _proposal_loglikelihoods(prepared.model, prepared.subjects[ks], θ, σ, batch)
+            prepared.calls[] += 1
+            length(v) == length(ks) || throw(DimensionMismatch(
+                "conditional_loglikelihoods returned $(length(v)) values for $(length(ks)) subjects"))
+            for (m, k) in enumerate(ks)
+                (isnan(v[m]) || v[m] == Inf) && throw(DomainError(v[m],
+                    "subject $(prepared.subjects[k]): conditional log-likelihood is NaN or +Inf at a quadrature point"))
+                values[k][j] = v[m]
+            end
+            points === nothing || update_progress!(points, j)
         end
     end
     count(!=(0), key .- prepared.reference) <= 1 && (prepared.cache[key] = values)
     return values
 end
 
+_points_label(::ImportanceSampling) = "Importance sampling draws"
+_points_label(::AdaptiveGaussHermite) = "Quadrature points"
+
 # Per-subject marginal log-likelihoods, Monte Carlo standard errors and
 # effective sample sizes at (θ, σ, ω).
-function _point_marginals(prepared::_PreparedPoints, θ, σ, ω)
-    conditional = _conditional_point_values!(prepared, θ, σ)
+function _point_marginals(prepared::_PreparedPoints, θ, σ, ω, progress = nothing)
+    conditional = _conditional_point_values!(prepared, θ, σ, progress)
     prior = re_prior(prepared.model, ω)
     θμ = θ[prepared.indices]
     n = length(prepared.subjects)
@@ -240,21 +249,22 @@ function _point_marginals(prepared::_PreparedPoints, θ, σ, ω)
     return ℓ, se, ess
 end
 
-_subject_marginals(prepared::_PreparedPoints, θ, σ, ω) =
-    first(_point_marginals(prepared, θ, σ, ω))
+_subject_marginals(prepared::_PreparedPoints, θ, σ, ω, progress = nothing) =
+    first(_point_marginals(prepared, θ, σ, ω, progress))
 
 # Marginal terms with Monte Carlo error: `nothing` effective sample sizes and
 # zero standard errors for the deterministic approximations.
-_marginal_terms(prepared::_PreparedPoints{<:Any, ImportanceSampling}, θ, σ, ω) =
-    _point_marginals(prepared, θ, σ, ω)
+_marginal_terms(prepared::_PreparedPoints{<:Any, ImportanceSampling}, θ, σ, ω, progress) =
+    _point_marginals(prepared, θ, σ, ω, progress)
 
-function _marginal_terms(prepared::_PreparedPoints{<:Any, AdaptiveGaussHermite}, θ, σ, ω)
-    ℓ, _, _ = _point_marginals(prepared, θ, σ, ω)
+function _marginal_terms(prepared::_PreparedPoints{<:Any, AdaptiveGaussHermite}, θ, σ, ω,
+        progress)
+    ℓ, _, _ = _point_marginals(prepared, θ, σ, ω, progress)
     return ℓ, zero(ℓ), nothing
 end
 
-function _marginal_terms(prepared::_PreparedFOCE, θ, σ, ω)
-    ℓ = _subject_marginals(prepared, θ, σ, ω)
+function _marginal_terms(prepared::_PreparedFOCE, θ, σ, ω, progress)
+    ℓ = _subject_marginals(prepared, θ, σ, ω, progress)
     return ℓ, zero(ℓ), nothing
 end
 
@@ -304,10 +314,10 @@ end
 
 """
     marginal_loglikelihood(model, fit; approximation = ImportanceSampling(),
-                           rng = Random.default_rng(), nobs = nothing)
+                           rng = Random.default_rng(), nobs = nothing, progress = nothing)
     marginal_loglikelihood(model, θ, σ, ω; subjects = 1:nsubjects(model), η0 = nothing,
                            approximation = ImportanceSampling(), rng = Random.default_rng(),
-                           nparameters = nothing, nobs = nothing)
+                           nparameters = nothing, nobs = nothing, progress = nothing)
         -> MarginalLikelihoodResult
 
 The marginal log-likelihood `Σᵢ log ∫ p(y_i | θ, σ, η) N(η; 0, Ω) dη` at a fit's
@@ -320,7 +330,9 @@ modes warm-start from the fit's EBEs or final chain states (`η0`).
 `nparameters`, the AIC/BIC parameter count, defaults to the estimated
 coordinates: θ, σ and the Ω coordinates that [`fixed_omega`](@ref) leaves free,
 or `fit.free` for a FOCE(I) fit. `nobs` overrides the observation count used by
-BIC.
+BIC. `progress` (a Treebars node or backend symbol) gets a `Marginal likelihood`
+node with the subject modes and, while they are evaluated, a counter over the
+sampling or quadrature points; an interrupt raises `Treebars.ProgressInterrupted`.
 """
 function marginal_loglikelihood(model, fit::Union{SAEMResult, RaggedSAEMResult};
         nobs = nothing, kwargs...)
@@ -336,7 +348,8 @@ end
 
 function marginal_loglikelihood(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η0 = nothing, approximation = ImportanceSampling(),
-        rng::AbstractRNG = Random.default_rng(), nparameters = nothing, nobs = nothing)
+        rng::AbstractRNG = Random.default_rng(), nparameters = nothing, nobs = nothing,
+        progress = nothing)
     layout = nlme_layout(model)
     _check_length("θ", θ, layout.ntheta)
     _check_length("σ", σ, layout.nsigma)
@@ -345,9 +358,11 @@ function marginal_loglikelihood(model, θ::AbstractVector, σ::AbstractVector, �
         length(_free_omega(_omega_constraints(layout, fixed_omega(model)), ω)) :
         Int(nparameters)
     nparameters >= 0 || throw(ArgumentError("nparameters must be nonnegative"))
-    prepared = _prepare_marginal(approximation, model, θ, σ, ω, subjects, η0, rng)
+    prepared, (ℓ, se, ess) = with_progress(progress; description = "Marginal likelihood") do node
+        marginal = _prepare_marginal(approximation, model, θ, σ, ω, subjects, η0, rng, node)
+        return marginal, _marginal_terms(marginal, θ, σ, ω, node)
+    end
     ids = collect(Int, _marginal_subjects(prepared))
-    ℓ, se, ess = _marginal_terms(prepared, θ, σ, ω)
     all(isfinite, ℓ) || throw(DomainError(ℓ, "marginal log-likelihood is not finite"))
     lp = population_logprior(model, θ, σ, ω)
     lp === nothing || lp isa Real || throw(ArgumentError(

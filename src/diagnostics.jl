@@ -48,10 +48,11 @@ struct ResidualDiagnostics{T, E, S}
 end
 
 """
-    residual_diagnostics(model, fit; replicates = 1000, rng = Random.default_rng())
+    residual_diagnostics(model, fit; replicates = 1000, rng = Random.default_rng(),
+                         progress = nothing)
     residual_diagnostics(model, θ, σ, ω; subjects = 1:nsubjects(model), η0 = nothing,
                          replicates = 1000, rng = Random.default_rng(),
-                         ebe_options = EBEOptions()) -> ResidualDiagnostics
+                         ebe_options = EBEOptions(), progress = nothing) -> ResidualDiagnostics
 
 PRED, IPRED, IWRES, CWRES and NPDE for a model with
 [`GaussianObservations`](@ref), at a fit's estimate or at given population
@@ -72,6 +73,10 @@ one batched [`observation_moments`](@ref) call. The observed and simulated
 vectors are decorrelated with the Cholesky factor of the inverse of each
 subject's simulated covariance. `replicates` must exceed every subject's number of
 observations; `replicates = 0` skips the simulation.
+
+`progress` (a Treebars node or backend symbol) gets a `Residual diagnostics` node
+with the subject modes and a `Simulated replicates` counter; an interrupt raises
+`Treebars.ProgressInterrupted`.
 """
 function residual_diagnostics(model, fit::FOCEResult; kwargs...)
     return residual_diagnostics(model, fit.theta, fit.sigma, fit.omega;
@@ -85,7 +90,15 @@ end
 
 function residual_diagnostics(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η0 = nothing, replicates::Integer = 1000,
-        rng::AbstractRNG = Random.default_rng(), ebe_options::EBEOptions = EBEOptions())
+        rng::AbstractRNG = Random.default_rng(), ebe_options::EBEOptions = EBEOptions(),
+        progress = nothing)
+    return with_progress(progress; description = "Residual diagnostics") do node
+        _residual_diagnostics(model, θ, σ, ω, subjects, η0, replicates, rng, ebe_options, node)
+    end
+end
+
+function _residual_diagnostics(model, θ, σ, ω, subjects, η0, replicates, rng, ebe_options,
+        progress)
     observation_model(model) isa GaussianObservations || throw(ArgumentError(
         "residual_diagnostics requires observation_model(model) = GaussianObservations()"))
     replicates >= 0 || throw(ArgumentError("replicates must be nonnegative"))
@@ -93,7 +106,8 @@ function residual_diagnostics(model, θ::AbstractVector, σ::AbstractVector, ω:
     _check_length("θ", θ, layout.ntheta)
     _check_length("σ", σ, layout.nsigma)
     _check_length("ω", ω, nomega(layout))
-    ebe = empirical_bayes(model, θ, σ, ω; subjects, η0, options = ebe_options)
+    ebe = _run_empirical_bayes(model, θ, σ, ω, subjects, η0, default_ebe_method(model),
+        ebe_options, true, progress, false)
     ids = collect(Int, ebe.subjects)
     modes = [Vector{Float64}(_eta_column(ebe.modes, k)) for k in eachindex(ids)]
     ys = [Vector{Float64}(y) for y in observations(model, ids)]
@@ -123,7 +137,8 @@ function residual_diagnostics(model, θ::AbstractVector, σ::AbstractVector, ω:
         push!(per_observation, (y - linear) ./ sqrt.(diag(C)))
     end
     simulated = replicates == 0 ? (nothing, nothing, nothing, nothing) :
-        _prediction_discrepancies(model, layout, ids, θ, σ, prior, ys, Int(replicates), rng)
+        _prediction_discrepancies(model, layout, ids, θ, σ, prior, ys, Int(replicates), rng,
+            progress)
     return ResidualDiagnostics(ids, ebe.modes, ys, pred, ipred, iwres, cpred, cwres,
         per_observation, simulated..., Int(replicates))
 end
@@ -162,15 +177,20 @@ function _draw_eta(rng, prior::RaggedNormalREPrior, i)
 end
 
 # Simulated prediction discrepancies: EPRED, NPD, PDE and NPDE per subject.
-function _prediction_discrepancies(model, layout, ids, θ, σ, prior, ys, K, rng)
+function _prediction_discrepancies(model, layout, ids, θ, σ, prior, ys, K, rng,
+        progress = nothing)
     K > maximum(length, ys) || throw(ArgumentError(
         "replicates = $K must exceed the largest number of observations of a subject ($(maximum(length, ys))) for the simulated covariance to be invertible"))
     simulations = [zeros(length(y), K) for y in ys]
-    for r in 1:K
-        H = _eta_batch(layout, [_draw_eta(rng, prior, i) for i in ids])
-        moments = observation_moments(model, ids, θ, σ, H)
-        for (k, (μ, v)) in enumerate(moments)
-            simulations[k][:, r] = μ .+ sqrt.(v) .* randn(rng, length(μ))
+    with_progress(progress, K; description = "Simulated replicates") do counter
+        for r in 1:K
+            throw_if_interrupted(counter)
+            H = _eta_batch(layout, [_draw_eta(rng, prior, i) for i in ids])
+            moments = observation_moments(model, ids, θ, σ, H)
+            for (k, (μ, v)) in enumerate(moments)
+                simulations[k][:, r] = μ .+ sqrt.(v) .* randn(rng, length(μ))
+            end
+            counter === nothing || update_progress!(counter, r)
         end
     end
     epred, npd, pde, npde = (Vector{Float64}[] for _ in 1:4)

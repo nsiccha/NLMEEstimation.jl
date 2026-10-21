@@ -75,7 +75,7 @@ end
 """
     focei_evaluate(model, θ, σ, ω; subjects = 1:nsubjects(model), η0 = nothing,
                    interaction = true, ebe_method = QuasiNewtonEBE(),
-                   ebe_options = EBEOptions())
+                   ebe_options = EBEOptions(), progress = nothing)
 
 Evaluate the first-order conditional (with interaction by default) marginal
 log-likelihood. The EBEs maximize the exact complete-data log-density; their
@@ -83,16 +83,29 @@ Laplace curvature uses only the first η derivatives of the Gaussian observation
 means and variances. Supply `η0` as for [`empirical_bayes`](@ref) to warm-start
 the mode search; `ebe_method` and `ebe_options` configure it. A model's
 [`population_logprior`](@ref), if present, is added once after the subject
-likelihood terms; it does not alter the subject EBEs.
+likelihood terms; it does not alter the subject EBEs. `progress` (a Treebars node
+or backend symbol) gets a `FOCE(I) objective` node with the mode search's node
+under it; an interrupt raises `Treebars.ProgressInterrupted`.
 """
 function focei_evaluate(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η0 = nothing, interaction::Bool = true,
-        ebe_method::EBEMethod = QuasiNewtonEBE(), ebe_options::EBEOptions = EBEOptions())
+        ebe_method::EBEMethod = QuasiNewtonEBE(), ebe_options::EBEOptions = EBEOptions(),
+        progress = nothing)
+    return with_progress(progress; description = "FOCE(I) objective") do node
+        _focei_evaluate(model, θ, σ, ω, subjects, η0, interaction, ebe_method,
+            ebe_options, node, false)
+    end
+end
+
+# The FOCE(I) objective with its mode search reporting under `progress`; the
+# search is transient when an outer estimator repeats it.
+function _focei_evaluate(model, θ, σ, ω, subjects, η0, interaction, ebe_method,
+        ebe_options, progress, transient::Bool)
     _require_focei_layout(nlme_layout(model))
     observation_model(model) isa GaussianObservations || throw(ArgumentError(
         "FOCE(I) requires observation_model(model) = GaussianObservations()"))
-    ebes = empirical_bayes(model, θ, σ, ω; subjects, η0,
-        method = ebe_method, options = ebe_options)
+    ebes = _run_empirical_bayes(model, θ, σ, ω, subjects, η0, ebe_method, ebe_options,
+        true, progress, transient)
     parts = observation_moments_and_jacobians(model, ebes.subjects, θ, σ, ebes.modes)
     length(parts) == length(ebes.subjects) || throw(DimensionMismatch(
         "observation_moments_and_jacobians returned $(length(parts)) entries for $(length(ebes.subjects)) subjects"))
@@ -133,7 +146,7 @@ end
 
 """
     focei(model, θ0, σ0, ω0; subjects = 1:nsubjects(model), free = nothing,
-          options = FOCEOptions()) -> FOCEResult
+          options = FOCEOptions(), progress = nothing) -> FOCEResult
 
 Estimate population parameters by minimizing the FOCE(I) OFV with NLopt's
 BOBYQA, a quadratic-interpolation trust-region algorithm.
@@ -149,9 +162,18 @@ The search covers the estimated standard deviations and correlation of a
 partially fixed family; a fully fixed family is not searched. `free` may not
 name a position inside a constrained family's ω segment. `ω0` must hold the
 fixed values ([`apply_fixed_omega`](@ref)).
+
+`progress` (a Treebars node or backend symbol) gets a `FOCE(I)` node counting
+objective calls against `maxeval`, with the best OFV so far as its message and
+each call's mode search as a transient child. `Treebars.request_interrupt!` on it
+stops the search at the current objective call and returns the best point so far,
+with `converged = false` and `optimizer_info.status == :FORCED_STOP`. An interrupt
+during the evaluation at `θ0, σ0, ω0`, before any search, raises
+`Treebars.ProgressInterrupted`.
 """
 function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVector;
-        subjects = nothing, free = nothing, options::FOCEOptions = FOCEOptions())
+        subjects = nothing, free = nothing, options::FOCEOptions = FOCEOptions(),
+        progress = nothing)
     layout = nlme_layout(model)
     _require_focei_layout(layout)
     _check_length("θ", θ0, layout.ntheta)
@@ -174,56 +196,73 @@ function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVec
         view(x, layout.ntheta + 1:nθσ),
         _constrained_omega(constraints, view(x, nθσ + 1:length(x))))
     θ, σ, ω = split(x0)
-    initial = focei_evaluate(model, θ, σ, ω; subjects,
-        interaction = options.interaction, ebe_options = options.ebe_options)
-    isfinite(initial.ofv) || throw(DomainError(initial.ofv,
-        "FOCE(I) objective is not finite at the starting population parameters"))
-    warm = Ref(initial.ebes)
-    best_x = Ref(copy(x0))
-    best_value = Ref(initial.ofv)
-    best_ebes = Ref(initial.ebes)
-    calls = Ref(0)
-    function objective(z)
-        calls[] += 1
-        x = assemble(z)
-        θx, σx, ωx = split(x)
-        value = try
-            focei_evaluate(model, θx, σx, ωx; subjects, η0 = warm[],
-                interaction = options.interaction, ebe_options = options.ebe_options)
-        catch err
-            err isa Union{_InfeasibleEvaluation, EBEConvergenceError} || rethrow()
+    return with_progress(progress, options.maxeval; description = "FOCE(I)") do node
+        # Every call's mode search reports under `node`, as a transient child.
+        evaluate(θ, σ, ω, η0, report = node) = _focei_evaluate(model, θ, σ, ω, subjects,
+            η0, options.interaction, QuasiNewtonEBE(), options.ebe_options, report, true)
+        initial = evaluate(θ, σ, ω, nothing)
+        isfinite(initial.ofv) || throw(DomainError(initial.ofv,
+            "FOCE(I) objective is not finite at the starting population parameters"))
+        warm = Ref(initial.ebes)
+        best_x = Ref(copy(x0))
+        best_value = Ref(initial.ofv)
+        best_ebes = Ref(initial.ebes)
+        calls = Ref(0)
+        opt = NLopt.Opt(:LN_BOBYQA, length(free_indices))
+        # An interrupt request stops BOBYQA; the objective's value no longer matters.
+        function stop(x)
+            NLopt.force_stop!(opt)
             return 1.0e12 + sum(abs2, x .- x0)
         end
-        isfinite(value.ofv) || return 1.0e12 + sum(abs2, x .- x0)
-        warm[] = value.ebes
-        if value.ofv < best_value[]
-            best_x[] = copy(x)
-            best_value[] = value.ofv
-            best_ebes[] = value.ebes
+        function objective(z)
+            x = assemble(z)
+            interrupt_requested(node) && return stop(x)
+            calls[] += 1
+            node === nothing || update_progress!(node, calls[])
+            θx, σx, ωx = split(x)
+            value = try
+                evaluate(θx, σx, ωx, warm[])
+            catch err
+                err isa ProgressInterrupted && return stop(x)
+                err isa Union{_InfeasibleEvaluation, EBEConvergenceError} || rethrow()
+                return 1.0e12 + sum(abs2, x .- x0)
+            end
+            isfinite(value.ofv) || return 1.0e12 + sum(abs2, x .- x0)
+            warm[] = value.ebes
+            if value.ofv < best_value[]
+                best_x[] = copy(x)
+                best_value[] = value.ofv
+                best_ebes[] = value.ebes
+            end
+            node === nothing || update_progress!(node,
+                "best OFV $(short_string(best_value[]; sigdigits = 8))")
+            return value.ofv
         end
-        return value.ofv
+        NLopt.min_objective!(opt, (x, grad) -> objective(x))
+        NLopt.maxeval!(opt, options.maxeval)
+        NLopt.initial_step!(opt, options.rhobeg)
+        NLopt.xtol_abs!(opt, options.rhoend)
+        min_ofv, zbest, status = NLopt.optimize(opt, x0[free_indices])
+        optimum = assemble(zbest)
+        if min_ofv > best_value[]
+            optimum = best_x[]
+        end
+        θ̂, σ̂, ω̂ = split(optimum)
+        # After an interrupt the estimate's own evaluation runs unreported, so the
+        # request (which persists on `node`) does not stop it too.
+        interrupted = status == :FORCED_STOP && interrupt_requested(node)
+        evaluated = evaluate(θ̂, σ̂, ω̂, best_ebes[], interrupted ? nothing : node)
+        interrupted && update_progress!(node, "stopped by interrupt after $(calls[]) " *
+            "objective calls · best OFV $(short_string(evaluated.ofv; sigdigits = 8))")
+        T = eltype(optimum)
+        return FOCEResult(Vector{T}(θ̂), Vector{T}(σ̂), Vector{T}(ω̂),
+            Matrix{T}(omega_matrix(layout, ω̂)), evaluated.loglikelihood,
+            evaluated.logposterior, evaluated.population_logprior, evaluated.ofv,
+            evaluated.objective, evaluated.prior_provenance,
+            evaluated.ebes, evaluated.curvatures, calls[],
+            status in (:SUCCESS, :STOPVAL_REACHED, :FTOL_REACHED, :XTOL_REACHED),
+            (minimum_ofv = min_ofv, status = status), free_indices, options)
     end
-    opt = NLopt.Opt(:LN_BOBYQA, length(free_indices))
-    NLopt.min_objective!(opt, (x, grad) -> objective(x))
-    NLopt.maxeval!(opt, options.maxeval)
-    NLopt.initial_step!(opt, options.rhobeg)
-    NLopt.xtol_abs!(opt, options.rhoend)
-    min_ofv, zbest, status = NLopt.optimize(opt, x0[free_indices])
-    optimum = assemble(zbest)
-    if min_ofv > best_value[]
-        optimum = best_x[]
-    end
-    θ̂, σ̂, ω̂ = split(optimum)
-    evaluated = focei_evaluate(model, θ̂, σ̂, ω̂; subjects, η0 = best_ebes[],
-        interaction = options.interaction, ebe_options = options.ebe_options)
-    T = eltype(optimum)
-    return FOCEResult(Vector{T}(θ̂), Vector{T}(σ̂), Vector{T}(ω̂),
-        Matrix{T}(omega_matrix(layout, ω̂)), evaluated.loglikelihood,
-        evaluated.logposterior, evaluated.population_logprior, evaluated.ofv,
-        evaluated.objective, evaluated.prior_provenance,
-        evaluated.ebes, evaluated.curvatures, calls[],
-        status in (:SUCCESS, :STOPVAL_REACHED, :FTOL_REACHED, :XTOL_REACHED),
-        (minimum_ofv = min_ofv, status = status), free_indices, options)
 end
 
 function _focei_free_indices(::Nothing, free, nθσ, nω, n)
