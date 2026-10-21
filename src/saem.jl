@@ -996,10 +996,13 @@ undeclared structural θ as a model-specific approximation.
 `SAEMResult.numeric_mstep` records the selected mode. `kernel` selects the
 standard lockstep MH proposals, batched continuously adapted MALA proposals,
 or per-subject in-memory WarmupHMC NUTS transitions.
-When [`population_logprior`](@ref) is supplied, the M-step instead jointly
-optimizes θ, σ and ω, adding the prior once to the conditional and expected
-Gaussian random-effect objectives. The model supplies a population-prior
-gradient or an AD backend from which to derive it.
+When [`population_logprior`](@ref) is supplied, the M-step maximizes the same
+objectives plus the prior, added once. The mu-referenced θ and Ω move on from
+their closed-form update to the maximizer with the prior, a search that does
+not evaluate the model, and the numerical update of the remaining θ and σ
+includes the prior; so a prior adds no model evaluations to the step. The
+model supplies a population-prior gradient or an AD backend from which to
+derive it.
 Covariance families declared by [`fixed_omega`](@ref) keep their fixed parts:
 a fully fixed family is not updated, and a partially fixed family maximizes
 the expected Gaussian random-effect density over its estimated standard

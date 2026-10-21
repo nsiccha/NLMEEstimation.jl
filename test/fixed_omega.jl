@@ -258,8 +258,8 @@ end
     @test isposdef(Symmetric(fit.omega_matrix[2:3, 2:3]))
 end
 
-# The same model with a population prior on θ and ω, so SAEM takes the joint
-# MAP M-step.
+# The same model with a population prior on θ and ω, so SAEM takes the MAP
+# M-step.
 struct ChannelGaussianMAP
     inner::ChannelGaussian
 end
