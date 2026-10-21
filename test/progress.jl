@@ -200,6 +200,7 @@ end
     @test stopped.ofv == focei_evaluate(model, stopped.theta, stopped.sigma, stopped.omega;
         η0 = stopped.ebes).ofv
     @test occursin("stopped by interrupt after $(stopped.evaluations) objective calls", tree)
+    @test occursin("FOCE(I) ($(stopped.evaluations)/200)", tree)
     @test_throws ProgressInterrupted focei(model, GROWTH_θ, GROWTH_σ, GROWTH_ω;
         options = foce_options, progress = stopped_root())
 

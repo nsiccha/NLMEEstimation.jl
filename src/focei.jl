@@ -218,6 +218,7 @@ function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVec
             x = assemble(z)
             interrupt_requested(node) && return stop(x)
             calls[] += 1
+            node === nothing || update_progress!(node, calls[])
             θx, σx, ωx = split(x)
             value = try
                 evaluate(θx, σx, ωx, warm[])
@@ -233,7 +234,6 @@ function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVec
                 best_value[] = value.ofv
                 best_ebes[] = value.ebes
             end
-            node === nothing || update_progress!(node, calls[])
             node === nothing || update_progress!(node,
                 "best OFV $(short_string(best_value[]; sigdigits = 8))")
             return value.ofv
