@@ -253,3 +253,23 @@ numerical update. `:auto` selects between them from the declared
 mu-referencing coverage. `mstep_interval` can reduce evaluation frequency.
 SAEM estimates depend on the RNG stream and run length, so assess recovery
 across starts for a new model.
+
+## Progress and early stopping
+
+Every estimator takes `progress = nothing`: a
+[Treebars](https://github.com/nsiccha/Treebars.jl) node under which it builds a
+labelled progress node (SAEM phases and iteration counters, the EBE solver's
+converged subjects, FOCE(I) objective calls with the best OFV, covariance-step
+evaluations), or a backend symbol such as `:term` for a terminal display
+(Treebars' terminal backend needs `using Term`).
+
+```julia
+using Term
+saem_fit = saem(model, θ, σ, ω; rng = Xoshiro(2026), progress = :term)
+```
+
+`Treebars.request_interrupt!` on that node stops `saem` at the next iteration
+(the result has `interrupted = true` and the completed `iterations`) and `focei`
+at the next objective call (`converged = false`, status `:FORCED_STOP`), each
+returning its estimate so far. See the documentation's estimators page for every
+function's node.

@@ -16,4 +16,5 @@ include("saem_nuts_reference.jl")
 include("population_prior.jl")
 include("fixed_omega.jl")
 include("infeasible.jl")
+include("progress.jl")
 end

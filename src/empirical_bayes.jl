@@ -152,7 +152,7 @@ end
 """
     empirical_bayes(model, θ, σ, ω; subjects = 1:nsubjects(model), η0 = nothing,
                     method = default_ebe_method(model), options = EBEOptions(),
-                    require_convergence = true) -> EBEResult
+                    require_convergence = true, progress = nothing) -> EBEResult
 
 Empirical Bayes estimates (posthoc): for fixed population parameters θ, σ and Ω
 parameters ω, the per-subject mode
@@ -181,17 +181,37 @@ sums terms much larger than itself, such as observations far from zero with a sm
 residual SD. Near a mode, a full step whose predicted increase is below
 `√eps · max(1, |f|)` is therefore accepted unless f decreases by more than that. The
 convergence tests use gradients and Hessian blocks, which stay accurate there.
+
+`progress` is a Treebars node (or a backend symbol such as `:term`) under which an
+`Empirical Bayes (Newton)` or `(BFGS)` node reports the solver's iteration and how
+many subjects have converged. `Treebars.request_interrupt!` on it raises
+`Treebars.ProgressInterrupted` at the next iteration.
 """
 function empirical_bayes(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η0 = nothing, method::EBEMethod = default_ebe_method(model),
-        options::EBEOptions = EBEOptions(), require_convergence::Bool = true)
-    layout = nlme_layout(model)
-    return _empirical_bayes(layout, model, θ, σ, ω, subjects, η0, method, options,
-        require_convergence)
+        options::EBEOptions = EBEOptions(), require_convergence::Bool = true,
+        progress = nothing)
+    return _run_empirical_bayes(model, θ, σ, ω, subjects, η0, method, options,
+        require_convergence, progress, false)
 end
 
+# `empirical_bayes` under a new progress node. A search that an outer estimator
+# repeats (a FOCE(I) objective call, a covariance-step evaluation) gets a
+# transient node, which leaves the tree once it finishes.
+function _run_empirical_bayes(model, θ, σ, ω, subjects, η0, method, options,
+        require_convergence, progress, transient::Bool)
+    return with_progress(progress; description = "Empirical Bayes ($(_ebe_label(method)))",
+            transient) do node
+        _empirical_bayes(nlme_layout(model), model, θ, σ, ω, subjects, η0, method,
+            options, require_convergence, node)
+    end
+end
+
+_ebe_label(::NewtonEBE) = "Newton"
+_ebe_label(::QuasiNewtonEBE) = "BFGS"
+
 function _empirical_bayes(layout::NLMELayout, model, θ, σ, ω, subjects, η0,
-        method, options, require_convergence)
+        method, options, require_convergence, progress)
     _check_length("θ", θ, layout.ntheta)
     _check_length("σ", σ, layout.nsigma)
     _check_length("ω", ω, nomega(layout))
@@ -201,7 +221,7 @@ function _empirical_bayes(layout::NLMELayout, model, θ, σ, ω, subjects, η0,
     allunique(subjects) || throw(ArgumentError("subjects $subjects are not unique"))
     prior = re_prior(model, ω)
     H0 = _eta_start(η0, subjects, neta(layout))
-    result = _ebe_lockstep(method, model, subjects, θ, σ, prior, H0, options)
+    result = _ebe_lockstep(method, model, subjects, θ, σ, prior, H0, options, progress)
     failed = subjects[.!result.converged]
     require_convergence && !isempty(failed) && throw(EBEConvergenceError(failed, result))
     return result
@@ -260,7 +280,8 @@ end
 # that are not at a mode. The prior's type selects the layout's complete-data
 # evaluations.
 
-function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, opt::EBEOptions)
+function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, opt::EBEOptions,
+        progress = nothing)
     T = float(promote_type(_eta_eltype(H0), eltype(θ), eltype(σ), _prior_eltype(prior)))
     n = length(subjects)
     H = _eta_state(T, H0)
@@ -272,10 +293,15 @@ function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, op
     converged = falses(n)
     failed = falses(n)
     iterations = zeros(Int, n)
+    sweep = 0
     while true
+        throw_if_interrupted(progress)
         active = findall(k -> !converged[k] && !failed[k], 1:n)
         done = filter(k -> _is_converged(method, curvature, k, _column(G, k), prior, subjects[k], opt), active)
         converged[done] .= true
+        progress === nothing || update_progress!(progress,
+            "iteration $sweep · $(count(converged))/$n subjects converged")
+        sweep += 1
         _polish!(method, model, subjects, θ, σ, prior, H, ℓ, f, G, curvature, iterations, done)
         active = setdiff(active, done)
         if isempty(active)

@@ -27,24 +27,27 @@ struct _PreparedFOCE{M, A <: FOCEApproximation, EM <: EBEMethod, E <: EBEResult}
     center::E
 end
 
-function _prepare_marginal(approximation::FOCEApproximation, model, θ, σ, ω, subjects, η0, rng)
+# The subject modes at the point report under `progress`; each later
+# evaluation's mode search is a transient child of the evaluation's `progress`.
+function _prepare_marginal(approximation::FOCEApproximation, model, θ, σ, ω, subjects, η0, rng,
+        progress = nothing)
     _require_focei_layout(nlme_layout(model))
     observation_model(model) isa GaussianObservations || throw(ArgumentError(
         "FOCEApproximation requires observation_model(model) = GaussianObservations()"))
     method = approximation.ebe_method === nothing ? default_ebe_method(model) :
         approximation.ebe_method
-    center = empirical_bayes(model, θ, σ, ω; subjects, η0, method,
-        options = approximation.ebe_options)
+    center = _run_empirical_bayes(model, θ, σ, ω, subjects, η0, method,
+        approximation.ebe_options, true, progress, false)
     return _PreparedFOCE(model, approximation, method, center)
 end
 
 _marginal_subjects(prepared::_PreparedFOCE) = prepared.center.subjects
 
-function _subject_marginals(prepared::_PreparedFOCE, θ, σ, ω)
+function _subject_marginals(prepared::_PreparedFOCE, θ, σ, ω, progress = nothing)
     a = prepared.approximation
-    return focei_evaluate(prepared.model, θ, σ, ω; subjects = prepared.center.subjects,
-        η0 = prepared.center, interaction = a.interaction, ebe_method = prepared.method,
-        ebe_options = a.ebe_options).subject_loglikelihoods
+    return _focei_evaluate(prepared.model, θ, σ, ω, prepared.center.subjects,
+        prepared.center, a.interaction, prepared.method, a.ebe_options, progress,
+        true).subject_loglikelihoods
 end
 
 """
@@ -132,7 +135,8 @@ end
                     step = 1e-3, approximation = <see below>, rng = Random.default_rng())
     covariance_step(model, θ, σ, ω; subjects = 1:nsubjects(model), free = nothing,
                     η0 = nothing, method = :rs, step = 1e-3,
-                    approximation = FOCEApproximation(), rng = Random.default_rng())
+                    approximation = FOCEApproximation(), rng = Random.default_rng(),
+                    progress = nothing)
         -> CovarianceResult
 
 The covariance step: the sampling covariance and standard errors of the estimated
@@ -170,6 +174,10 @@ estimated coordinates `[θ; σ; free Ω coordinates]`, which are the concatenate
 [`CovarianceResult`](@ref)). Fixed covariance parts carry no uncertainty and are
 never differentiated; `ω` must hold their values. Throws
 [`CovarianceStepError`](@ref) when the requested matrix is not positive definite.
+
+`progress` (a Treebars node or backend symbol) gets a `Covariance step` node: the
+subject modes at the point, then a `Marginal likelihoods` counter over the `2p² + 1`
+(or `2p + 1`) evaluations. An interrupt raises `Treebars.ProgressInterrupted`.
 """
 function covariance_step(model, fit::FOCEResult; approximation = FOCEApproximation(
             interaction = fit.options.interaction), kwargs...)
@@ -191,7 +199,7 @@ _default_saem_approximation(layout, observation_model) = ImportanceSampling()
 function covariance_step(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, free = nothing, η0 = nothing, method::Symbol = :rs,
         step::Real = 1.0e-3, approximation = FOCEApproximation(),
-        rng::AbstractRNG = Random.default_rng())
+        rng::AbstractRNG = Random.default_rng(), progress = nothing)
     method in (:rs, :r, :s) || throw(ArgumentError("method must be :rs, :r or :s, got :$method"))
     isfinite(step) && step > 0 || throw(ArgumentError("step must be finite and positive"))
     layout = nlme_layout(model)
@@ -207,27 +215,55 @@ function covariance_step(model, θ::AbstractVector, σ::AbstractVector, ω::Abst
     !isempty(free) && allunique(free) && all(i -> 1 <= i <= length(ŷ), free) ||
         throw(ArgumentError("free must contain unique positions in 1:$(length(ŷ))"))
     names = _estimated_coordinate_names(model, constraints)[free]
-    prepared = _prepare_marginal(approximation, model, θ, σ, ω, subjects, η0, rng)
+    return with_progress(progress; description = "Covariance step") do node
+        _covariance_step(model, θ, σ, ω, subjects, η0, method, step, approximation, rng,
+            layout, constraints, x̂, ŷ, free, names, node)
+    end
+end
+
+function _covariance_step(model, θ, σ, ω, subjects, η0, method, step, approximation, rng,
+        layout, constraints, x̂, ŷ, free, names, progress)
+    nθ, nσ = layout.ntheta, layout.nsigma
+    prepared = _prepare_marginal(approximation, model, θ, σ, ω, subjects, η0, rng, progress)
     subject_ids = collect(Int, _marginal_subjects(prepared))
     point_of(y) = _point_from_coordinates(constraints, y, nθ + nσ)
     split(y) = (x = point_of(y); (x[1:nθ], x[nθ+1:nθ+nσ], x[nθ+nσ+1:end]))
     lp0 = population_logprior(model, split(ŷ)...)
     lp0 === nothing || lp0 isa Real || throw(ArgumentError(
         "population_logprior must return a real log density or nothing"))
+    p = length(free)
+    R, S, G, gradient, h, evaluations = with_progress(progress,
+            method == :s ? 2p + 1 : 2p^2 + 1;
+            description = "Marginal likelihoods") do counter
+        _covariance_matrices(prepared, split, ŷ, free, step, method, lp0, subject_ids,
+            model, counter)
+    end
+    covariance = _covariance_from(Val(method), R, S, G, gradient, names)
+    return CovarianceResult(subject_ids, x̂, ŷ, free, names, method, approximation,
+        lp0 === nothing ? :ML : :MAP, covariance, sqrt.(diag(covariance)), R, S,
+        gradient, G, h, evaluations, constraints)
+end
+
+# R and S from central differences of the per-subject marginals, with their
+# gradient, steps and evaluation count; each evaluation advances `counter`.
+function _covariance_matrices(prepared, split, ŷ, free, step, method, lp0, subject_ids,
+        model, counter)
+    p = length(free)
     evaluations = Ref(0)
     # Per-subject marginal terms and the population log prior (zero under ML).
     function evaluate(x)
+        throw_if_interrupted(counter)
         evaluations[] += 1
-        terms = _subject_marginals(prepared, split(x)...)
+        terms = _subject_marginals(prepared, split(x)..., counter)
         length(terms) == length(subject_ids) && all(isfinite, terms) ||
             throw(DomainError(terms, "covariance step: the marginal log-likelihood is " *
                 "not finite at population coordinates $x; try a smaller step"))
         lp = lp0 === nothing ? 0.0 : population_logprior(model, split(x)...)
         isfinite(lp) || throw(DomainError(lp,
             "covariance step: the population log prior is not finite at $x"))
+        counter === nothing || update_progress!(counter, evaluations[])
         return Vector{Float64}(terms), Float64(lp)
     end
-    p = length(free)
     h = step .* max.(1.0, abs.(ŷ[free]))
     total((terms, lp)) = sum(terms) + lp
     function shifted(signs)
@@ -256,10 +292,7 @@ function covariance_step(model, θ::AbstractVector, σ::AbstractVector, ω::Abst
             end
         end
     end
-    covariance = _covariance_from(Val(method), R, S, G, gradient, names)
-    return CovarianceResult(subject_ids, x̂, ŷ, free, names, method, approximation,
-        lp0 === nothing ? :ML : :MAP, covariance, sqrt.(diag(covariance)), R, S,
-        gradient, G, h, evaluations[], constraints)
+    return R, S, G, gradient, h, evaluations[]
 end
 
 _point_from_coordinates(::Nothing, y, nθσ) = y

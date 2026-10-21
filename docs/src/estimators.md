@@ -88,5 +88,38 @@ CWRES uses the residual variance at the EBE, as this package's FOCE(I) objective
 - nlmixr2's `CWRES` is the per-observation standardization: it equals `cwres_per_observation` to 2e-4. The decorrelated `cwres` of Hooker et al. is a different vector.
 - nlmixr2's NPDE uses the same decorrelation as `npde`. Its 300 simulations against 3000 here correlate at 0.83, and NPD (no decorrelation) against 2000 here at 0.995. Decorrelating with the lower Cholesky factor of the covariance instead, an equally valid whitening, correlates at only 0.23. The decorrelation order therefore matters when comparing NPDE across software.
 
+## Progress and early stopping
+
+Every function above takes `progress = nothing`. Pass a [Treebars](https://github.com/nsiccha/Treebars.jl) node and the function builds its own labelled node under it, which a web page or terminal renders while the fit runs. A backend symbol such as `:term` starts a new root instead (`:term` draws terminal bars once `Term` is loaded). With `nothing`, no node is created and the results are identical.
+
+```julia
+using Treebars
+root = Treebars.initialize_progress!(:state; description = "saem mh")
+fit = saem(model, θ0, σ0, ω0; rng, options, progress = root)
+Treebars.finalize_progress!(root)
+println(Treebars.render_text(root))
+```
+
+For a 16-subject simulated one-compartment model and 12 SA iterations (a first call, so the times include compilation), this printed:
+
+```
+✓ saem mh [26.2s]
+└─ ✓ SAEM [20.7s]
+   ├─ ✓ MCMC burn-in (3/3) — acceptance 9.4% prior, 35% random walk [1ms]
+   └─ ✓ Stochastic approximation (12/12) — γ = 0.211 · Σ log p(y|η) = -154.264 · acceptance 4.2% prior, 22% random walk [20.7s]
+```
+
+| Function | Its node |
+| --- | --- |
+| `saem` | `SAEM`, with the phases `NUTS warmup` (one transient WarmupHMC tree per subject), `MCMC burn-in` and `Stochastic approximation`, each counting iterations. The message shows the stage (`M-step` while it runs), the SA step size γ, the chains' summed conditional log-density at the current population estimate (MH and NUTS), and the kernel's acceptance, divergences or mean step size. |
+| `empirical_bayes` / `posthoc` | `Empirical Bayes (Newton)` or `(BFGS)`, with the iteration and the number of converged subjects. |
+| `focei` | `FOCE(I)`, counting objective calls against `maxeval`, with the best OFV so far. Each call's mode search is a transient child. |
+| `focei_evaluate` | `FOCE(I) objective`, with its mode search. |
+| `covariance_step` | `Covariance step`: the subject modes, then `Marginal likelihoods` counting the `2p² + 1` (or `2p + 1`) evaluations. |
+| `marginal_loglikelihood` | `Marginal likelihood`: the subject modes, then a transient counter over the sampling or quadrature points. |
+| `residual_diagnostics` | `Residual diagnostics`: the subject modes, then `Simulated replicates`. |
+
+`Treebars.request_interrupt!(node)` asks a run to stop, for example from a Stop button. `saem` stops at the next iteration boundary and returns the estimate of the last completed iteration, with `interrupted = true` and `iterations` counting the completed SA iterations. This is the same estimate a run with that many iterations would return. `focei` stops at the next objective call and returns its best point so far, with `converged = false` and `optimizer_info.status == :FORCED_STOP`. The other functions have no partial result, so they raise `Treebars.ProgressInterrupted`, as `focei` does when the interrupt comes before its search starts.
+
 See the [PK comparison](pk-comparison.md) for one reproducible model, dataset, seeds, and all method calls.
 The [SAEM kernel benchmarks](saem-benchmarks.md) compare MH, NUTS, and an experimental batched MALA trial, including their implementation and measurement scripts.
