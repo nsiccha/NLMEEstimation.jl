@@ -706,7 +706,10 @@ _saem_numeric_mode(mode::Symbol, free, ntheta) =
     Val(mode === :auto ? (any(i -> i <= ntheta, free) ? :mixture : :online) : mode)
 _saem_mode_name(::Val{M}) where {M} = M
 
-function _saem_numeric_objective(z, model, subjects, θ, σ, free, indices, design, bank, weights)
+# The numerical M-step's objective adds a population prior at the M-step's ω;
+# `ω = nothing` is maximum likelihood.
+function _saem_numeric_objective(z, model, subjects, θ, σ, free, indices, design, bank,
+        weights, ω = nothing)
     x = vcat(θ, σ)
     x[free] = z
     θz = x[1:length(θ)]
@@ -716,7 +719,29 @@ function _saem_numeric_objective(z, model, subjects, θ, σ, free, indices, desi
         H = _saem_eta(Φ, θz, indices, design)
         value += w * sum(conditional_loglikelihoods(model, subjects, θz, σz, H))
     end
-    return value
+    return value + _saem_prior_value(model, θz, σz, ω)
+end
+
+_saem_prior_value(model, θ, σ, ::Nothing) = 0.0
+function _saem_prior_value(model, θ, σ, ω)
+    lp = population_logprior(model, θ, σ, ω)
+    lp isa Real || throw(ArgumentError("population_logprior must return a real log density"))
+    return lp
+end
+
+_saem_prior_value_gradient(model, θ, σ, ::Nothing) = (0.0, zeros(length(θ) + length(σ)))
+function _saem_prior_value_gradient(model, θ, σ, ω)
+    lp, gθ, gσ, _ = _saem_prior_terms(model, θ, σ, ω)
+    return lp, vcat(gθ, gσ)
+end
+
+function _saem_prior_terms(model, θ, σ, ω)
+    lp, gθ, gσ, gω = population_logprior_and_gradient(model, θ, σ, ω)
+    lp isa Real || throw(ArgumentError("population_logprior_and_gradient must return a real value"))
+    _check_length("population prior θ gradient", gθ, length(θ))
+    _check_length("population prior σ gradient", gσ, length(σ))
+    _check_length("population prior ω gradient", gω, length(ω))
+    return lp, gθ, gσ, gω
 end
 
 function _saem_population_value_gradient(::PerSubjectEvaluation, model, subjects, θ, σ, H)
@@ -742,7 +767,8 @@ function _saem_population_value_gradient(::BatchedEvaluation, model, subjects, �
         DI.Constant(model), DI.Constant(subjects), DI.Constant(H), DI.Constant(length(θ)))
 end
 
-function _saem_numeric_value_gradient(z, model, subjects, θ, σ, free, indices, design, bank, weights, mode::Val)
+function _saem_numeric_value_gradient(z, model, subjects, θ, σ, free, indices, design,
+        bank, weights, mode::Val, ω = nothing)
     x = vcat(θ, σ)
     x[free] = z
     θz = x[1:length(θ)]
@@ -756,53 +782,22 @@ function _saem_numeric_value_gradient(z, model, subjects, θ, σ, free, indices,
         value += w * v
         gradient += w * g
     end
-    return value, gradient[free]
+    lp, glp = _saem_prior_value_gradient(model, θz, σz, ω)
+    return value + lp, (gradient + glp)[free]
 end
 
-function _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design, bank, weights, maxiter, mode::Val)
+function _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design, bank, weights,
+        maxiter, mode::Val, ω = nothing)
     isempty(free) && return θ, σ
     objective(z) = _saem_numeric_value_gradient(z, model, subjects, θ, σ,
-        free, indices, design, bank, weights, mode)
+        free, indices, design, bank, weights, mode, ω)
     screen(z) = _saem_numeric_objective(z, model, subjects, θ, σ,
-        free, indices, design, bank, weights)
+        free, indices, design, bank, weights, ω)
     z = _bfgs_ascent(objective, vcat(θ, σ)[free], maxiter, _ -> true;
         screen, what = "SAEM numerical M-step")
     x = vcat(θ, σ)
     x[free] = z
     return x[1:length(θ)], x[length(θ)+1:end]
-end
-
-function _saem_map_value_gradient(x, model, subjects, layout, indices, design,
-        bank, weights, mean_phi, second_phi, mode::Val)
-    nθ, nσ = layout.ntheta, layout.nsigma
-    θ = view(x, 1:nθ)
-    σ = view(x, nθ+1:nθ+nσ)
-    ω = view(x, nθ+nσ+1:length(x))
-    value = 0.0
-    gradient = zeros(Float64, length(x))
-    style = saem_population_gradient_style(model, mode)
-    for (Φ, w) in zip(bank, weights)
-        H = _saem_eta(Φ, θ, indices, design)
-        v, g = _saem_population_value_gradient(style, model, subjects, θ, σ, H)
-        value += w * v
-        gradient[1:nθ+nσ] .+= w .* g
-    end
-    # At fixed Φ, mu-referencing makes the conditional density invariant in
-    # these θ coordinates; its fixed-η gradient is not their total derivative.
-    gradient[indices] .= 0
-    gaussian, gμ, gω = _saem_gaussian_map_value_gradient(layout, θ, ω,
-        indices, design, mean_phi, second_phi, subjects)
-    value += gaussian
-    gradient[indices] .+= gμ
-    gradient[nθ+nσ+1:end] .+= gω
-    lp, gpθ, gpσ, gpω = population_logprior_and_gradient(model, θ, σ, ω)
-    lp isa Real || throw(ArgumentError("population_logprior_and_gradient must return a real value"))
-    _check_length("population prior θ gradient", gpθ, nθ)
-    _check_length("population prior σ gradient", gpσ, nσ)
-    _check_length("population prior ω gradient", gpω, length(ω))
-    value += lp
-    gradient .+= vcat(gpθ, gpσ, gpω)
-    return value, gradient
 end
 
 function _saem_omega_above_floor(layout, ω, floor)
@@ -812,51 +807,70 @@ function _saem_omega_above_floor(layout, ω, floor)
     return all(r -> eigmin(Symmetric(Ω[r, r])) >= floor, ranges)
 end
 
-function _saem_floor_omega(layout, ω, floor)
-    Ω = omega_matrix(layout, ω)
-    all(isfinite, Ω) || throw(DomainError(ω,
-        "SAEM MAP M-step starts with non-finite covariance"))
-    ranges, _ = _block_ranges(layout)
-    for r in ranges
-        E = eigen(Symmetric(Ω[r, r]))
-        Ω[r, r] = E.vectors * Diagonal(max.(E.values, floor)) * E.vectors'
+# The Gaussian block of a MAP M-step: the mu-referenced θ and the free Ω
+# coordinates (`_free_omega`) maximize the expected Gaussian random-effect
+# density plus the population prior at the current remaining θ and σ. Neither
+# term evaluates the model. The search starts at the closed-form maximizer of
+# the Gaussian term, with that term's inverse curvature as its quasi-Newton
+# matrix, so a prior that is weak against the data moves it in a few steps.
+function _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
+        mean_phi, second_phi, subjects, floor, constraints)
+    nμ = length(indices)
+    function point(z)
+        θz = copy(θ)
+        θz[indices] = view(z, 1:nμ)
+        return θz, Vector{Float64}(_constrained_omega(constraints, view(z, nμ+1:length(z))))
     end
-    return omega_parameters(layout, Ω)
+    function gaussian(z)
+        θz, ωz = point(z)
+        value, gμ, gω = _saem_gaussian_map_value_gradient(layout, θz, ωz, indices,
+            design, mean_phi, second_phi, subjects)
+        return value, vcat(gμ, _free_omega_gradient(constraints, ωz, gω))
+    end
+    function objective(z)
+        θz, ωz = point(z)
+        value, gradient = gaussian(z)
+        lp, gθ, _, gω = _saem_prior_terms(model, θz, σ, ωz)
+        return value + lp, gradient + vcat(gθ[indices],
+            _free_omega_gradient(constraints, ωz, gω))
+    end
+    function screen(z)
+        θz, ωz = point(z)
+        return first(gaussian(z)) + _saem_prior_value(model, θz, σ, ωz)
+    end
+    admissible(z) = _omega_admissible(layout, constraints, last(point(z)), floor)
+    z0 = vcat(θ[indices], _free_omega(constraints, ω))
+    z = _bfgs_ascent(objective, z0, 100, admissible; screen,
+        inverse_hessian = _saem_inverse_curvature(gaussian, z0))
+    return point(z)
 end
 
-# The joint MAP M-step searches θ, σ and the free Ω coordinates
-# (`_free_omega`); a fixed covariance family stays at its declared value.
-function _saem_map_mstep(model, subjects, layout, θ, σ, ω, indices, design,
-        bank, weights, mean_phi, second_phi, maxiter, mode::Val, γ, floor,
-        constraints = nothing)
-    nθσ = layout.ntheta + layout.nsigma
-    x0 = vcat(θ, σ, _free_omega(constraints, _floor_omega(layout, constraints, ω, floor)))
-    full(x) = vcat(view(x, 1:nθσ), _constrained_omega(constraints, view(x, nθσ+1:length(x))))
-    function objective(x)
-        xf = full(x)
-        value, gradient = _saem_map_value_gradient(xf, model, subjects, layout,
-            indices, design, bank, weights, mean_phi, second_phi, mode)
-        return value, vcat(view(gradient, 1:nθσ), _free_omega_gradient(constraints,
-            view(xf, nθσ+1:length(xf)), view(gradient, nθσ+1:length(gradient))))
+# The inverse of minus the Hessian of a value-and-gradient function at z, from
+# central differences of its gradient; `nothing` (the identity) where that
+# curvature is not positive definite.
+function _saem_inverse_curvature(f, z; step = 1.0e-5)
+    d = length(z)
+    d == 0 && return nothing
+    H = zeros(d, d)
+    for j in 1:d
+        e = zeros(d)
+        e[j] = step
+        H[:, j] = (last(f(z + e)) - last(f(z - e))) / 2step
     end
-    admissible(x) = _omega_admissible(layout, constraints,
-        _constrained_omega(constraints, view(x, nθσ+1:length(x))), floor)
-    x = _bfgs_ascent(objective, x0, maxiter, admissible)
-    mode isa Val{:online} && (x = x0 .+ γ .* (x .- x0))
-    x = full(x)
-    return x[1:layout.ntheta], x[layout.ntheta+1:nθσ], x[nθσ+1:end]
+    C = cholesky(Symmetric(-(H + H') / 2); check = false)
+    return issuccess(C) ? inv(C) : nothing
 end
 
 _saem_numeric_update(::Val{:mixture}, model, subjects, θ, σ, free, indices,
-    design, bank, weights, maxiter, γ) =
+    design, bank, weights, maxiter, γ, ω = nothing) =
     _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design,
-        bank, weights, maxiter, Val(:mixture))
+        bank, weights, maxiter, Val(:mixture), ω)
 
 function _saem_numeric_update(::Val{:online}, model, subjects, θ, σ, free,
-        indices, design, bank, weights, maxiter, γ)
+        indices, design, bank, weights, maxiter, γ, ω = nothing)
     isempty(free) && return θ, σ
     θstar, σstar = _saem_numeric_mstep(model, subjects, θ, σ, free, indices,
-        design, bank, weights, maxiter, Val(:online))
+        design, bank, weights, maxiter, Val(:online), ω)
     x = vcat(θ, σ)
     xstar = vcat(θstar, σstar)
     x[free] .+= γ .* (xstar[free] .- x[free])
@@ -871,9 +885,41 @@ struct _SAEMNumericUpdate{M<:Val} <: Function
 end
 
 function (update::_SAEMNumericUpdate)(model, subjects, θ, σ, free, indices,
-        design, bank, weights, maxiter, γ)
+        design, bank, weights, maxiter, γ, ω = nothing)
     return _saem_numeric_update(update.mode, model, subjects, θ, σ, free,
-        indices, design, bank, weights, maxiter, γ)
+        indices, design, bank, weights, maxiter, γ, ω)
+end
+
+_saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
+    second_phi, floor, subjects, constraints; require_instances = true) =
+    _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi,
+        floor, constraints)
+
+# One population update, for either layout. At fixed Φ the conditional density
+# does not depend on the mu-referenced θ, and Ω enters only the expected Gaussian
+# random-effect density, so the update separates into a Gaussian block
+# (mu-referenced θ and Ω) and a numerical block (the remaining θ and σ). Without
+# a population prior the Gaussian block has a closed-form maximizer. A prior
+# couples the blocks only through its own density: the MAP update moves the
+# Gaussian block on to its maximizer with the prior, without evaluating the
+# model, and adds the prior to the numerical update. With `:online`, only the
+# numerical block is damped by the SA step size γ; the Gaussian block already
+# uses the stochastically averaged statistics.
+function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indices,
+        design, free, bank, weights, mean_phi, second_phi, options, γ,
+        constraints, map_objective)
+    θ, Ω = _saem_closed_form_mstep(layout, θ, omega_matrix(layout, ω), indices,
+        design, mean_phi, second_phi, options.omega_floor, subjects, constraints;
+        require_instances = !map_objective)
+    ω = _apply_omega_constraints(constraints, omega_parameters(layout, Ω))
+    if map_objective
+        θ, ω = _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
+            mean_phi, second_phi, subjects, options.omega_floor, constraints)
+    end
+    θ, σ = numeric_update(model, subjects, θ, σ, free, indices, design, bank,
+        weights, options.numeric_maxiter, γ,
+        map_objective ? ω : nothing)::Tuple{Vector{Float64},Vector{Float64}}
+    return θ, σ, ω
 end
 
 # Progress phases of an SAEM run under its node, prepared up front so that the
@@ -1091,18 +1137,9 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                     _saem_kernel_stats(kernel, nprior, nrw, sweeps * length(ids),
                         ndivergent, mala_states))
                 θ_before, σ_before = copy(θ), copy(σ)
-                if map_objective
-                    θ, σ, ω = _saem_map_mstep(model, ids, layout, θ, σ, ω,
-                        indices, design, bank, weights, mean_phi, second_phi,
-                        options.numeric_maxiter, numeric_mode, γ, options.omega_floor,
-                        constraints)
-                else
-                    θ, Ω = _saem_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
-                        design, mean_phi, second_phi, options.omega_floor, constraints)
-                    ω = _apply_omega_constraints(constraints, omega_parameters(layout, Ω))
-                    θ, σ = numeric_update(model, ids, θ, σ, free, indices, design,
-                        bank, weights, options.numeric_maxiter, γ)::Tuple{Vector{Float64},Vector{Float64}}
-                end
+                θ, σ, ω = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
+                    indices, design, free, bank, weights, mean_phi, second_phi,
+                    options, γ, constraints, map_objective)
                 if mala_cache !== nothing && mala_cache.valid
                     if θ == θ_before && σ == σ_before
                         _saem_mala_refresh_prior!(mala_cache, H, prior,

@@ -172,8 +172,10 @@ function _saem_mh_round!(rng, model, subjects, θ, σ, prior::RaggedNormalREPrio
     return prior_accepted, rw_accepted
 end
 
+# Without `require_instances`, an estimated family with no instances among
+# `subjects` keeps its covariance `Ω[f]` (a MAP step then moves it by the prior).
 function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
-        second_phi, floor, subjects, constraints = nothing)
+        second_phi, floor, subjects, constraints = nothing; require_instances = true)
     μ = copy(θ[indices])
     Ωnew = deepcopy(Ω)
     for _ in 1:100
@@ -205,12 +207,15 @@ function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
                 counts[family] += 1
             end
         end
-        all(f -> counts[f] > 0 || _fully_fixed_family(constraints, f), eachindex(counts)) ||
+        !require_instances ||
+            all(f -> counts[f] > 0 || _fully_fixed_family(constraints, f), eachindex(counts)) ||
             throw(ArgumentError(
                 "SAEM selected subjects contain no instances of at least one estimated covariance family"))
         nextΩ = [begin
             fam = _omega_family(constraints, f)
-            if fam === nothing
+            if counts[f] == 0 && !_fully_fixed_family(constraints, f)
+                copy(Ωnew[f])
+            elseif fam === nothing
                 E = eigen(Symmetric(sums[f] / counts[f]))
                 Matrix(Symmetric(E.vectors * Diagonal(max.(E.values, floor)) * E.vectors'))
             elseif fam.fully_fixed
@@ -273,16 +278,10 @@ function _saem_omega_above_floor(layout::RaggedNLMELayout, ω, floor)
     return all(Ω -> all(isfinite, Ω) && eigmin(Symmetric(Ω)) >= floor, covariances)
 end
 
-function _saem_floor_omega(layout::RaggedNLMELayout, ω, floor)
-    covariances = omega_matrix(layout, ω)
-    all(Ω -> all(isfinite, Ω), covariances) || throw(DomainError(ω,
-        "SAEM MAP M-step starts with non-finite covariance"))
-    floored = [begin
-        E = eigen(Symmetric(Ω))
-        Matrix(Symmetric(E.vectors * Diagonal(max.(E.values, floor)) * E.vectors'))
-    end for Ω in covariances]
-    return omega_parameters(layout, floored)
-end
+_saem_closed_form_mstep(layout::RaggedNLMELayout, θ, Ω, indices, design, mean_phi,
+    second_phi, floor, subjects, constraints; require_instances = true) =
+    _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi,
+        floor, subjects, constraints; require_instances)
 
 function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
         options::SAEMOptions, kernel::StandardSAEMMH, node)
@@ -365,18 +364,9 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
             phase === nothing || _saem_report!(phase, "M-step", γ, loglikelihood,
                 _saem_kernel_stats(kernel, nprior, nrw, sweeps * length(ids), 0, nothing))
             θ_before = copy(θ)
-            if map_objective
-                θ, σ, ω = _saem_map_mstep(model, ids, layout, θ, σ, ω,
-                    indices, design, bank, weights, mean_phi, second_phi,
-                    options.numeric_maxiter, numeric_mode, γ, options.omega_floor,
-                    constraints)
-            else
-                θ, Ω = _ragged_gaussian_mstep(layout, θ, omega_matrix(layout, ω), indices,
-                    design, mean_phi, second_phi, options.omega_floor, ids, constraints)
-                ω = _apply_omega_constraints(constraints, omega_parameters(layout, Ω))
-                θ, σ = numeric_update(model, ids, θ, σ, free, indices, design,
-                    bank, weights, options.numeric_maxiter, γ)::Tuple{Vector{Float64},Vector{Float64}}
-            end
+            θ, σ, ω = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
+                indices, design, free, bank, weights, mean_phi, second_phi,
+                options, γ, constraints, map_objective)
             _saem_recenter!(H, θ_before, θ, indices, design)
         end
         completed = k

@@ -4,6 +4,7 @@ using Random
 using LinearAlgebra
 using ADTypes: AutoEnzyme
 using Enzyme
+import Optim
 import NLMEEstimation as NE
 
 struct ADPopulationPrior end
@@ -95,39 +96,10 @@ NE.population_prior_provenance(::PriorGaussianModel) = "synthetic transformed pr
     @test abs(fit.theta[1] - ml_fit.theta[1]) > 1e-3
 end
 
-@testset "population prior: SAEM mixture and online gradients" begin
+@testset "population prior: SAEM fit records the prior" begin
     model = PriorGaussianModel([[0.0], [1.0]], true)
-    layout = nlme_layout(model)
     θ, σ, ω = [0.2], Float64[], [log(0.6)]
-    Φ = reshape([0.1, 0.9], 1, 2)
-    mean_phi = copy(Φ)
-    second_phi = reshape([Φ[1, 1]^2, Φ[1, 2]^2], 1, 1, 2)
-    design = [ones(1, 1), ones(1, 1)]
-    x = vcat(θ, σ, ω)
     no_prior = PriorGaussianModel(model.y, false)
-    for mode in (Val(:online), Val(:mixture))
-        value, gradient = NE._saem_map_value_gradient(x, model, 1:2, layout,
-            [1], design, [Φ], [1.0], mean_phi, second_phi, mode)
-        plain_value, plain_gradient = NE._saem_map_value_gradient(x, no_prior,
-            1:2, layout, [1], design, [Φ], [1.0], mean_phi, second_phi, mode)
-        lp, gθ, _, gω = population_logprior_and_gradient(model, θ, σ, ω)
-        @test value - plain_value ≈ lp
-        @test gradient - plain_gradient ≈ vcat(gθ, gω)
-        repeated, repeated_gradient = NE._saem_map_value_gradient(x, model,
-            1:2, layout, [1], design, [Φ, Φ], [0.25, 0.75], mean_phi,
-            second_phi, mode)
-        @test repeated ≈ value
-        @test repeated_gradient ≈ gradient
-        for j in eachindex(x)
-            dx = zeros(length(x))
-            dx[j] = 1e-6
-            vp = first(NE._saem_map_value_gradient(x + dx, model, 1:2,
-                layout, [1], design, [Φ], [1.0], mean_phi, second_phi, mode))
-            vm = first(NE._saem_map_value_gradient(x - dx, model, 1:2,
-                layout, [1], design, [Φ], [1.0], mean_phi, second_phi, mode))
-            @test gradient[j] ≈ (vp - vm) / 2e-6 atol = 1e-6
-        end
-    end
     fit = saem(model, θ, σ, ω; rng = MersenneTwister(7),
         options = SAEMOptions(iterations = 4, burnin = 2, mcmc_burnin = 1,
             mh_rounds = 1, numeric_maxiter = 3, numeric_mstep = :online))
@@ -144,7 +116,177 @@ end
     @test plain_fit.prior_provenance === nothing
     @test population_logprior_and_gradient(nothing, θ, σ, ω) ==
         (0.0, [0.0], Float64[], [0.0])
-    @test NE._saem_floor_omega(layout, [log(0.01)], 0.04)[1] ≈ log(0.2)
+end
+
+# Normal observations around a mu-referenced intercept θ[1] plus a slope θ[2]
+# with no declared statistic, with log residual SD σ[1]: both blocks of the
+# SAEM M-step are non-empty. `prior` is `:none` (ML), `:flat` (a MAP objective
+# whose prior is identically zero), `:normal` (independent unit normals) or
+# `:strong` (standard deviation 0.2). `gradients` counts population gradient
+# calls. The model is linear and Gaussian in η, so `slope_marginal` is exact.
+struct PriorSlopeModel
+    t::Vector{Vector{Float64}}
+    y::Vector{Vector{Float64}}
+    prior::Symbol
+    gradients::Base.RefValue{Int}
+end
+
+function prior_slope_model(prior; n = 30, seed = 3)
+    rng = Xoshiro(seed)
+    t = [sort(rand(rng, 4)) for _ in 1:n]
+    y = [(1.0 + 0.5randn(rng)) .+ 0.5 .* ti .+ 0.3 .* randn(rng, 4) for ti in t]
+    return PriorSlopeModel(t, y, prior, Ref(0))
+end
+
+NE.nsubjects(m::PriorSlopeModel) = length(m.y)
+NE.nlme_layout(::PriorSlopeModel) = NLMELayout(2, 1, [1])
+NE.mu_referencing(m::PriorSlopeModel) = MuReferencing([1], [ones(1, 1) for _ in m.y])
+slope_residuals(m, i, θ, η) = m.y[i] .- (θ[1] + η[1]) .- θ[2] .* m.t[i]
+
+function NE.conditional_loglikelihood(m::PriorSlopeModel, i, θ, σ, η)
+    r = slope_residuals(m, i, θ, η)
+    return -sum(abs2, r) / (2exp(2σ[1])) - length(r) * (log(2π) / 2 + σ[1])
+end
+
+function NE.conditional_loglikelihood_and_population_gradient(m::PriorSlopeModel,
+        i, θ, σ, η)
+    m.gradients[] += 1
+    r = slope_residuals(m, i, θ, η)
+    v = exp(2σ[1])
+    return NE.conditional_loglikelihood(m, i, θ, σ, η),
+        [sum(r), dot(r, m.t[i])] ./ v, [sum(abs2, r) / v - length(r)]
+end
+
+slope_prior_offset(θ, σ, ω) = vcat(θ .- 1, σ, ω)
+slope_prior_sd(m) = m.prior === :strong ? 0.2 : 1.0
+NE.population_logprior(m::PriorSlopeModel, θ, σ, ω) =
+    m.prior === :none ? nothing : m.prior === :flat ? 0.0 :
+    -sum(abs2, slope_prior_offset(θ, σ, ω)) / (2slope_prior_sd(m)^2)
+
+function NE.population_logprior_and_gradient(m::PriorSlopeModel, θ, σ, ω)
+    m.prior in (:normal, :strong) || return (0.0, zero(θ), zero(σ), zero(ω))
+    g = -slope_prior_offset(θ, σ, ω) / slope_prior_sd(m)^2
+    return population_logprior(m, θ, σ, ω), g[1:2], g[3:3], g[4:end]
+end
+
+function slope_marginal(m::PriorSlopeModel, x)
+    θ, σ, ω = x[1:2], x[3], x[4]
+    return sum(eachindex(m.y)) do i
+        n = length(m.y[i])
+        C = cholesky(Symmetric(exp(2ω) * ones(n, n) + exp(2σ) * I))
+        z = C.L \ slope_residuals(m, i, θ, [0.0])
+        -(n * log(2π) + logdet(C) + dot(z, z)) / 2
+    end
+end
+
+@testset "population prior: SAEM numerical block adds the prior once" begin
+    model = prior_slope_model(:normal)
+    plain = prior_slope_model(:none)
+    θ, σ, ω = [0.9, 0.4], [log(0.4)], [log(0.6)]
+    Φ = reshape(collect(range(0.5, 1.5; length = 30)), 1, 30)
+    design = [ones(1, 1) for _ in 1:30]
+    free = [2, 3]
+    z = [0.45, log(0.35)]
+    θz, σz = [θ[1], z[1]], z[2:2]
+    lp, gθ, gσ, _ = population_logprior_and_gradient(model, θz, σz, ω)
+    for mode in (Val(:online), Val(:mixture))
+        value, gradient = NE._saem_numeric_value_gradient(z, model, 1:30, θ, σ,
+            free, [1], design, [Φ], [1.0], mode, ω)
+        plain_value, plain_gradient = NE._saem_numeric_value_gradient(z, plain,
+            1:30, θ, σ, free, [1], design, [Φ], [1.0], mode)
+        @test value - plain_value ≈ lp
+        @test gradient - plain_gradient ≈ vcat(gθ, gσ)[free]
+        # Retained draws add the conditional term per draw, the prior once.
+        repeated, repeated_gradient = NE._saem_numeric_value_gradient(z, model,
+            1:30, θ, σ, free, [1], design, [Φ, Φ], [0.25, 0.75], mode, ω)
+        @test repeated ≈ value
+        @test repeated_gradient ≈ gradient
+        for j in eachindex(z)
+            dz = zeros(length(z))
+            dz[j] = 1e-6
+            vp = NE._saem_numeric_objective(z + dz, model, 1:30, θ, σ, free, [1],
+                design, [Φ], [1.0], ω)
+            vm = NE._saem_numeric_objective(z - dz, model, 1:30, θ, σ, free, [1],
+                design, [Φ], [1.0], ω)
+            @test gradient[j] ≈ (vp - vm) / 2e-6 rtol = 1e-6
+        end
+    end
+end
+
+@testset "population prior: SAEM Gaussian block maximizes without the model" begin
+    # `ADPopulationPrior` has no likelihood, so any model evaluation would throw.
+    layout = NLMELayout(2, 1, [2])
+    model = ADPopulationPrior()
+    mean_phi = [0.6 0.3 0.1; -0.2 0.4 0.0]
+    second_phi = zeros(2, 2, 3)
+    for k in 1:3
+        φ = mean_phi[:, k]
+        second_phi[:, :, k] = φ * φ' + [0.2 0.03; 0.03 0.1]
+    end
+    design = [Matrix{Float64}(I, 2, 2) for _ in 1:3]
+    θ, Ω = NE._saem_gaussian_mstep(layout, [0.0, 0.0], Matrix(1.0I, 2, 2), [1, 2],
+        design, mean_phi, second_phi, 1e-8)
+    σ = [-0.3]
+    ω = omega_parameters(layout, Ω)
+    θmap, ωmap = NE._saem_gaussian_map_block(model, layout, θ, σ, ω, [1, 2], design,
+        mean_phi, second_phi, 1:3, 1e-8, nothing)
+    posterior(θ, ω) = first(NE._saem_gaussian_map_value_gradient(layout, θ, ω,
+        [1, 2], design, mean_phi, second_phi)) + population_logprior(model, θ, σ, ω)
+    _, gμ, gω = NE._saem_gaussian_map_value_gradient(layout, θmap, ωmap, [1, 2],
+        design, mean_phi, second_phi)
+    _, pθ, _, pω = population_logprior_and_gradient(model, θmap, σ, ωmap)
+    @test maximum(abs, vcat(gμ + pθ, gω + pω)) < 1e-6
+    @test posterior(θmap, ωmap) > posterior(θ, ω)
+    @test θmap != θ && ωmap != ω
+end
+
+@testset "population prior: SAEM with a zero prior retraces the ML fit" begin
+    for mode in (:online, :mixture)
+        options = SAEMOptions(iterations = 30, burnin = 10, mcmc_burnin = 5,
+            numeric_mstep = mode)
+        fit(prior) = saem(prior_slope_model(prior), [0.8, 0.3], [log(0.5)], [log(0.4)];
+            rng = Xoshiro(4), options)
+        ml, map = fit(:none), fit(:flat)
+        @test ml.objective == :ML && map.objective == :MAP
+        @test map.theta == ml.theta
+        @test map.sigma == ml.sigma
+        @test map.omega == ml.omega
+        @test map.eta == ml.eta
+    end
+end
+
+@testset "population prior: the SAEM MAP M-step costs what the ML step costs" begin
+    for mode in (:online, :mixture)
+        options = SAEMOptions(iterations = 40, burnin = 20, mcmc_burnin = 5,
+            numeric_mstep = mode)
+        ml, map = prior_slope_model(:none), prior_slope_model(:normal)
+        saem(ml, [0.8, 0.3], [log(0.5)], [log(0.4)]; rng = Xoshiro(4), options)
+        map_fit = saem(map, [0.8, 0.3], [log(0.5)], [log(0.4)]; rng = Xoshiro(4), options)
+        @test map_fit.objective == :MAP
+        # Population gradients are taken only by the numerical block, which a
+        # prior does not enlarge (a joint search took about nine times as many).
+        @test map.gradients[] <= 1.25ml.gradients[]
+    end
+end
+
+@testset "population prior: SAEM finds the exact MAP point" begin
+    model = prior_slope_model(:strong)
+    x0 = [0.8, 0.3, log(0.5), log(0.4)]
+    posterior(x) = slope_marginal(model, x) +
+        population_logprior(model, x[1:2], x[3:3], x[4:4])
+    exact(f) = Optim.minimizer(Optim.optimize(x -> -f(x), x0, Optim.NelderMead(),
+        Optim.Options(g_tol = 1e-12, iterations = 20_000)))
+    map_point = exact(posterior)
+    ml_point = exact(x -> slope_marginal(model, x))
+    # The prior moves the slope and the random-effect SD well beyond SAEM's noise.
+    @test abs(map_point[2] - ml_point[2]) > 0.1
+    @test abs(map_point[4] - ml_point[4]) > 0.1
+    for mode in (:online, :mixture)
+        fit = saem(model, x0[1:2], x0[3:3], x0[4:4]; rng = Xoshiro(1),
+            options = SAEMOptions(iterations = 300, burnin = 150, mcmc_burnin = 5,
+                numeric_mstep = mode))
+        @test vcat(fit.theta, fit.sigma, fit.omega) ≈ map_point atol = 0.04
+    end
 end
 
 @testset "population prior: correlated random-effect M-step gradient" begin
