@@ -195,6 +195,20 @@ end
     @test_throws ArgumentError NE._saem_check_options(SAEMOptions(numeric_mstep=:other))
 end
 
+@testset "SAEM M-step search reaches its optimum through rounding" begin
+    # A large constant makes f's rounding exceed the gain of the last steps to
+    # the optimum. Those full steps are judged by their prediction; halving them
+    # through rounding noise instead stopped short of gtol.
+    A = [2.0 0.3; 0.3 0.5]
+    a = [0.4, -1.2]
+    objective(x) = (1e9 - dot(x - a, A * (x - a)) / 2, -A * (x - a))
+    screens = Ref(0)
+    screen(x) = (screens[] += 1; first(objective(x)))
+    x = NE._bfgs_ascent(objective, [3.0, 2.0], 100, _ -> true; screen, gtol = 1e-9)
+    @test maximum(abs, A * (x - a)) < 1e-9
+    @test screens[] < 30
+end
+
 @testset "SAEM Hessian warmup metric" begin
     model = LinearSAEM([[1.0, 2.0]])
     prior = re_prior(model, [log(0.5)])

@@ -449,7 +449,10 @@ end
 # A trial point whose evaluation is non-finite or infeasible
 # (`_InfeasibleEvaluation`) halves the step; at `x0` either is an error.
 # `inverse_hessian`, if given, is a positive-definite initial (and reset)
-# inverse curvature in place of the identity.
+# inverse curvature in place of the identity. Near the optimum a full step can
+# be predicted to gain less than f resolves; as in the EBE solver (`_accepts`),
+# such a step is judged by its prediction and f only rejects a drop beyond that
+# resolution, instead of halving to the minimum step through rounding noise.
 function _bfgs_ascent(objective, x0, maxiter, admissible; screen = nothing,
         gtol = 1.0e-6, inverse_hessian = nothing, what = "SAEM MAP M-step")
     x = copy(x0)
@@ -471,7 +474,11 @@ function _bfgs_ascent(objective, x0, maxiter, admissible; screen = nothing,
         accepted = false
         while step >= 1.0e-8
             candidate = x + step * direction
-            threshold = value + 1.0e-4 * step * dot(gradient, direction)
+            predicted = step * dot(gradient, direction)
+            threshold = value + 1.0e-4 * predicted
+            if step == 1 && predicted <= _resolution(value)
+                threshold = min(threshold, value - _resolution(value))
+            end
             screened = admissible(candidate) &&
                 (screen === nothing || _armijo(_feasible(screen, candidate), threshold))
             trial = screened ? _feasible(objective, candidate) : nothing
