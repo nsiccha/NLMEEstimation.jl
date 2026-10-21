@@ -79,7 +79,10 @@ using .TestCommon
 end
 
 @testset "covariance step: SAEM estimates and population prior" begin
-    ml = growth_model()
+    # Forty subjects: with the default twelve the likelihood is flat in the
+    # log-Cholesky ω[η2,η2] (it falls 0.25 from -1.6 to -9), so whether a short
+    # SAEM run ends at a strict local optimum, R positive definite, was seed luck.
+    ml = growth_model(n = 40)
     fit = saem(ml, [0.9, 0.45], [log(0.35)], [log(0.65), 0.05, log(0.5)];
         rng = Xoshiro(3), options = SAEMOptions(iterations = 80, burnin = 40, mcmc_burnin = 5))
     from_fit = covariance_step(ml, fit)
@@ -91,7 +94,7 @@ end
 
     # With a population prior the objective is the log posterior: R gains the
     # prior's curvature, and the gradient its gradient.
-    model = growth_model(prior_sd = 2.0)
+    model = growth_model(n = 40, prior_sd = 2.0)
     result = covariance_step(model, fit.theta, fit.sigma, fit.omega; method = :r)
     @test result.objective == :MAP
     exact_R = -ForwardDiff.hessian(z -> growth_exact(model, z), x̂) + I / 2.0^2

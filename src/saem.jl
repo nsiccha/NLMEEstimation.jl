@@ -9,19 +9,22 @@ Settings for [`saem`](@ref). The first `burnin` stochastic-approximation
 iterations use step size one; subsequent sizes are `(k-burnin)^(-step_exponent)`.
 `mcmc_burnin` runs kernel sweeps at the starting population parameters without
 updating them. With `StandardSAEMMH`, each round makes one prior-independence
-and one random-walk proposal for every subject, each evaluated in one batch.
-The random-walk scale adapts toward 0.3 acceptance for the first
-`adapt_iterations` sweeps and is then frozen. With `WarmupHMCNUTS`, each round
-makes one fixed-kernel NUTS transition per subject. `omega_floor` is a
-covariance eigenvalue floor in the M-step. With few subjects for the
-mu-referenced coefficients, the covariance that maximizes an M-step's Gaussian
-term can be singular; its closed-form update moves towards the floor by at most
-100 coordinate updates per M-step, so Ω may approach it over several iterations.
+and one joint random-walk proposal for every subject, then one random-walk
+proposal per η coordinate, each evaluated in one batch. The joint random-walk
+scale adapts toward 0.3 acceptance and each coordinate's scale toward 0.4 for
+the first `adapt_iterations` sweeps; then they are frozen. With
+`WarmupHMCNUTS`, each round makes one fixed-kernel NUTS transition per subject.
+`omega_floor` is a covariance eigenvalue floor in the M-step. With few subjects
+for the mu-referenced coefficients, the covariance that maximizes an M-step's
+Gaussian term can be singular; its closed-form update moves towards the floor
+by at most 100 coordinate updates per M-step, so Ω may approach it over several
+iterations.
 `numeric_mstep=:auto` uses an online update for remaining σ coordinates when
 all θ coordinates have a closed-form `MuReferencing` update; otherwise it uses
-the historical running-mixture objective. `:online` explicitly applies the
-online update to every remaining θ and σ coordinate: it optimizes the current
-complete-data conditional likelihood, then moves toward that optimizer by
+the historical running-mixture objective. Either numerical update also moves
+the mu-referenced θ, holding each sampled η fixed. `:online` explicitly applies
+the online update to every remaining θ and σ coordinate: it optimizes the
+current complete-data conditional likelihood, then moves toward that optimizer by
 the SA step size, retaining one sampled latent-effect matrix. Its use for a
 structural θ without a declared sufficient statistic is an approximation.
 `:mixture` optimizes the exact running conditional-density mixture and retains
@@ -51,8 +54,12 @@ abstract type AbstractSAEMKernel end
 """
     StandardSAEMMH()
 
-The standard SAEM per-subject kernel: one prior-independence and one
-covariance-scaled random-walk Metropolis proposal per subject and MH round.
+The standard SAEM per-subject kernel: per subject and MH round, one
+prior-independence proposal, one covariance-scaled random-walk Metropolis
+proposal, and one random-walk proposal per η coordinate, each coordinate with
+its own adapted scale (saemix's componentwise kernel). The coordinate sweep
+keeps a subject's chain moving when its posterior widths differ widely across
+coordinates, which a single joint scale cannot follow.
 """
 struct StandardSAEMMH <: AbstractSAEMKernel end
 
@@ -282,7 +289,9 @@ end
 
 Population estimate from [`saem`](@ref). `eta` holds the final subject-chain
 states, one column per entry of `subjects`. `acceptance` gives prior and
-random-walk acceptance fractions; `rw_scale` is the final proposal scale.
+joint random-walk and per-coordinate random-walk acceptance fractions
+(`prior`, `random_walk`, `coordinates`); `rw_scale` is the final joint proposal
+scale.
 These MH-only fields are `missing` for other kernels. `kernel` identifies the
 method and `nuts_divergences` counts its fixed-kernel transitions that diverged.
 For MALA, `mala_stepsizes` and `mala_acceptance` hold per-subject final values;
@@ -333,7 +342,7 @@ struct RaggedSAEMResult{T, P}
     omega::Vector{T}
     omega_matrix::Vector{Matrix{T}}
     eta::Vector{Vector{T}}
-    acceptance::NamedTuple{(:prior, :random_walk),Tuple{Float64,Float64}}
+    acceptance::NamedTuple{(:prior, :random_walk, :coordinates),Tuple{Float64,Float64,Float64}}
     rw_scale::Float64
     kernel::Symbol
     numeric_mstep::Symbol
@@ -485,7 +494,8 @@ function _saem_check_options(o::SAEMOptions)
     return nothing
 end
 
-function _saem_mh_round!(rng, model, subjects, θ, σ, prior, H, ℓ, scale)
+function _saem_mh_round!(rng, model, subjects, θ, σ, prior, H, ℓ, scale,
+        component_scales)
     m, n = size(H)
     proposal = Matrix(prior.cholesky_factor * randn(rng, m, n))
     proposed_ℓ = _proposal_loglikelihoods(model, subjects, θ, σ, proposal)
@@ -516,7 +526,52 @@ function _saem_mh_round!(rng, model, subjects, θ, σ, prior, H, ℓ, scale)
             rw_accepted += 1
         end
     end
-    return prior_accepted, rw_accepted
+    component_accepted, component_proposed = _saem_mh_component_sweep!(rng, model,
+        subjects, θ, σ, prior, H, ℓ, component_scales)
+    return prior_accepted, rw_accepted, component_accepted, component_proposed
+end
+
+# One random-walk proposal per η coordinate for every subject, each scaled by
+# its own adapted factor times the coordinate's prior standard deviation.
+# Returns the accepted and proposed counts per coordinate.
+function _saem_mh_component_sweep!(rng, model, subjects, θ, σ, prior, H, ℓ, scales)
+    m, n = size(H)
+    sd = sqrt.(vec(sum(abs2, Matrix(prior.cholesky_factor); dims = 2)))
+    accepted = zeros(Int, m)
+    for c in 1:m
+        proposal = copy(H)
+        proposal[c, :] .+= (scales[c] * sd[c]) .* randn(rng, n)
+        proposed_ℓ = _proposal_loglikelihoods(model, subjects, θ, σ, proposal)
+        length(proposed_ℓ) == n && all(x -> !isnan(x) && x != Inf, proposed_ℓ) ||
+            throw(DomainError(proposed_ℓ,
+                "coordinate random-walk MH proposal returned invalid densities"))
+        for k in 1:n
+            logratio = proposed_ℓ[k] - ℓ[k] +
+                re_logprior(prior, view(proposal, :, k)) - re_logprior(prior, view(H, :, k))
+            if log(rand(rng)) < logratio
+                H[:, k] = proposal[:, k]
+                ℓ[k] = proposed_ℓ[k]
+                accepted[c] += 1
+            end
+        end
+    end
+    return accepted, fill(n, m)
+end
+
+# The MH random-walk scales adapt during the first `adapt_iterations` sweeps:
+# the joint proposal's toward 0.3 acceptance, each coordinate's toward 0.4.
+# Returns the joint log scale; the coordinate log scales update in place.
+function _saem_adapt_mh_scales!(logscale, component_logscales, rw_accepted, n,
+        component_accepted, component_proposed, sweeps)
+    logscale = clamp(logscale + (rw_accepted / n - 0.3) / sqrt(sweeps),
+        log(1.0e-3), log(1.0e2))
+    for c in eachindex(component_logscales)
+        component_proposed[c] > 0 || continue
+        component_logscales[c] = clamp(component_logscales[c] +
+            (component_accepted[c] / component_proposed[c] - 0.4) / sqrt(sweeps),
+            log(1.0e-3), log(1.0e2))
+    end
+    return logscale
 end
 
 function _saem_mu_trait(model, subjects, layout)
@@ -793,15 +848,22 @@ function _saem_numeric_value_gradient(z, model, subjects, θ, σ, free, indices,
     return value + lp, (gradient + glp)[free]
 end
 
+# `metric` carries the search's inverse-Hessian approximation from one M-step
+# to the next; the first search starts from a difference estimate of the
+# curvature, because the coordinates' scales can differ by many orders of
+# magnitude (an intercept pinned by thousands of observations next to a
+# rate constant).
 function _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design, bank, weights,
-        maxiter, mode::Val, ω = nothing)
+        maxiter, mode::Val, ω, metric)
     isempty(free) && return θ, σ
     objective(z) = _saem_numeric_value_gradient(z, model, subjects, θ, σ,
         free, indices, design, bank, weights, mode, ω)
     screen(z) = _saem_numeric_objective(z, model, subjects, θ, σ,
         free, indices, design, bank, weights, ω)
-    z = _bfgs_ascent(objective, vcat(θ, σ)[free], maxiter, _ -> true;
-        screen, what = "SAEM numerical M-step")
+    z0 = vcat(θ, σ)[free]
+    metric[] === nothing && (metric[] = _saem_search_metric(objective, z0))
+    z, metric[] = _bfgs_ascent_state(objective, z0, maxiter, _ -> true;
+        screen, inverse_hessian = metric[], what = "SAEM numerical M-step")
     x = vcat(θ, σ)
     x[free] = z
     return x[1:length(θ)], x[length(θ)+1:end]
@@ -853,32 +915,59 @@ function _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
     return point(z)
 end
 
-# The inverse of minus the Hessian of a value-and-gradient function at z, from
-# central differences of its gradient; `nothing` (the identity) where that
-# curvature is not positive definite.
-function _saem_inverse_curvature(f, z; step = 1.0e-5)
+# Minus the Hessian of a value-and-gradient function at z, symmetrized, from
+# central differences of its gradient; `nothing` where a difference point is
+# outside the model's domain or not finite.
+function _saem_difference_curvature(f, z; step = 1.0e-5)
     d = length(z)
-    d == 0 && return nothing
     H = zeros(d, d)
     for j in 1:d
         e = zeros(d)
         e[j] = step
-        H[:, j] = (last(f(z + e)) - last(f(z - e))) / 2step
+        plus, minus = _feasible(f, z + e), _feasible(f, z - e)
+        (plus === nothing || minus === nothing) && return nothing
+        isfinite(first(plus)) && isfinite(first(minus)) || return nothing
+        H[:, j] = (last(plus) - last(minus)) / 2step
     end
-    C = cholesky(Symmetric(-(H + H') / 2); check = false)
-    return issuccess(C) ? inv(C) : nothing
+    C = Symmetric(-(H + H') / 2)
+    return all(isfinite, C) ? C : nothing
+end
+
+# The inverse of that curvature; `nothing` (the identity) where it is not
+# positive definite or not available.
+function _saem_inverse_curvature(f, z; step = 1.0e-5)
+    isempty(z) && return nothing
+    C = _saem_difference_curvature(f, z; step)
+    C === nothing && return nothing
+    F = cholesky(C; check = false)
+    return issuccess(F) ? inv(F) : nothing
+end
+
+# A positive-definite quasi-Newton metric from that curvature: the inverse of
+# its absolute eigenvalues, floored relative to the largest, so that a start
+# where the objective is not concave still gets each direction's scale.
+# `nothing` (the identity) where the curvature is not available.
+function _saem_search_metric(f, z; step = 1.0e-5)
+    isempty(z) && return nothing
+    C = _saem_difference_curvature(f, z; step)
+    C === nothing && return nothing
+    E = eigen(C)
+    λ = abs.(E.values)
+    λ = max.(λ, eps()^(2 / 3) * maximum(λ))
+    all(>(0), λ) || return nothing
+    return Matrix(E.vectors * Diagonal(inv.(λ)) * E.vectors')
 end
 
 _saem_numeric_update(::Val{:mixture}, model, subjects, θ, σ, free, indices,
-    design, bank, weights, maxiter, γ, ω = nothing) =
+    design, bank, weights, maxiter, γ, ω, metric) =
     _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design,
-        bank, weights, maxiter, Val(:mixture), ω)
+        bank, weights, maxiter, Val(:mixture), ω, metric)
 
 function _saem_numeric_update(::Val{:online}, model, subjects, θ, σ, free,
-        indices, design, bank, weights, maxiter, γ, ω = nothing)
+        indices, design, bank, weights, maxiter, γ, ω, metric)
     isempty(free) && return θ, σ
     θstar, σstar = _saem_numeric_mstep(model, subjects, θ, σ, free, indices,
-        design, bank, weights, maxiter, Val(:online), ω)
+        design, bank, weights, maxiter, Val(:online), ω, metric)
     x = vcat(θ, σ)
     xstar = vcat(θstar, σstar)
     x[free] .+= γ .* (xstar[free] .- x[free])
@@ -888,14 +977,18 @@ end
 # Resolve the selected M-step once at runtime. Keeping its callable abstract in
 # saem prevents Julia from compiling the unused mode's model-specific gradient
 # while compiling the outer SAEM loop.
+# It also holds the numerical search's metric across the fit's M-steps.
 struct _SAEMNumericUpdate{M<:Val} <: Function
     mode::M
+    metric::Base.RefValue{Union{Nothing, Matrix{Float64}}}
 end
+_SAEMNumericUpdate(mode::Val) =
+    _SAEMNumericUpdate(mode, Ref{Union{Nothing, Matrix{Float64}}}(nothing))
 
 function (update::_SAEMNumericUpdate)(model, subjects, θ, σ, free, indices,
         design, bank, weights, maxiter, γ, ω = nothing)
     return _saem_numeric_update(update.mode, model, subjects, θ, σ, free,
-        indices, design, bank, weights, maxiter, γ, ω)
+        indices, design, bank, weights, maxiter, γ, ω, update.metric)
 end
 
 _saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
@@ -905,13 +998,17 @@ _saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
 
 # One population update, for either layout. At fixed Φ the conditional density
 # does not depend on the mu-referenced θ, and Ω enters only the expected Gaussian
-# random-effect density, so the update separates into a Gaussian block
-# (mu-referenced θ and Ω) and a numerical block (the remaining θ and σ). Without
-# a population prior the Gaussian block takes closed-form coordinate updates
-# (`_saem_gaussian_mstep`). A prior
-# couples the blocks only through its own density: the MAP update moves the
-# Gaussian block on to its maximizer with the prior, without evaluating the
-# model, and adds the prior to the numerical update. With `:online`, only the
+# random-effect density, so the update starts with a Gaussian block
+# (mu-referenced θ and Ω). Without a population prior it takes closed-form
+# coordinate updates (`_saem_gaussian_mstep`); a prior moves it on to its
+# maximizer with the prior, without evaluating the model. The numerical block
+# then holds every draw's η fixed instead of its φ, so it moves the
+# mu-referenced θ jointly with the remaining θ and σ, adding the prior once.
+# Holding φ fixed, a σ coordinate that trades off against a random effect (a
+# rate against every subject's amplitude) could only move as fast as the chains
+# followed it, and SAEM stopped hundreds of iterations short (snag
+# `saem-population-8975f340`). Returns θ, σ, ω and the θ of the Gaussian block,
+# whose φ the chains keep (`_saem_recenter!`). With `:online`, only the
 # numerical block is damped by the SA step size γ; the Gaussian block already
 # uses the stochastically averaged statistics.
 function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indices,
@@ -925,10 +1022,48 @@ function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indice
         θ, ω = _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
             mean_phi, second_phi, subjects, options.omega_floor, constraints)
     end
-    θ, σ = numeric_update(model, subjects, θ, σ, free, indices, design, bank,
-        weights, options.numeric_maxiter, γ,
+    θ_centered = θ
+    # Without other numerical coordinates there is no ridge to follow, and the
+    # model needs no population gradient.
+    isempty(free) && return θ, σ, ω, θ_centered
+    etas = [_saem_eta(Φ, θ, indices, design) for Φ in bank]
+    nodesign = [zeros(size(X, 1), 0) for X in design]
+    θ, σ = numeric_update(model, subjects, θ, σ, sort!(vcat(indices, free)), Int[],
+        nodesign, etas, weights, options.numeric_maxiter, γ,
         map_objective ? ω : nothing)::Tuple{Vector{Float64},Vector{Float64}}
-    return θ, σ, ω
+    _saem_transport!(mean_phi, second_phi, bank, design, θ[indices] - θ_centered[indices])
+    return θ, σ, ω, θ_centered
+end
+
+# A non-centred step moves every φ = Dθ + η by D δ. Shift the running
+# statistics and the retained draws with them, so that they describe the same η
+# and the next closed-form step does not pull the mu-referenced θ back.
+function _saem_transport!(mean_phi::AbstractMatrix, second_phi, bank, design, δ)
+    all(iszero, δ) && return nothing
+    for k in axes(mean_phi, 2)
+        d = design[k] * δ
+        m = mean_phi[:, k]
+        second_phi[:, :, k] .+= m * d' + d * m' + d * d'
+        mean_phi[:, k] .+= d
+        for Φ in bank
+            Φ[:, k] .+= d
+        end
+    end
+    return nothing
+end
+
+function _saem_transport!(mean_phi::AbstractVector, second_phi, bank, design, δ)
+    all(iszero, δ) && return nothing
+    for k in eachindex(mean_phi)
+        d = design[k] * δ
+        m = mean_phi[k]
+        second_phi[k] = second_phi[k] + m * d' + d * m' + d * d'
+        mean_phi[k] = m + d
+        for Φ in bank
+            Φ[k] = Φ[k] + d
+        end
+    end
+    return nothing
 end
 
 # Progress phases of an SAEM run under its node, prepared up front so that the
@@ -975,12 +1110,15 @@ function _saem_report!(phase, stage, γ, loglikelihood, kernel_stats)
     return nothing
 end
 
-_saem_kernel_stats(::StandardSAEMMH, nprior, nrw, denom, ndivergent, mala_states) =
+_saem_kernel_stats(::StandardSAEMMH, nprior, nrw, ncw, ncw_proposed, denom, ndivergent,
+        mala_states) =
     "acceptance $(short_string(Fraction(nprior / denom))) prior, " *
-    "$(short_string(Fraction(nrw / denom))) random walk"
-_saem_kernel_stats(::WarmupHMCNUTS, nprior, nrw, denom, ndivergent, mala_states) =
-    "$ndivergent divergent transitions"
-_saem_kernel_stats(::DualAveragingMALA, nprior, nrw, denom, ndivergent, mala_states) =
+    "$(short_string(Fraction(nrw / denom))) random walk, " *
+    "$(short_string(Fraction(ncw / ncw_proposed))) per coordinate"
+_saem_kernel_stats(::WarmupHMCNUTS, nprior, nrw, ncw, ncw_proposed, denom, ndivergent,
+    mala_states) = "$ndivergent divergent transitions"
+_saem_kernel_stats(::DualAveragingMALA, nprior, nrw, ncw, ncw_proposed, denom, ndivergent,
+        mala_states) =
     "mean MALA step size $(short_string(
         sum(s -> exp(s.log_stepsize), mala_states) / length(mala_states); sigdigits = 3))"
 
@@ -996,7 +1134,11 @@ Estimate population parameters using MCMC stochastic approximation. Subject
 chains persist across iterations. The Gaussian random-effect prior supplies a
 closed-form covariance M-step; [`MuReferencing`](@ref) also supplies the
 generalized-least-squares fixed-effect M-step. Remaining θ and σ coordinates
-use a first-order AD numerical M-step. By default, σ coordinates are updated
+use a first-order AD numerical M-step, which holds each chain's η fixed and so
+also moves the mu-referenced θ: a σ coordinate that trades off against a random
+effect then moves together with it. Its quasi-Newton search starts from a
+difference estimate of the objective's curvature, carried from one M-step to
+the next. By default, σ coordinates are updated
 online only when all structural θ coordinates have a `MuReferencing`
 sufficient-statistic update. Otherwise the historical running
 conditional-density objective is used and retains one latent-effect matrix
@@ -1083,7 +1225,8 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
     mean_phi = zeros(neta(layout), length(ids))
     second_phi = zeros(neta(layout), neta(layout), length(ids))
     logscale = log(options.rw_scale)
-    nprior = nrw = sweeps = 0
+    component_logscales = fill(log(options.rw_scale), neta(layout))
+    nprior = nrw = ncw = ncw_proposed = sweeps = 0
     ndivergent = 0
     root = kernel isa WarmupHMCNUTS ? mktempdir() : nothing
     mala_states = kernel isa DualAveragingMALA ?
@@ -1114,9 +1257,12 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
             end
             for _ in 1:options.mh_rounds
                 if kernel isa StandardSAEMMH
-                    ap, ar = _saem_mh_round!(rng, model, ids, θ, σ, prior, H, ℓ, exp(logscale))
+                    ap, ar, ac, apc = _saem_mh_round!(rng, model, ids, θ, σ, prior, H, ℓ,
+                        exp(logscale), exp.(component_logscales))
                     nprior += ap
                     nrw += ar
+                    ncw += sum(ac)
+                    ncw_proposed += sum(apc)
                 elseif kernel isa WarmupHMCNUTS
                     ndivergent += _saem_nuts_round!(nuts.states, model, ids, θ, σ, prior, H)
                 elseif kernel isa DualAveragingMALA
@@ -1127,15 +1273,16 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                 end
                 sweeps += 1
                 if kernel isa StandardSAEMMH && sweeps <= options.adapt_iterations
-                    logscale = clamp(logscale + (ar / length(ids) - 0.3) / sqrt(sweeps),
-                        log(1.0e-3), log(1.0e2))
+                    logscale = _saem_adapt_mh_scales!(logscale, component_logscales, ar,
+                        length(ids), ac, apc, sweeps)
                 end
             end
             if iteration <= options.mcmc_burnin
                 if phase !== nothing
                     update_progress!(phase, iteration)
                     _saem_report!(phase, nothing, nothing, nothing, _saem_kernel_stats(kernel,
-                        nprior, nrw, sweeps * length(ids), ndivergent, mala_states))
+                        nprior, nrw, ncw, ncw_proposed, sweeps * length(ids), ndivergent,
+                        mala_states))
                 end
                 continue
             end
@@ -1146,10 +1293,10 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
             _saem_record!(numeric_mode, bank, weights, Φ, γ)
             if k % options.mstep_interval == 0 || k == options.iterations
                 phase === nothing || _saem_report!(phase, "M-step", γ, loglikelihood,
-                    _saem_kernel_stats(kernel, nprior, nrw, sweeps * length(ids),
-                        ndivergent, mala_states))
+                    _saem_kernel_stats(kernel, nprior, nrw, ncw, ncw_proposed,
+                        sweeps * length(ids), ndivergent, mala_states))
                 θ_before, σ_before = copy(θ), copy(σ)
-                θ, σ, ω = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
+                θ, σ, ω, θ_kept = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
                     indices, design, free, bank, weights, mean_phi, second_phi,
                     options, γ, constraints, map_objective)
                 if mala_cache !== nothing && mala_cache.valid
@@ -1160,7 +1307,7 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                         mala_cache.valid = false
                     end
                 end
-                if _saem_recenter!(H, θ_before, θ, indices, design) && nuts !== nothing
+                if _saem_recenter!(H, θ_before, θ_kept, indices, design) && nuts !== nothing
                     _saem_nuts_restart!(nuts, H)
                 end
             end
@@ -1168,7 +1315,8 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
             if phase !== nothing
                 update_progress!(phase, k)
                 _saem_report!(phase, nothing, γ, loglikelihood, _saem_kernel_stats(kernel,
-                    nprior, nrw, sweeps * length(ids), ndivergent, mala_states))
+                    nprior, nrw, ncw, ncw_proposed, sweeps * length(ids), ndivergent,
+                    mala_states))
             end
         end
         _saem_finish_phase!(phases.burnin)
@@ -1185,7 +1333,8 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
         "SAEM final population log prior must be finite"))
     return SAEMResult(ids, θ, σ, ω, omega_matrix(layout, ω), H,
         (prior = is_mh ? nprior / denom : missing,
-            random_walk = is_mh ? nrw / denom : missing),
+            random_walk = is_mh ? nrw / denom : missing,
+            coordinates = is_mh ? ncw / ncw_proposed : missing),
         is_mh ? exp(logscale) : missing,
         is_mh ? :standard_mh : is_mala ? :dual_averaging_mala : :warmuphmc_nuts,
         ndivergent,

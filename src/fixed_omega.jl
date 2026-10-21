@@ -453,10 +453,16 @@ end
 # be predicted to gain less than f resolves; as in the EBE solver (`_accepts`),
 # such a step is judged by its prediction and f only rejects a drop beyond that
 # resolution, instead of halving to the minimum step through rounding noise.
-function _bfgs_ascent(objective, x0, maxiter, admissible; screen = nothing,
+_bfgs_ascent(objective, x0, maxiter, admissible; kwargs...) =
+    first(_bfgs_ascent_state(objective, x0, maxiter, admissible; kwargs...))
+
+# `_bfgs_ascent`, also returning the final inverse-Hessian approximation, so
+# that a caller solving a sequence of similar problems can start the next
+# search from it.
+function _bfgs_ascent_state(objective, x0, maxiter, admissible; screen = nothing,
         gtol = 1.0e-6, inverse_hessian = nothing, what = "SAEM MAP M-step")
     x = copy(x0)
-    isempty(x) && return x
+    isempty(x) && return x, inverse_hessian
     value, gradient = objective(x)
     isfinite(value) && all(isfinite, gradient) || throw(DomainError(value,
         "$what has non-finite objective or gradient"))
@@ -502,7 +508,7 @@ function _bfgs_ascent(objective, x0, maxiter, admissible; screen = nothing,
         end
         accepted || break
     end
-    return x
+    return x, B
 end
 
 # Whether a trial value passes the Armijo test; `nothing` is an infeasible trial.
