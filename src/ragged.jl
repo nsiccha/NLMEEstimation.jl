@@ -172,8 +172,10 @@ function _saem_mh_round!(rng, model, subjects, θ, σ, prior::RaggedNormalREPrio
     return prior_accepted, rw_accepted
 end
 
-# Without `require_instances`, an estimated family with no instances among
-# `subjects` keeps its covariance `Ω[f]` (a MAP step then moves it by the prior).
+# The ragged form of `_saem_gaussian_mstep`, which returns its iterate after 100
+# updates in the same way. Without `require_instances`, an estimated family with
+# no instances among `subjects` keeps its covariance `Ω[f]` (a MAP step then
+# moves it by the prior).
 function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
         second_phi, floor, subjects, constraints = nothing; require_instances = true)
     μ = copy(θ[indices])
@@ -224,16 +226,14 @@ function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
                 _fixed_family_update(fam, sums[f] / counts[f], Ωnew[f], floor)
             end
         end for f in eachindex(sums)]
-        if all(f -> maximum(abs, nextΩ[f] - Ωnew[f]) <=
-                1e-8 * max(1.0, maximum(abs, Ωnew[f])), eachindex(Ωnew))
-            Ωnew = nextΩ
-            θnew = copy(θ)
-            θnew[indices] = μ
-            return θnew, Ωnew
-        end
+        converged = all(f -> maximum(abs, nextΩ[f] - Ωnew[f]) <=
+            1e-8 * max(1.0, maximum(abs, Ωnew[f])), eachindex(Ωnew))
         Ωnew = nextΩ
+        converged && break
     end
-    throw(ErrorException("ragged SAEM Gaussian M-step did not converge in 100 coordinate updates"))
+    θnew = copy(θ)
+    θnew[indices] = μ
+    return θnew, Ωnew
 end
 
 function _saem_gaussian_map_value_gradient(layout::RaggedNLMELayout, θ, ω,

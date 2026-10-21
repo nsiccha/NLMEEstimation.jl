@@ -593,13 +593,21 @@ function _saem_moments!(mean_phi, second_phi, Φ, γ)
     return nothing
 end
 
+# The closed-form Gaussian block alternates the generalized-least-squares
+# mu-referenced θ at fixed Ω with the floored covariance at fixed θ. Each update
+# maximizes its block, so the expected Gaussian density never decreases. Where
+# Ω's maximizer is singular, as when few subjects carry the mu-referenced
+# coefficients and the γ = 1 statistics come from one draw, the updates approach
+# `floor` ever more slowly (7659 updates to settle at 1e-8 on three PK subjects
+# with a weight slope). After 100 updates the step returns its iterate, as the budgeted
+# searches of the other blocks do, and the next M-step continues from it; a MAP
+# M-step only starts its Gaussian block there.
 function _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi, floor,
         constraints = nothing)
     m, n = size(mean_phi)
     μ = copy(θ[indices])
     Ωnew = copy(Ω)
     ranges, _ = _block_ranges(layout)
-    converged = false
     for _ in 1:100
         if !isempty(indices)
             P = inv(Symmetric(Ωnew))
@@ -629,14 +637,10 @@ function _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_
                 nextΩ[r, r] = _fixed_family_update(fam, second_residual[r, r], Ωnew[r, r], floor)
             end
         end
-        if maximum(abs, nextΩ - Ωnew) <= 1.0e-8 * max(1.0, maximum(abs, Ωnew))
-            Ωnew = nextΩ
-            converged = true
-            break
-        end
+        converged = maximum(abs, nextΩ - Ωnew) <= 1.0e-8 * max(1.0, maximum(abs, Ωnew))
         Ωnew = nextΩ
+        converged && break
     end
-    converged || throw(ErrorException("SAEM Gaussian M-step did not converge in 100 coordinate updates"))
     θnew = copy(θ)
     θnew[indices] = μ
     return θnew, Ωnew
