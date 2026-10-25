@@ -139,6 +139,8 @@ function _ragged_sample_prior(rng, prior::RaggedNormalREPrior, i)
     return η
 end
 
+_saem_prior_draw(rng, prior::RaggedNormalREPrior, i) = _ragged_sample_prior(rng, prior, i)
+
 function _saem_mh_round!(rng, model, subjects, θ, σ, prior::RaggedNormalREPrior,
         H::AbstractVector{<:AbstractVector}, ℓ, scale, component_scales)
     n = length(subjects)
@@ -361,13 +363,16 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
         "SAEM initial conditional log densities must be finite and one per subject"))
     bank = Vector{Vector{Float64}}[]
     weights = Float64[]
-    numeric_mode = _saem_numeric_mode(options.numeric_mstep, free, layout.ntheta)
-    numeric_update = Base.invokelatest(_SAEMNumericUpdate, numeric_mode)::Function
+    batch = _saem_minibatch(options.minibatch_size, length(ids))
+    numeric_mode = _saem_numeric_mode(options.numeric_mstep, free, layout.ntheta, batch)
+    numeric_update = batch === nothing ?
+        Base.invokelatest(_SAEMNumericUpdate, numeric_mode)::Function :
+        Base.invokelatest(_SAEMScoreStep, batch / length(ids))::Function
     mean_phi = [zeros(length(h)) for h in H]
     second_phi = [zeros(length(h), length(h)) for h in H]
     logscale = log(options.rw_scale)
     component_logscales = fill(log(options.rw_scale), sum(layout.family_sizes))
-    nprior = nrw = ncw = ncw_proposed = sweeps = 0
+    nprior = nrw = ncw = ncw_proposed = sweeps = moved = 0
     phases = _saem_phases(node, kernel, options, length(ids))
     completed = 0
     interrupted = false
@@ -378,29 +383,40 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
             break
         end
         phase = _saem_phase!(phases, iteration, options.mcmc_burnin)
+        active = iteration <= max(options.mcmc_burnin, 1) ? Base.OneTo(length(ids)) :
+            _saem_active(rng, length(ids), batch)
         if iteration > options.mcmc_burnin
             prior = RaggedNormalREPrior(layout, ω)
-            ℓ = _saem_current_loglikelihoods(model, ids, θ, σ, H)
-            loglikelihood = sum(ℓ)
+            if batch === nothing
+                ℓ = _saem_current_loglikelihoods(model, ids, θ, σ, H)
+                loglikelihood = sum(ℓ)
+            else
+                _saem_batch_loglikelihoods!(rng, model, ids, θ, σ, prior, H, ℓ, active)
+                loglikelihood = _saem_batch_estimate(ℓ, active, length(ids))
+            end
         end
         for _ in 1:options.mh_rounds
-            ap, ar, ac, apc = _saem_mh_round!(rng, model, ids, θ, σ, prior, H, ℓ,
+            Hb, ℓb = _columns(H, active), ℓ[active]
+            ap, ar, ac, apc = _saem_mh_round!(rng, model, ids[active], θ, σ, prior, Hb, ℓb,
                 exp(logscale), exp.(component_logscales))
+            _set_columns!(H, active, Hb)
+            ℓ[active] = ℓb
             nprior += ap
             nrw += ar
             ncw += sum(ac)
             ncw_proposed += sum(apc)
             sweeps += 1
+            moved += length(active)
             if sweeps <= options.adapt_iterations
                 logscale = _saem_adapt_mh_scales!(logscale, component_logscales, ar,
-                    length(ids), ac, apc, sweeps)
+                    length(active), ac, apc, sweeps)
             end
         end
         if iteration <= options.mcmc_burnin
             if phase !== nothing
                 update_progress!(phase, iteration)
                 _saem_report!(phase, nothing, nothing, nothing, _saem_kernel_stats(kernel,
-                    nprior, nrw, ncw, ncw_proposed, sweeps * length(ids), 0, nothing))
+                    nprior, nrw, ncw, ncw_proposed, moved, 0, nothing))
             end
             continue
         end
@@ -412,24 +428,24 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
         if k % options.mstep_interval == 0 || k == options.iterations
             phase === nothing || _saem_report!(phase, "M-step", γ, loglikelihood,
                 _saem_kernel_stats(kernel, nprior, nrw, ncw, ncw_proposed,
-                    sweeps * length(ids), 0, nothing))
+                    moved, 0, nothing))
             θ_before = copy(θ)
             θ, σ, ω, θ_kept = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
                 indices, design, free, bank, weights, mean_phi, second_phi,
-                options, γ, constraints, map_objective)
+                options, γ, constraints, map_objective, active)
             _saem_recenter!(H, θ_before, θ_kept, indices, design)
         end
         completed = k
         if phase !== nothing
             update_progress!(phase, k)
             _saem_report!(phase, nothing, γ, loglikelihood, _saem_kernel_stats(kernel,
-                nprior, nrw, ncw, ncw_proposed, sweeps * length(ids), 0, nothing))
+                nprior, nrw, ncw, ncw_proposed, moved, 0, nothing))
         end
     end
     _saem_finish_phase!(phases.burnin)
     _saem_finish_phase!(phases.sa)
     interrupted && update_progress!(node, _saem_stop_message(completed, options))
-    denom = sweeps * length(ids)
+    denom = moved
     final_lp = map_objective ? population_logprior(model, θ, σ, ω) : 0.0
     final_lp isa Real && isfinite(final_lp) || throw(DomainError(final_lp,
         "SAEM final population log prior must be finite"))

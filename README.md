@@ -255,6 +255,17 @@ mu-referencing coverage. `mstep_interval` can reduce evaluation frequency.
 SAEM estimates depend on the RNG stream and run length, so assess recovery
 across starts for a new model.
 
+For many subjects, `SAEMOptions(minibatch_size = b)` moves the chains of only
+`b` randomly drawn subjects per SA iteration and evaluates the model for them
+alone. Every subject's last draw stays in the statistics, and the numerical
+update takes capped Robbins–Monro steps along the batch's scaled score, so the
+fit converges to the full-batch estimate. Each chain then moves in a fraction
+`b / nsubjects` of the iterations; scale `iterations`, `burnin` and
+`adapt_iterations` by `nsubjects / b` to give each chain as many transitions as
+a full-batch fit. That bounds the cost and memory of each model call, but a
+minibatch fit needs about as many passes over the subjects as a full-batch one;
+the documentation's estimators page has the measurements.
+
 ## Progress and early stopping
 
 Every estimator takes `progress = nothing`: a

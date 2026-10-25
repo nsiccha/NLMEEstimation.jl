@@ -79,7 +79,7 @@ NE.conditional_loglikelihoods(::ADBatchedMALA, ids, θ, σ, H) =
             Float64[], Float64[], prior, HC; cache)
     end
     @test cached.gradient_calls[] == 4 # 2 on first, then 1 per sweep
-    cache.valid = false # a population M-step changes the target
+    cache.valid .= false # a population M-step changes the target
     NE._saem_mala_round!(rng, kernel, cs, cached, 1:3,
         Float64[], Float64[], prior, HC; cache)
     @test cached.gradient_calls[] == 6

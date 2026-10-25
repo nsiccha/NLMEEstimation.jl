@@ -15,6 +15,37 @@ SAEM updates the population parameters every iteration by default. Its Gaussian 
 
 Each `StandardSAEMMH` round makes one prior-independence proposal, one joint random-walk proposal scaled by Ω, and one random-walk proposal per η coordinate, with each coordinate's scale adapted separately (saemix's componentwise kernel). A single joint scale has to follow a subject's narrowest posterior direction, so a coordinate that the data pin down less firmly hardly moves, and the estimated Ω shrinks. On a 38-subject washout model with three rate scalars in `σ` (snag `saem-population-8975f340`), these changes moved SAEM's estimate from 54 log units below a reference HMC fit's posterior means, in marginal log posterior, onto them. Seeded SAEM fits therefore differ from those before this change. Explicit `:online` for undeclared structural `θ` is a model-specific approximation; the [BRM benchmark](saem-benchmarks.md) measures that case separately.
 
+## Minibatch SAEM
+
+`SAEMOptions(minibatch_size = b)` runs minibatch SAEM (Kuhn, Matias & Rebafka, 2020) for data where one kernel sweep over every subject per iteration costs too much. Each SA iteration draws `b` of the `n` fitted subjects uniformly at random without replacement. Only their chains move, with any kernel the layout supports, and the model is evaluated for them alone:
+
+- **Statistics.** The stochastic-approximation statistics keep every subject's last sampled latent effects, so the closed-form update of the mu-referenced θ and Ω (and its MAP form) still uses all subjects without evaluating the model.
+- **Numerical update.** σ and the remaining θ take one Robbins–Monro step per M-step, `min(γ, 4b/n) M ĝ`, along the batch's score `ĝ` with its conditional log density scaled by `n / b`. The step's mean is the full score, so the estimates converge to the same fixed point as full-batch SAEM, for every θ and σ coordinate; minibatch fits therefore need no `:mixture` mode. `numeric_mstep` must be `:auto`, and the result reports `:minibatch`.
+  - The cap `4b/n` lets one pass over the subjects shrink the distance to the optimum by about e⁻⁴, as a full-batch search nearly solves each M-step. Without it, a step at γ = 1 moves by the batch's whole sampling error: searching each batch's objective to its optimum put a weakly identified additive error SD (10 of 400 PK subjects per iteration) where its score vanishes, and 3 of 9 fits ended 300 to 1,650 standard errors off. A cap of `b/n` left σ lagging the chains, and in 1 of 8 NUTS fits of a 40-subject growth model Ω then collapsed onto a singular, absorbing correlation.
+  - `M` is the inverse curvature of the full objective, estimated from every subject's chain at M-steps 1, 2, 4, 8, …, a logarithmic number of passes over all subjects. It is held fixed between estimates.
+- **MCMC burn-in.** The `mcmc_burnin` sweeps still move every chain, and so does the first iteration when `mcmc_burnin = 0`. Without that, the first γ = 1 updates estimated Ω from chains still at their start and shrank it, and with it every proposal scaled by Ω.
+- **Domain.** The numerical update screens only the batch's chains. A chain drawn later can therefore lie outside the model's domain at the parameters of its next iteration. It is then replaced by a feasible draw from the random-effect prior, an independence Metropolis–Hastings move that a zero-density state accepts.
+
+Each chain moves in a fraction `b / n` of the iterations. Scaling `iterations`, `burnin` and `adapt_iterations` by `n / b` gives each chain as many transitions as a full-batch fit. On 40-subject linear-Gaussian models with an exact marginal likelihood, such minibatch fits with a quarter of the subjects ended as close to the maximum as full-batch fits (mean gap over eight seeds 0.06 against 0.09 log-likelihood units for MH, 0.06 against 0.05 for NUTS, 0.19 against 0.45 on a ragged layout), also without an MCMC burn-in, under a population prior and with a fixed correlation. Unscaled, MH and NUTS fits ended about four times further from the maximum, in mean gap. MALA with its default prior metric scales its proposals by Ω and is fragile in both modes: in 20 seeded fits it ended more than 5 units below the maximum once with full batches and three times with minibatches. With `DualAveragingMALA(metric = :hessian)` all 20 minibatch fits stayed within 0.65 units, as full-batch ones did within 0.30.
+
+What minibatches save, measured on 400 simulated oral one-compartment subjects ([`bench/saem_minibatch.jl`](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/bench/saem_minibatch.jl), results in `bench/saem_minibatch_results.txt`; error is the largest population-coordinate distance from a 2000-iteration full-batch fit, in its standard errors, over three seeds):
+
+| batch | passes over the subjects | subject evaluations | mean error (SE) |
+| --- | --- | --- | --- |
+| all 400 | 20 | 174,000 | 0.76 |
+| all 400 | 50 | 389,000 | 0.40 |
+| 100 | 50 | 209,000 | 0.53 |
+| 100 | 100 | 374,000 | 0.35 |
+| 40 | 100 | 378,000 | 0.41 |
+| 10 | 100 | 388,000 | 0.58 |
+
+- Per pass over the subjects, minibatch fits were about as accurate as full-batch fits, and less so the smaller the batch; minibatches do not need fewer passes. Matching the full-data estimate to within its own standard error takes every subject's information, so no subsampling scheme gets below that.
+- A minibatch pass evaluates each subject about half as often: one score step replaces the full-batch update's search. Per subject evaluation, batches of a quarter of the subjects were slightly more accurate than full batches, and batches of a fortieth slightly less.
+- What a minibatch bounds is each model call: `b` subjects per evaluation, so the time and memory of one iteration, and the population estimate moves `n / b` times per pass.
+- Each iteration still does arithmetic for every subject (its statistics and the closed-form update) without evaluating the model: 1.3 to 4.6 ms per iteration for these 400 subjects (host load varied), against about 0.1 ms of model time with batches of 10. For a model this cheap, full batches finish first. Minibatches pay off when each subject's evaluation is expensive, as in a large batched program. Batches of a quarter to a tenth of the subjects, with iteration counts scaled by `n / b`, matched full-batch accuracy here.
+
+`minibatch_size` equal to `n` is the full-batch algorithm.
+
 ## Covariance step and standard errors
 
 `covariance_step(model, fit)` estimates the sampling covariance of a fit's estimated population coordinates and returns a `CovarianceResult` with `covariance`, `standard_errors`, `names`, and the matrices it was built from. Its coordinates are the fitted ones: the model's unconstrained θ and σ, and the package's log-Cholesky ω.

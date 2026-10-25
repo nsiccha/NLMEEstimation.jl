@@ -3,7 +3,7 @@
                  mh_rounds=1, rw_scale=0.5, adapt_iterations=150,
                  step_exponent=0.8, numeric_maxiter=12, mstep_interval=1,
                  numeric_mstep=:auto,
-                 omega_floor=1e-8)
+                 omega_floor=1e-8, minibatch_size=nothing)
 
 Settings for [`saem`](@ref). The first `burnin` stochastic-approximation
 iterations use step size one; subsequent sizes are `(k-burnin)^(-step_exponent)`.
@@ -34,6 +34,30 @@ interval is an approximate, lower-frequency variant in `:online` mode.
 With `DualAveragingMALA`, each round makes one batched MALA proposal and
 updates a separate subject step size throughout the run. Set `mcmc_burnin=0`
 to omit a separate initial MCMC phase; `burnin` still controls the SA step sizes.
+
+`minibatch_size=nothing` moves every subject's chain at every iteration. An
+integer `b` runs minibatch SAEM (Kuhn, Matias & Rebafka 2020): each SA
+iteration draws `b` of the `n` fitted subjects uniformly at random without
+replacement, and only their chains move. The `mcmc_burnin` sweeps still move
+every chain (and the first iteration does when `mcmc_burnin = 0`), so that each
+starts from its conditional posterior at the starting estimate; from chains
+left at their start, the first γ = 1 M-steps would shrink Ω, and with it every
+proposal scaled by Ω. The other subjects
+keep their last sampled latent effects, which stay in the
+stochastic-approximation statistics, so the Gaussian block uses every subject
+without evaluating the model. The numerical update evaluates the batch alone:
+each M-step takes one Robbins–Monro step `min(γ, 4b/n) M ĝ` along the batch's
+score `ĝ`, its conditional log density scaled to all `n` subjects. The cap
+limits a step to four times the batch's share of a Newton step, so one pass over
+the subjects nearly solves the update, as a full-batch search does, without the
+batch's whole sampling error. `M` is the inverse curvature of the full
+objective, estimated from every subject's chain at M-steps 1, 2, 4, 8, …. The
+step's mean is the full score, so the estimates converge to the same fixed
+point as full-batch SAEM, where a search to each batch's optimum would converge
+to a point biased by order `1/b`. `numeric_mstep` must be `:auto`; the result
+reports `:minibatch`, and `numeric_maxiter` is unused. Each chain moves in only
+a fraction `b / n` of the iterations. `b` equal to `n` is the full-batch
+algorithm.
 """
 Base.@kwdef struct SAEMOptions
     iterations::Int = 300
@@ -47,6 +71,7 @@ Base.@kwdef struct SAEMOptions
     mstep_interval::Int = 1
     numeric_mstep::Symbol = :auto
     omega_floor::Float64 = 1.0e-8
+    minibatch_size::Union{Nothing, Int} = nothing
 end
 
 abstract type AbstractSAEMKernel end
@@ -99,20 +124,25 @@ mutable struct _MALADAState
     accepted::Int
 end
 
+# `valid[j]` says whether column `j` holds subject `j`'s complete-data value and
+# gradient at the current population parameters. A minibatch round moves some
+# subjects only, so validity is per subject.
 mutable struct _MALACache
     f::Vector{Float64}
     G::Matrix{Float64}
-    valid::Bool
+    valid::BitVector
 end
 
-_saem_mala_cache(H) = _MALACache(zeros(size(H, 2)), zeros(size(H)), false)
+_saem_mala_cache(H) = _MALACache(zeros(size(H, 2)), zeros(size(H)), falses(size(H, 2)))
 
 function _saem_mala_refresh_prior!(cache::_MALACache, H, old_prior, new_prior)
-    cache.valid || return nothing
+    any(cache.valid) || return nothing
     for j in axes(H, 2)
+        cache.valid[j] || continue
         cache.f[j] += re_logprior(new_prior, view(H, :, j)) -
             re_logprior(old_prior, view(H, :, j))
     end
+    # Invalid columns are recomputed before they are used again.
     cache.G .+= (old_prior.precision - new_prior.precision) * H
     return nothing
 end
@@ -214,14 +244,14 @@ function _saem_mala_round!(rng, kernel::DualAveragingMALA, states,
         model, subjects, θ, σ, prior, H; adapt::Bool=true,
         metrics=nothing, cache=nothing)
     m, n = size(H)
-    if cache !== nothing && cache.valid
+    if cache !== nothing && all(cache.valid)
         f0, G0 = cache.f, cache.G
     else
         _, f0, G0 = _complete_gradients(model, subjects, θ, σ, prior, H)
         if cache !== nothing
             cache.f .= f0
             cache.G .= G0
-            cache.valid = true
+            cache.valid .= true
             f0, G0 = cache.f, cache.G
         end
     end
@@ -255,6 +285,21 @@ function _saem_mala_round!(rng, kernel::DualAveragingMALA, states,
         end
         adapt && _saem_mala_adapt!(states[j], kernel, exp(min(0.0, lr)))
     end
+    return nothing
+end
+
+# One MALA round over the chains at positions `active`: their columns, step-size
+# states, metrics and cached values are taken out, moved and put back.
+function _saem_mala_batch_round!(rng, kernel::DualAveragingMALA, states, model, ids,
+        θ, σ, prior, H, active; metrics, cache)
+    Hb = H[:, active]
+    sub = _MALACache(cache.f[active], cache.G[:, active], cache.valid[active])
+    _saem_mala_round!(rng, kernel, states[active], model, ids[active], θ, σ, prior, Hb;
+        metrics = metrics === nothing ? nothing : metrics[active], cache = sub)
+    H[:, active] = Hb
+    cache.f[active] = sub.f
+    cache.G[:, active] = sub.G
+    cache.valid[active] = sub.valid
     return nothing
 end
 
@@ -295,8 +340,11 @@ scale.
 These MH-only fields are `missing` for other kernels. `kernel` identifies the
 method and `nuts_divergences` counts its fixed-kernel transitions that diverged.
 For MALA, `mala_stepsizes` and `mala_acceptance` hold per-subject final values;
-`mala_adaptation_steps` counts updates per subject. `numeric_mstep` records
-the resolved numerical M-step mode (`:online` or `:mixture`). `objective` is
+`mala_adaptation_steps` counts updates per subject, the fewest any subject
+received under `minibatch_size`. The acceptance fractions are over every
+subject's proposals, so under `minibatch_size` over the batches'. `numeric_mstep` records
+the resolved numerical M-step mode (`:online` or `:mixture`, `:minibatch` under
+`minibatch_size`). `objective` is
 `:ML` without a model population prior and `:MAP` otherwise. The result is a
 population point estimate, not a draw from a population posterior.
 `iterations` counts the completed SA iterations; `interrupted` is `true` when a
@@ -438,17 +486,19 @@ end
 # Restart each subject's fixed NUTS kernel at its re-centred η (WarmupHMC's
 # checkpoint-payload restart, so the metric and step size stay those of its
 # warmup), continuing the subject's random stream.
-function _saem_nuts_restart!(nuts, H)
-    for k in eachindex(nuts.states)
+function _saem_nuts_restart!(nuts, H, positions = eachindex(nuts.states))
+    for k in positions
         nuts.states[k] = WarmupHMC.FixedKernelNUTSState(nuts.payloads[k];
             nuts.max_tree_depth, position=H[:, k], rng=nuts.states[k].rng)
     end
     return nuts
 end
 
-function _saem_nuts_round!(states, model, ids, θ, σ, prior, H)
+# One fixed-kernel transition for each subject at positions `active`.
+function _saem_nuts_round!(states, model, ids, θ, σ, prior, H, active = eachindex(ids))
     divergences = 0
-    for (k, i) in enumerate(ids)
+    for k in active
+        i = ids[k]
         target = _saem_target(model, i, θ, σ, prior)
         step = WarmupHMC.fixed_kernel_nuts_step(states[k], target)
         states[k] = step.state
@@ -491,8 +541,25 @@ function _saem_check_options(o::SAEMOptions)
     o.numeric_mstep in (:auto, :online, :mixture) ||
         throw(ArgumentError("numeric_mstep must be :auto, :online, or :mixture"))
     isfinite(o.omega_floor) && o.omega_floor > 0 || throw(ArgumentError("omega_floor must be finite and positive"))
+    o.minibatch_size === nothing || o.minibatch_size > 0 ||
+        throw(ArgumentError("minibatch_size must be positive or nothing"))
     return nothing
 end
+
+# The number of subjects whose chains move in one iteration, or `nothing` when
+# that is every fitted subject (the full-batch algorithm).
+_saem_minibatch(::Nothing, n) = nothing
+function _saem_minibatch(size::Int, n)
+    size <= n || throw(ArgumentError(
+        "minibatch_size $size exceeds the $n fitted subjects"))
+    return size == n ? nothing : size
+end
+
+# Positions among the fitted subjects whose chains move in one iteration: all of
+# them, or `batch` distinct positions drawn uniformly at random, in ascending
+# order.
+_saem_active(rng, n, ::Nothing) = Base.OneTo(n)
+_saem_active(rng, n, batch::Int) = sort!(randperm(rng, n)[1:batch])
 
 function _saem_mh_round!(rng, model, subjects, θ, σ, prior, H, ℓ, scale,
         component_scales)
@@ -623,6 +690,41 @@ function _saem_current_loglikelihoods(model, ids, θ, σ, H)
     isempty(outside) || throw(DomainError(ℓ, "SAEM conditional log densities became " *
         "non-finite after population update (subjects $(join(outside, ", ")))"))
     return ℓ
+end
+
+_saem_prior_draw(rng, prior::NormalREPrior, i) =
+    prior.cholesky_factor * randn(rng, neta(prior))
+
+# The minibatch form of `_saem_current_loglikelihoods`, for the chains at
+# positions `active`, written into `ℓ[active]`. A minibatch population update
+# screens only its own batch's chains, so a chain drawn now can lie outside the
+# model's domain at the current population parameters. Its state then has zero
+# density, and it is replaced by a draw from the random-effect prior: an
+# independence Metropolis–Hastings move, which a zero-density state accepts
+# whenever the draw is feasible. Returns the positions whose chains were
+# replaced. A chain still outside after ten draws raises the `DomainError`.
+function _saem_batch_loglikelihoods!(rng, model, ids, θ, σ, prior, H, ℓ, active)
+    values = _proposal_loglikelihoods(model, ids[active], θ, σ, _columns(H, active))
+    length(values) == length(active) || throw(DimensionMismatch(
+        "returned $(length(values)) conditional log densities for $(length(active)) subjects"))
+    ℓ[active] = values
+    replaced = Int[]
+    for _ in 1:10
+        outside = [k for k in active if ℓ[k] == -Inf]
+        isempty(outside) && break
+        proposal = _from_columns(H, [_saem_prior_draw(rng, prior, ids[k]) for k in outside])
+        proposed = _proposal_loglikelihoods(model, ids[outside], θ, σ, proposal)
+        for (j, k) in enumerate(outside)
+            isfinite(proposed[j]) || continue
+            _set_column!(H, k, copy(_column(proposal, j)))
+            ℓ[k] = proposed[j]
+            push!(replaced, k)
+        end
+    end
+    bad = [ids[k] for k in active if !isfinite(ℓ[k])]
+    isempty(bad) || throw(DomainError(ℓ[active], "SAEM conditional log densities " *
+        "are non-finite at the current population parameters (subjects $(join(bad, ", ")))"))
+    return unique!(replaced)
 end
 
 # Keep each chain's φ = Dθ + η fixed across a population update, as saemix does:
@@ -756,7 +858,7 @@ end
 
 # Practical SAEM stores only the current latent draw. The optimizer itself is
 # updated stochastically when the M-step is due.
-function _saem_record!(::Val{:online}, bank, weights, Φ, γ)
+function _saem_record!(::Union{Val{:online}, Val{:minibatch}}, bank, weights, Φ, γ)
     empty!(bank)
     empty!(weights)
     push!(bank, copy(Φ))
@@ -767,6 +869,20 @@ end
 _saem_numeric_mode(mode::Symbol, free, ntheta) =
     Val(mode === :auto ? (any(i -> i <= ntheta, free) ? :mixture : :online) : mode)
 _saem_mode_name(::Val{M}) where {M} = M
+
+# Minibatch SAEM has its own numerical update (`_SAEMScoreStep`), which needs no
+# sufficient statistic for any coordinate. The explicit full-batch modes are
+# refused: `:mixture` re-evaluates every subject's retained draws at every
+# M-step, and `:online` searches each draw's objective to its optimum, which on
+# a batch jumps by the batch's whole sampling error (a weakly identified σ
+# landed where its score vanishes).
+_saem_numeric_mode(mode::Symbol, free, ntheta, ::Nothing) =
+    _saem_numeric_mode(mode, free, ntheta)
+function _saem_numeric_mode(mode::Symbol, free, ntheta, batch::Int)
+    mode === :auto || throw(ArgumentError("minibatch SAEM has its own numerical " *
+        "update and needs numeric_mstep = :auto; :$mode is a full-batch update"))
+    return Val(:minibatch)
+end
 
 # The numerical M-step's objective adds a population prior at the M-step's ω;
 # `ω = nothing` is maximum likelihood.
@@ -986,9 +1102,92 @@ _SAEMNumericUpdate(mode::Val) =
     _SAEMNumericUpdate(mode, Ref{Union{Nothing, Matrix{Float64}}}(nothing))
 
 function (update::_SAEMNumericUpdate)(model, subjects, θ, σ, free, indices,
-        design, bank, weights, maxiter, γ, ω = nothing)
+        design, bank, weights, maxiter, γ, ω = nothing, active = nothing)
     return _saem_numeric_update(update.mode, model, subjects, θ, σ, free,
         indices, design, bank, weights, maxiter, γ, ω, update.metric)
+end
+
+# The numerical update of minibatch SAEM, built like `_SAEMNumericUpdate` once
+# per fit. `share` is the batch's fraction of the fitted subjects; `metric`
+# holds the quasi-Newton metric across M-steps and `steps` counts them
+# (`_saem_score_step`).
+struct _SAEMScoreStep <: Function
+    share::Float64
+    metric::Base.RefValue{Union{Nothing, Matrix{Float64}}}
+    steps::Base.RefValue{Int}
+end
+_SAEMScoreStep(share::Real) =
+    _SAEMScoreStep(share, Ref{Union{Nothing, Matrix{Float64}}}(nothing), Ref(0))
+
+function (step::_SAEMScoreStep)(model, subjects, θ, σ, free, indices, design,
+        bank, weights, maxiter, γ, ω = nothing, active = eachindex(subjects))
+    return _saem_score_step(model, subjects, θ, σ, free, indices, design, bank,
+        weights, γ, ω, active, step)
+end
+
+# One Robbins–Monro step z ← z + t g M ĝ along ĝ, the score of the batch at
+# positions `active` with its conditional log density scaled to all `subjects`.
+# The gain g = min(γ, 4b/n) caps the step at four times the batch's share of a
+# Newton step. One pass over the subjects then shrinks the distance to the
+# optimum by about e⁻⁴, as a full-batch search nearly solves each M-step, and
+# the steps' noise keeps the iterate within about 1.4 standard errors of it,
+# like the single draws of a full-batch iteration. An uncapped step at γ = 1, or
+# a search to the batch's optimum, moves by the batch's whole sampling error: on
+# 10 of 400 PK subjects, a weakly identified additive error SD jumped to where
+# its score vanishes and never came back. A cap of b/n left e⁻¹ of the distance
+# per pass, and the lagging σ let Ω drift onto a singular, absorbing
+# correlation in 1 of 8 NUTS fits of a 40-subject growth model. The gains still
+# sum to infinity with finite squares, and the step's mean is g M times the full
+# score, so the iterates converge where that score vanishes; a search to each
+# batch's optimum would average optimizers whose mean is off by order 1/b. M is the inverse absolute curvature of the full objective, from
+# every subject's chain, estimated at M-steps 1, 2, 4, 8, …: the curvature
+# changes most while the parameters travel, and a metric from a far start
+# (where σ's curvature is inflated by residuals that still hold the random
+# effects) made σ lag the chains. The doubling schedule costs a logarithmic
+# number of passes over every subject. Between estimates M is held, independent of the batches it
+# multiplies. t is halved from 1 until the batch objective passes the Armijo
+# test (with the searches' rounding allowance), which so small a step near a
+# smooth optimum passes at once.
+function _saem_score_step(model, subjects, θ, σ, free, indices, design, bank,
+        weights, γ, ω, active, step::_SAEMScoreStep)
+    isempty(free) && return θ, σ
+    z0 = vcat(θ, σ)[free]
+    step.steps[] += 1
+    if ispow2(step.steps[])
+        full(z) = _saem_numeric_value_gradient(z, model, subjects, θ, σ, free,
+            indices, design, bank, weights, Val(:online), ω)
+        step.metric[] = _saem_search_metric(full, z0)
+    end
+    batch_subjects, batch_design = subjects[active], design[active]
+    batch = [_columns(H, active) for H in bank]
+    scaled = (length(subjects) / length(active)) .* weights
+    objective(z) = _saem_numeric_value_gradient(z, model, batch_subjects, θ, σ, free,
+        indices, batch_design, batch, scaled, Val(:online), ω)
+    screen(z) = _saem_numeric_objective(z, model, batch_subjects, θ, σ, free, indices,
+        batch_design, batch, scaled, ω)
+    value, gradient = objective(z0)
+    isfinite(value) && all(isfinite, gradient) || throw(DomainError(value,
+        "SAEM numerical M-step has non-finite objective or gradient"))
+    metric = step.metric[]
+    direction = min(γ, 4step.share) .* (metric === nothing ? gradient : metric * gradient)
+    z = z0
+    t = 1.0
+    while t >= 1.0e-8
+        candidate = z0 + t * direction
+        predicted = t * dot(gradient, direction)
+        threshold = value + 1.0e-4 * predicted
+        if t == 1 && predicted <= _resolution(value)
+            threshold = min(threshold, value - _resolution(value))
+        end
+        if _armijo(_feasible(screen, candidate), threshold)
+            z = candidate
+            break
+        end
+        t /= 2
+    end
+    x = vcat(θ, σ)
+    x[free] = z
+    return x[1:length(θ)], x[length(θ)+1:end]
 end
 
 _saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
@@ -1010,10 +1209,11 @@ _saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
 # `saem-population-8975f340`). Returns θ, σ, ω and the θ of the Gaussian block,
 # whose φ the chains keep (`_saem_recenter!`). With `:online`, only the
 # numerical block is damped by the SA step size γ; the Gaussian block already
-# uses the stochastically averaged statistics.
+# uses the stochastically averaged statistics. Under minibatch SAEM the
+# numerical update evaluates only the subjects at positions `active`.
 function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indices,
         design, free, bank, weights, mean_phi, second_phi, options, γ,
-        constraints, map_objective)
+        constraints, map_objective, active = eachindex(subjects))
     θ, Ω = _saem_closed_form_mstep(layout, θ, omega_matrix(layout, ω), indices,
         design, mean_phi, second_phi, options.omega_floor, subjects, constraints;
         require_instances = !map_objective)
@@ -1030,7 +1230,7 @@ function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indice
     nodesign = [zeros(size(X, 1), 0) for X in design]
     θ, σ = numeric_update(model, subjects, θ, σ, sort!(vcat(indices, free)), Int[],
         nodesign, etas, weights, options.numeric_maxiter, γ,
-        map_objective ? ω : nothing)::Tuple{Vector{Float64},Vector{Float64}}
+        map_objective ? ω : nothing, active)::Tuple{Vector{Float64},Vector{Float64}}
     _saem_transport!(mean_phi, second_phi, bank, design, θ[indices] - θ_centered[indices])
     return θ, σ, ω, θ_centered
 end
@@ -1103,12 +1303,27 @@ function _saem_report!(phase, stage, γ, loglikelihood, kernel_stats)
     stage === nothing || push!(parts, stage)
     γ === nothing || push!(parts, γ == 1 ? "γ = 1 (exploration)" :
         "γ = $(short_string(γ; sigdigits = 3))")
-    loglikelihood === nothing || push!(parts,
-        "Σ log p(y|η) = $(short_string(loglikelihood; sigdigits = 7))")
+    loglikelihood === nothing || push!(parts, _saem_loglikelihood_part(loglikelihood))
     push!(parts, kernel_stats)
     update_progress!(phase, join(parts, " · "))
     return nothing
 end
+
+# A minibatch iteration evaluates only its batch, so the chains' summed
+# conditional log-density is the batch's sum scaled to all fitted subjects.
+struct _SAEMBatchEstimate
+    value::Float64
+    size::Int
+end
+
+_saem_loglikelihood_part(value::Real) =
+    "Σ log p(y|η) = $(short_string(value; sigdigits = 7))"
+_saem_loglikelihood_part(estimate::_SAEMBatchEstimate) =
+    "Σ log p(y|η) ≈ $(short_string(estimate.value; sigdigits = 7)) " *
+    "(batch of $(estimate.size))"
+
+_saem_batch_estimate(ℓ, active, n) =
+    _SAEMBatchEstimate(sum(view(ℓ, active)) * n / length(active), length(active))
 
 _saem_kernel_stats(::StandardSAEMMH, nprior, nrw, ncw, ncw_proposed, denom, ndivergent,
         mala_states) =
@@ -1165,6 +1380,14 @@ The MH and MALA kernels then reject that subject's proposal alone, and the
 numerical and MAP M-steps halve their line-search step. The point each M-step
 starts from must evaluate finitely.
 
+`SAEMOptions(minibatch_size = b)` moves only `b` randomly drawn subjects'
+chains per iteration and evaluates only those subjects in the numerical
+M-step (see [`SAEMOptions`](@ref)). That M-step screens only the batch's chains,
+so a chain drawn later can lie outside the model's domain at the population
+parameters of its next iteration; it is then replaced by a feasible draw from
+the random-effect prior. The progress message's `Σ log p(y|η)` is then the
+batch's sum scaled to all subjects.
+
 `progress` is a Treebars node (or a backend symbol such as `:term`) under which a
 `SAEM` node shows the run's phases: `NUTS warmup` (one transient WarmupHMC tree
 per subject), `MCMC burn-in` and `Stochastic approximation`, each counting its
@@ -1220,13 +1443,16 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
         "SAEM initial conditional log densities must be finite and one per subject"))
     bank = Matrix{Float64}[]
     weights = Float64[]
-    numeric_mode = _saem_numeric_mode(options.numeric_mstep, free, layout.ntheta)
-    numeric_update = Base.invokelatest(_SAEMNumericUpdate, numeric_mode)::Function
+    batch = _saem_minibatch(options.minibatch_size, length(ids))
+    numeric_mode = _saem_numeric_mode(options.numeric_mstep, free, layout.ntheta, batch)
+    numeric_update = batch === nothing ?
+        Base.invokelatest(_SAEMNumericUpdate, numeric_mode)::Function :
+        Base.invokelatest(_SAEMScoreStep, batch / length(ids))::Function
     mean_phi = zeros(neta(layout), length(ids))
     second_phi = zeros(neta(layout), neta(layout), length(ids))
     logscale = log(options.rw_scale)
     component_logscales = fill(log(options.rw_scale), neta(layout))
-    nprior = nrw = ncw = ncw_proposed = sweeps = 0
+    nprior = nrw = ncw = ncw_proposed = sweeps = moved = 0
     ndivergent = 0
     root = kernel isa WarmupHMCNUTS ? mktempdir() : nothing
     mala_states = kernel isa DualAveragingMALA ?
@@ -1234,6 +1460,9 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
     mala_cache = kernel isa DualAveragingMALA ? _saem_mala_cache(H) : nothing
     mala_metrics = kernel isa DualAveragingMALA ?
         _saem_mala_metrics(kernel, model, ids, θ, σ, prior, H) : nothing
+    # Chains moved (re-centred or replaced) since their last NUTS transition; each
+    # restarts its fixed kernel at its new position before its next transition.
+    nuts_moved = falses(length(ids))
     phases = _saem_phases(node, kernel, options, length(ids))
     completed = 0
     interrupted = false
@@ -1248,41 +1477,56 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                 break
             end
             phase = _saem_phase!(phases, iteration, options.mcmc_burnin)
+            active = iteration <= max(options.mcmc_burnin, 1) ? Base.OneTo(length(ids)) :
+                _saem_active(rng, length(ids), batch)
             if iteration > options.mcmc_burnin
                 prior = re_prior(model, ω)
-                if kernel isa StandardSAEMMH || kernel isa WarmupHMCNUTS
+                if batch !== nothing
+                    replaced = _saem_batch_loglikelihoods!(rng, model, ids, θ, σ,
+                        prior, H, ℓ, active)
+                    mala_cache === nothing || (mala_cache.valid[replaced] .= false)
+                    nuts_moved[replaced] .= true
+                    loglikelihood = _saem_batch_estimate(ℓ, active, length(ids))
+                elseif kernel isa StandardSAEMMH || kernel isa WarmupHMCNUTS
                     ℓ = _saem_current_loglikelihoods(model, ids, θ, σ, H)
                     loglikelihood = sum(ℓ)
                 end
             end
             for _ in 1:options.mh_rounds
                 if kernel isa StandardSAEMMH
-                    ap, ar, ac, apc = _saem_mh_round!(rng, model, ids, θ, σ, prior, H, ℓ,
-                        exp(logscale), exp.(component_logscales))
+                    Hb, ℓb = _columns(H, active), ℓ[active]
+                    ap, ar, ac, apc = _saem_mh_round!(rng, model, ids[active], θ, σ, prior,
+                        Hb, ℓb, exp(logscale), exp.(component_logscales))
+                    _set_columns!(H, active, Hb)
+                    ℓ[active] = ℓb
                     nprior += ap
                     nrw += ar
                     ncw += sum(ac)
                     ncw_proposed += sum(apc)
                 elseif kernel isa WarmupHMCNUTS
-                    ndivergent += _saem_nuts_round!(nuts.states, model, ids, θ, σ, prior, H)
+                    restart = [k for k in active if nuts_moved[k]]
+                    _saem_nuts_restart!(nuts, H, restart)
+                    nuts_moved[restart] .= false
+                    ndivergent += _saem_nuts_round!(nuts.states, model, ids, θ, σ,
+                        prior, H, active)
                 elseif kernel isa DualAveragingMALA
-                    _saem_mala_round!(rng, kernel, mala_states, model, ids, θ, σ,
-                        prior, H; metrics=mala_metrics, cache=mala_cache)
+                    _saem_mala_batch_round!(rng, kernel, mala_states, model, ids, θ, σ,
+                        prior, H, active; metrics=mala_metrics, cache=mala_cache)
                 else
                     throw(ArgumentError("unsupported SAEM kernel $(typeof(kernel))"))
                 end
                 sweeps += 1
+                moved += length(active)
                 if kernel isa StandardSAEMMH && sweeps <= options.adapt_iterations
                     logscale = _saem_adapt_mh_scales!(logscale, component_logscales, ar,
-                        length(ids), ac, apc, sweeps)
+                        length(active), ac, apc, sweeps)
                 end
             end
             if iteration <= options.mcmc_burnin
                 if phase !== nothing
                     update_progress!(phase, iteration)
                     _saem_report!(phase, nothing, nothing, nothing, _saem_kernel_stats(kernel,
-                        nprior, nrw, ncw, ncw_proposed, sweeps * length(ids), ndivergent,
-                        mala_states))
+                        nprior, nrw, ncw, ncw_proposed, moved, ndivergent, mala_states))
                 end
                 continue
             end
@@ -1294,29 +1538,26 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
             if k % options.mstep_interval == 0 || k == options.iterations
                 phase === nothing || _saem_report!(phase, "M-step", γ, loglikelihood,
                     _saem_kernel_stats(kernel, nprior, nrw, ncw, ncw_proposed,
-                        sweeps * length(ids), ndivergent, mala_states))
+                        moved, ndivergent, mala_states))
                 θ_before, σ_before = copy(θ), copy(σ)
                 θ, σ, ω, θ_kept = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
                     indices, design, free, bank, weights, mean_phi, second_phi,
-                    options, γ, constraints, map_objective)
-                if mala_cache !== nothing && mala_cache.valid
+                    options, γ, constraints, map_objective, active)
+                if mala_cache !== nothing && any(mala_cache.valid)
                     if θ == θ_before && σ == σ_before
                         _saem_mala_refresh_prior!(mala_cache, H, prior,
                             re_prior(model, ω))
                     else
-                        mala_cache.valid = false
+                        mala_cache.valid .= false
                     end
                 end
-                if _saem_recenter!(H, θ_before, θ_kept, indices, design) && nuts !== nothing
-                    _saem_nuts_restart!(nuts, H)
-                end
+                _saem_recenter!(H, θ_before, θ_kept, indices, design) && (nuts_moved .= true)
             end
             completed = k
             if phase !== nothing
                 update_progress!(phase, k)
                 _saem_report!(phase, nothing, γ, loglikelihood, _saem_kernel_stats(kernel,
-                    nprior, nrw, ncw, ncw_proposed, sweeps * length(ids), ndivergent,
-                    mala_states))
+                    nprior, nrw, ncw, ncw_proposed, moved, ndivergent, mala_states))
             end
         end
         _saem_finish_phase!(phases.burnin)
@@ -1325,7 +1566,7 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
     finally
         root === nothing || _saem_remove_nuts_tempdir(root)
     end
-    denom = sweeps * length(ids)
+    denom = moved
     is_mh = kernel isa StandardSAEMMH
     is_mala = kernel isa DualAveragingMALA
     final_lp = map_objective ? population_logprior(model, θ, σ, ω) : 0.0
@@ -1340,7 +1581,7 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
         ndivergent,
         is_mala ? exp.([s.log_stepsize for s in mala_states]) : missing,
         is_mala ? [s.accepted / s.count for s in mala_states] : missing,
-        is_mala ? first(mala_states).count : 0,
+        is_mala ? minimum(s -> s.count, mala_states) : 0,
         _saem_mode_name(numeric_mode), map_objective ? :MAP : :ML,
         final_lp, map_objective ? population_prior_provenance(model) : nothing,
         completed, interrupted)

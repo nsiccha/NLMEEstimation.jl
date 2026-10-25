@@ -165,6 +165,21 @@ end
     @test occursin("stopped by interrupt after $k of 40 SA iterations", tree)
     @test occursin("✓ Stochastic approximation ($k/40)", tree)
 
+    # A minibatch run draws its batches from the same stream, so it stops the
+    # same way, and its message estimates Σ log p(y|η) from the batch.
+    batched_options(iterations) = SAEMOptions(; iterations, burnin = 5, mcmc_burnin = 2,
+        mh_rounds = 2, adapt_iterations = 10, numeric_maxiter = 3, minibatch_size = 4)
+    run_batched(m; kwargs...) = saem(m, GROWTH_θ, GROWTH_σ, GROWTH_ω; rng = Xoshiro(3),
+        options = batched_options(40), kwargs...)
+    halfway = evaluations(run_batched, model) ÷ 2
+    stopped, tree = traced(root -> run_batched(StopAfter(model, root, halfway); progress = root))
+    k = stopped.iterations
+    @test stopped.interrupted && options.burnin < k < options.iterations
+    shorter = saem(model, GROWTH_θ, GROWTH_σ, GROWTH_ω; rng = Xoshiro(3),
+        options = batched_options(k))
+    @test same_fit(stopped, shorter) && stopped.acceptance == shorter.acceptance
+    @test occursin("Σ log p(y|η) ≈ ", tree) && occursin("(batch of 4)", tree)
+
     # Before the first iteration: the starting point, and no sweep ran.
     start = saem(model, GROWTH_θ, GROWTH_σ, GROWTH_ω; options, progress = stopped_root())
     @test start.interrupted && start.iterations == 0
