@@ -240,14 +240,14 @@ end
     # Linear-Gaussian models have an exact marginal likelihood, so a fit's gap
     # to its maximum measures the fit's Monte Carlo error. With the default
     # options, eight seeded full-batch fits of these models ended 0.01-0.30
-    # (MH, NUTS, Hessian-metric MALA) and 0.004-1.70 (ragged MH) log-likelihood
+    # (MH, NUTS, Hessian-metric MALA) and 0.008-1.01 (ragged MH) log-likelihood
     # units below the maximum. A minibatch of a quarter of the subjects, with the
     # iteration counts scaled by four so that each chain moves as often, ends as
     # close. Before the MCMC burn-in swept every chain, minibatch fits with
     # prior-metric MALA stopped about 12 units below on every seed: the first
     # M-steps shrank Ω from chains still near their start. Prior-metric MALA
-    # still ends more than 5 units below in 3 of 20 minibatch fits (1 of 20
-    # full-batch): its proposals shrink with Ω, so it is not checked here.
+    # still ends more than 2 units below in 4 of 20 such minibatch fits (none
+    # full-batch): its proposals follow Ω, so it is not checked here.
     n, b = 40, 10
     options = SAEMOptions(iterations = 300n ÷ b, burnin = 150n ÷ b,
         adapt_iterations = 150n ÷ b, minibatch_size = b)

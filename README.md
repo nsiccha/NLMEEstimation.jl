@@ -253,7 +253,11 @@ The `:online` mode keeps the current draw and applies the SA gain to its
 numerical update. `:auto` selects between them from the declared
 mu-referencing coverage. `mstep_interval` can reduce evaluation frequency.
 SAEM estimates depend on the RNG stream and run length, so assess recovery
-across starts for a new model.
+across starts for a new model. While the SA step size is one, Ω is annealed as
+in Monolix and saemix (`SAEMOptions(omega_annealing = 0.95)`): an M-step may
+shrink no covariance family by more than that factor, which keeps a noisy early
+Ω from collapsing onto a singular correlation that the MCMC kernels cannot
+leave. `omega_annealing = 0` turns it off.
 
 For many subjects, `SAEMOptions(minibatch_size = b)` moves the chains of only
 `b` randomly drawn subjects per SA iteration and evaluates the model for them
