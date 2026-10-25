@@ -325,6 +325,12 @@ function _saem_omega_above_floor(layout::RaggedNLMELayout, ω, floor)
     return all(Ω -> all(isfinite, Ω) && eigmin(Symmetric(Ω)) >= floor, covariances)
 end
 
+function _saem_anneal(layout::RaggedNLMELayout, ω_previous, ω, τ, constraints)
+    Ω_previous, Ω = omega_matrix(layout, ω_previous), omega_matrix(layout, ω)
+    annealed = [_saem_anneal_floor(Ω[f], Ω_previous[f], τ) for f in eachindex(Ω)]
+    return _apply_omega_constraints(constraints, omega_parameters(layout, annealed))
+end
+
 _saem_closed_form_mstep(layout::RaggedNLMELayout, θ, Ω, indices, design, mean_phi,
     second_phi, floor, subjects, constraints; require_instances = true) =
     _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi,
