@@ -320,10 +320,8 @@ function _saem_gaussian_map_value_gradient(layout::RaggedNLMELayout, θ, ω,
     return value, gμ, gω
 end
 
-function _saem_omega_above_floor(layout::RaggedNLMELayout, ω, floor)
-    covariances = omega_matrix(layout, ω)
-    return all(Ω -> all(isfinite, Ω) && eigmin(Symmetric(Ω)) >= floor, covariances)
-end
+_saem_omega_above_floor(layout::RaggedNLMELayout, ω, floor) =
+    all(L -> _factor_above_floor(L, floor), omega_cholesky(layout, ω))
 
 function _saem_anneal(layout::RaggedNLMELayout, ω_previous, ω, τ, constraints)
     Ω_previous, Ω = omega_matrix(layout, ω_previous), omega_matrix(layout, ω)
