@@ -83,13 +83,18 @@ const SMALL_NUTS = WarmupHMCNUTS(warmup_draws = 6, warmup_evaluations = 30,
     end
     @test_throws ArgumentError fit(with_minibatch(options, 0))
     @test_throws ArgumentError fit(with_minibatch(options, n + 1))
-    # refused: the mixture objective re-evaluates every subject's retained draws
-    # at every M-step, the cost a minibatch exists to avoid (todo `15cbo3w`: each
-    # iteration evaluates only the batch); the minibatch score step needs no mixture.
+    # refused: `:mixture` re-evaluates every subject's retained draws at every
+    # M-step, the cost a minibatch exists to avoid (todo `15cbo3w`: each iteration
+    # evaluates only the batch).
     @test_throws ArgumentError fit(SAEMOptions(iterations = 30, burnin = 10,
         numeric_mstep = :mixture, minibatch_size = 4))
+    # refused: `:online` searches each batch's objective to its optimum, whose
+    # sampling error is n/b times a full batch's; on 10 of 400 PK subjects it put
+    # the additive error SD where its score vanishes (`bench/saem_minibatch.jl`).
+    @test_throws ArgumentError fit(SAEMOptions(iterations = 30, burnin = 10,
+        numeric_mstep = :online, minibatch_size = 4))
     batched = fit(with_minibatch(options, 4))
-    @test batched.numeric_mstep == :online
+    @test batched.numeric_mstep == :minibatch
     @test 0 < batched.acceptance.prior < 1
 end
 
@@ -108,20 +113,28 @@ end
         # The start is checked on every subject once. Each SA iteration then
         # opens with the domain check of exactly its batch, and every later
         # evaluation of the iteration (kernel proposals or transitions, the
-        # numerical M-step's values, gradients and metric) lies within it.
+        # numerical step's values and gradients) lies within it. The only
+        # exceptions are the numerical step's two metric estimates, each a
+        # run of gradients over every subject.
         @test first(batches) == 1:n
         start = findfirst(s -> length(s) == b, batches)
         @test all(s -> length(s) == 1, batches[2:start-1])   # NUTS warmup only
-        current, changes, contained = batches[start], 0, true
-        for s in batches[start:end]
+        current, changes, contained, full_runs = batches[start], 0, true, 0
+        for (j, s) in pairs(batches)
+            j < start && continue
+            if length(s) == n
+                full_runs += length(batches[j-1]) != n
+                continue
+            end
             if length(s) == b && s != current
                 current, changes = s, changes + 1
             end
             contained &= issubset(s, current)
         end
         @test contained
+        @test full_runs == 2
         @test changes <= iterations - 1
-        @test sort!(unique(reduce(vcat, batches[start:end]))) == 1:n
+        @test sort!(unique(reduce(vcat, filter(s -> length(s) < n, batches[start:end])))) == 1:n
     end
 end
 
@@ -149,29 +162,46 @@ end
 
 @testset "minibatch SAEM score step" begin
     model = growth_model()
+    n = nsubjects(model)
     θ, σ = [1.0, 0.5], [log(0.5)]
-    H = zeros(2, 4)
-    design = [zeros(2, 0) for _ in 1:4]
-    value_gradient(z) = NE._saem_numeric_value_gradient(z, model, 1:4, θ, σ, [3], Int[],
-        design, [H], [3.0], Val(:online))
-    _, g = value_gradient(σ)
-    # A small step is γ M ĝ, with the metric held.
-    metric = Ref{Union{Nothing, Matrix{Float64}}}(fill(0.02, 1, 1))
-    θ1, σ1 = NE._saem_score_step(model, 1:4, θ, σ, [3], Int[], design, [H], [3.0],
-        0.05, nothing, metric)
+    H = zeros(2, n)
+    design = [zeros(2, 0) for _ in 1:n]
+    active = [2, 5, 7]
+    batch(z) = NE._saem_numeric_value_gradient(z, model, active, θ, σ, [3], Int[],
+        design[active], [H[:, active]], [n / 3], Val(:online))
+    full(z) = NE._saem_numeric_value_gradient(z, model, 1:n, θ, σ, [3], Int[], design,
+        [H], [1.0], Val(:online))
+    step(share, metric) = NE._SAEMScoreStep(share,
+        Ref{Union{Nothing, Matrix{Float64}}}(metric), Ref(true))
+    score_step(γ, s) = NE._saem_score_step(model, 1:n, θ, σ, [3], Int[], design, [H],
+        [1.0], γ, nothing, active, s)
+    _, g = batch(σ)
+    # A step is min(γ, b/n) M ĝ, ĝ the batch's score scaled by n/b, M held.
+    small = step(0.25, fill(0.02, 1, 1))
+    θ1, σ1 = score_step(0.05, small)
     @test θ1 == θ
     @test σ1 ≈ σ .+ 0.05 * 0.02 .* g
-    @test metric[] == fill(0.02, 1, 1)
+    _, σ2 = score_step(1.0, small)
+    @test σ2 ≈ σ .+ 0.25 * 0.02 .* g
+    @test small.metric[] == fill(0.02, 1, 1)
     # A step that overshoots the batch optimum is halved until it ascends.
-    huge = Ref{Union{Nothing, Matrix{Float64}}}(fill(1e3, 1, 1))
-    _, σ2 = NE._saem_score_step(model, 1:4, θ, σ, [3], Int[], design, [H], [3.0],
-        1.0, nothing, huge)
-    @test first(value_gradient(σ2)) > first(value_gradient(σ))
-    @test abs(σ2[1] - σ[1]) < 1e3 * abs(g[1])
-    # Without a metric from a γ = 1 search, the first step estimates one.
-    empty = Ref{Union{Nothing, Matrix{Float64}}}(nothing)
-    NE._saem_score_step(model, 1:4, θ, σ, [3], Int[], design, [H], [3.0], 0.5, nothing, empty)
-    @test empty[] isa Matrix{Float64}
+    _, σ3 = score_step(1.0, step(0.25, fill(1e3, 1, 1)))
+    @test first(batch(σ3)) > first(batch(σ))
+    @test abs(σ3[1] - σ[1]) < 0.25 * 1e3 * abs(g[1])
+    # M is the full objective's inverse curvature, estimated at the first M-step
+    # and once more where γ first falls below one.
+    fresh = NE._SAEMScoreStep(0.25)
+    score_step(1.0, fresh)
+    @test fresh.metric[] ≈ NE._saem_search_metric(full, σ)
+    @test !fresh.refreshed[]
+    fresh.metric[] = fill(7.0, 1, 1)
+    score_step(1.0, fresh)
+    @test fresh.metric[] == fill(7.0, 1, 1)
+    score_step(0.5, fresh)
+    @test fresh.refreshed[] && fresh.metric[] ≈ NE._saem_search_metric(full, σ)
+    fresh.metric[] = fill(7.0, 1, 1)
+    score_step(0.3, fresh)
+    @test fresh.metric[] == fill(7.0, 1, 1)
 end
 
 @testset "minibatch MALA round moves only its batch" begin

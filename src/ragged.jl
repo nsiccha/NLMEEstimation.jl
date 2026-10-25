@@ -365,9 +365,9 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
     weights = Float64[]
     batch = _saem_minibatch(options.minibatch_size, length(ids))
     numeric_mode = _saem_numeric_mode(options.numeric_mstep, free, layout.ntheta, batch)
-    numeric_update = Base.invokelatest(_SAEMNumericUpdate, numeric_mode)::Function
-    score_step = batch === nothing ? nothing :
-        Base.invokelatest(_SAEMScoreStep, numeric_update.metric)::Function
+    numeric_update = batch === nothing ?
+        Base.invokelatest(_SAEMNumericUpdate, numeric_mode)::Function :
+        Base.invokelatest(_SAEMScoreStep, batch / length(ids))::Function
     mean_phi = [zeros(length(h)) for h in H]
     second_phi = [zeros(length(h), length(h)) for h in H]
     logscale = log(options.rw_scale)
@@ -430,8 +430,7 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
                 _saem_kernel_stats(kernel, nprior, nrw, ncw, ncw_proposed,
                     moved, 0, nothing))
             θ_before = copy(θ)
-            update = batch !== nothing && γ < 1 ? score_step : numeric_update
-            θ, σ, ω, θ_kept = _saem_mstep(update, model, ids, layout, θ, σ, ω,
+            θ, σ, ω, θ_kept = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
                 indices, design, free, bank, weights, mean_phi, second_phi,
                 options, γ, constraints, map_objective, active)
             _saem_recenter!(H, θ_before, θ_kept, indices, design)
