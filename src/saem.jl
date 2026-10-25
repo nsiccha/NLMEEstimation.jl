@@ -98,7 +98,9 @@ struct StandardSAEMMH <: AbstractSAEMKernel end
 MALA with one independent dual-averaging step size per subject. `metric=:prior`
 uses the current Ω as proposal covariance. `metric=:hessian` obtains a fixed
 per-subject covariance from the initial regularized local posterior Hessian,
-falling back to Ω if the model has no Hessian. Gradients are evaluated in
+falling back to Ω if the model has no Hessian. That fallback stays the starting
+Ω: when a variance component then shrinks, the step size shrinks with its
+posterior, and the chains can stop moving. Gradients are evaluated in
 subject batches. The source gradient is reused after each accept or reject
 until a population M-step changes the target. Adaptation continues at every
 transition, including during population updates. This changing-target, continuously adapted mode is
