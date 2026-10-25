@@ -383,7 +383,7 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
             break
         end
         phase = _saem_phase!(phases, iteration, options.mcmc_burnin)
-        active = iteration <= options.mcmc_burnin ? Base.OneTo(length(ids)) :
+        active = iteration <= max(options.mcmc_burnin, 1) ? Base.OneTo(length(ids)) :
             _saem_active(rng, length(ids), batch)
         if iteration > options.mcmc_burnin
             prior = RaggedNormalREPrior(layout, ω)

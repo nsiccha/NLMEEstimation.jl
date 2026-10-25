@@ -37,25 +37,26 @@ to omit a separate initial MCMC phase; `burnin` still controls the SA step sizes
 
 `minibatch_size=nothing` moves every subject's chain at every iteration. An
 integer `b` runs minibatch SAEM (Kuhn, Matias & Rebafka 2020): each SA
-iteration draws `b` of the fitted subjects uniformly at random without
+iteration draws `b` of the `n` fitted subjects uniformly at random without
 replacement, and only their chains move. The `mcmc_burnin` sweeps still move
-every chain, so that each starts from its conditional posterior at the
-starting estimate; from chains left near their start, the first γ = 1 M-steps
-would shrink Ω, and with it every proposal scaled by Ω. The other subjects keep their last
-sampled latent effects, which stay in the stochastic-approximation statistics,
-so the Gaussian block uses every subject without evaluating the model. The
-numerical update evaluates the batch alone: each M-step takes one
-Robbins–Monro step `min(γ, b/n) M ĝ` along the batch's score `ĝ`, its
-conditional log density scaled to all `n` fitted subjects. The cap `b/n`
-limits a step to the batch's share of a Newton step, so one pass over the
-subjects adds up to about one. `M` is the inverse curvature of the full
-objective, estimated from every subject's chain at the first M-step and again
-where γ first falls below one. The step's mean is the full score, so the
-estimates converge to the same fixed point as full-batch SAEM, where a search
-to each batch's optimum would converge to a point biased by order `1/b`.
-`numeric_mstep` must be `:auto`; the result reports `:minibatch`, and
-`numeric_maxiter` is unused. Each chain moves in only a fraction `b / n` of the
-iterations. `b` equal to the number of fitted subjects is the full-batch
+every chain (and the first iteration does when `mcmc_burnin = 0`), so that each
+starts from its conditional posterior at the starting estimate; from chains
+left at their start, the first γ = 1 M-steps would shrink Ω, and with it every
+proposal scaled by Ω. The other subjects
+keep their last sampled latent effects, which stay in the
+stochastic-approximation statistics, so the Gaussian block uses every subject
+without evaluating the model. The numerical update evaluates the batch alone:
+each M-step takes one Robbins–Monro step `min(γ, 4b/n) M ĝ` along the batch's
+score `ĝ`, its conditional log density scaled to all `n` subjects. The cap
+limits a step to four times the batch's share of a Newton step, so one pass over
+the subjects nearly solves the update, as a full-batch search does, without the
+batch's whole sampling error. `M` is the inverse curvature of the full
+objective, estimated from every subject's chain at M-steps 1, 2, 4, 8, …. The
+step's mean is the full score, so the estimates converge to the same fixed
+point as full-batch SAEM, where a search to each batch's optimum would converge
+to a point biased by order `1/b`. `numeric_mstep` must be `:auto`; the result
+reports `:minibatch`, and `numeric_maxiter` is unused. Each chain moves in only
+a fraction `b / n` of the iterations. `b` equal to `n` is the full-batch
 algorithm.
 """
 Base.@kwdef struct SAEMOptions
@@ -1107,15 +1108,16 @@ function (update::_SAEMNumericUpdate)(model, subjects, θ, σ, free, indices,
 end
 
 # The numerical update of minibatch SAEM, built like `_SAEMNumericUpdate` once
-# per fit. `share` is the batch's fraction of the fitted subjects; `metric` and
-# `refreshed` hold the quasi-Newton metric across M-steps (`_saem_score_step`).
+# per fit. `share` is the batch's fraction of the fitted subjects; `metric`
+# holds the quasi-Newton metric across M-steps and `steps` counts them
+# (`_saem_score_step`).
 struct _SAEMScoreStep <: Function
     share::Float64
     metric::Base.RefValue{Union{Nothing, Matrix{Float64}}}
-    refreshed::Base.RefValue{Bool}
+    steps::Base.RefValue{Int}
 end
 _SAEMScoreStep(share::Real) =
-    _SAEMScoreStep(share, Ref{Union{Nothing, Matrix{Float64}}}(nothing), Ref(false))
+    _SAEMScoreStep(share, Ref{Union{Nothing, Matrix{Float64}}}(nothing), Ref(0))
 
 function (step::_SAEMScoreStep)(model, subjects, θ, σ, free, indices, design,
         bank, weights, maxiter, γ, ω = nothing, active = eachindex(subjects))
@@ -1125,29 +1127,36 @@ end
 
 # One Robbins–Monro step z ← z + t g M ĝ along ĝ, the score of the batch at
 # positions `active` with its conditional log density scaled to all `subjects`.
-# The gain g = min(γ, b/n) caps the step at the batch's share of a Newton step,
-# so one pass over the subjects adds up to about one full Newton step. An
-# uncapped step at γ = 1, or a search to the batch's optimum, moves by the
-# batch's whole sampling error: on 10 of 400 PK subjects, a weakly identified
-# additive error SD jumped to where its score vanishes and never came back. The
-# gains still sum to infinity with finite squares, and the step's mean is g M
-# times the full score, so the iterates converge where that score vanishes; a
-# search to each batch's optimum would average optimizers whose mean is off by
-# order 1/b. M is the inverse absolute curvature of the full objective, from
-# every subject's chain, at the first M-step and again where γ first falls below
-# one, near the optimum; held fixed between, it stays independent of the batch
-# it multiplies. t is halved from 1 until the batch objective passes the Armijo
+# The gain g = min(γ, 4b/n) caps the step at four times the batch's share of a
+# Newton step. One pass over the subjects then shrinks the distance to the
+# optimum by about e⁻⁴, as a full-batch search nearly solves each M-step, and
+# the steps' noise keeps the iterate within about 1.4 standard errors of it,
+# like the single draws of a full-batch iteration. An uncapped step at γ = 1, or
+# a search to the batch's optimum, moves by the batch's whole sampling error: on
+# 10 of 400 PK subjects, a weakly identified additive error SD jumped to where
+# its score vanishes and never came back. A cap of b/n left e⁻¹ of the distance
+# per pass, and the lagging σ let Ω drift onto a singular, absorbing
+# correlation in 1 of 8 NUTS fits of a 40-subject growth model. The gains still
+# sum to infinity with finite squares, and the step's mean is g M times the full
+# score, so the iterates converge where that score vanishes; a search to each
+# batch's optimum would average optimizers whose mean is off by order 1/b. M is the inverse absolute curvature of the full objective, from
+# every subject's chain, estimated at M-steps 1, 2, 4, 8, …: the curvature
+# changes most while the parameters travel, and a metric from a far start
+# (where σ's curvature is inflated by residuals that still hold the random
+# effects) made σ lag the chains. The doubling schedule costs a logarithmic
+# number of passes over every subject. Between estimates M is held, independent of the batches it
+# multiplies. t is halved from 1 until the batch objective passes the Armijo
 # test (with the searches' rounding allowance), which so small a step near a
 # smooth optimum passes at once.
 function _saem_score_step(model, subjects, θ, σ, free, indices, design, bank,
         weights, γ, ω, active, step::_SAEMScoreStep)
     isempty(free) && return θ, σ
     z0 = vcat(θ, σ)[free]
-    if step.metric[] === nothing || (γ < 1 && !step.refreshed[])
+    step.steps[] += 1
+    if ispow2(step.steps[])
         full(z) = _saem_numeric_value_gradient(z, model, subjects, θ, σ, free,
             indices, design, bank, weights, Val(:online), ω)
         step.metric[] = _saem_search_metric(full, z0)
-        step.refreshed[] = γ < 1
     end
     batch_subjects, batch_design = subjects[active], design[active]
     batch = [_columns(H, active) for H in bank]
@@ -1160,7 +1169,7 @@ function _saem_score_step(model, subjects, θ, σ, free, indices, design, bank,
     isfinite(value) && all(isfinite, gradient) || throw(DomainError(value,
         "SAEM numerical M-step has non-finite objective or gradient"))
     metric = step.metric[]
-    direction = min(γ, step.share) .* (metric === nothing ? gradient : metric * gradient)
+    direction = min(γ, 4step.share) .* (metric === nothing ? gradient : metric * gradient)
     z = z0
     t = 1.0
     while t >= 1.0e-8
@@ -1468,7 +1477,7 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                 break
             end
             phase = _saem_phase!(phases, iteration, options.mcmc_burnin)
-            active = iteration <= options.mcmc_burnin ? Base.OneTo(length(ids)) :
+            active = iteration <= max(options.mcmc_burnin, 1) ? Base.OneTo(length(ids)) :
                 _saem_active(rng, length(ids), batch)
             if iteration > options.mcmc_burnin
                 prior = re_prior(model, ω)
