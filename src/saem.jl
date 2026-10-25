@@ -3,7 +3,8 @@
                  mh_rounds=1, rw_scale=0.5, adapt_iterations=150,
                  step_exponent=0.8, numeric_maxiter=12, mstep_interval=1,
                  numeric_mstep=:auto,
-                 omega_floor=1e-8, minibatch_size=nothing)
+                 omega_floor=1e-8, omega_annealing=0.95,
+                 minibatch_size=nothing)
 
 Settings for [`saem`](@ref). The first `burnin` stochastic-approximation
 iterations use step size one; subsequent sizes are `(k-burnin)^(-step_exponent)`.
@@ -19,6 +20,13 @@ for the mu-referenced coefficients, the covariance that maximizes an M-step's
 Gaussian term can be singular; its closed-form update moves towards the floor
 by at most 100 coordinate updates per M-step, so Ω may approach it over several
 iterations.
+`omega_annealing=0.95` anneals Ω while γ = 1, as Monolix and saemix do: an
+M-step may shrink no covariance family by more than that factor in any
+direction (its new Ω is at least `omega_annealing` times the previous one in
+the matrix order). Each such M-step sets Ω from one posterior draw per subject,
+so Ω wanders, and where it wanders towards a singular correlation, kernels
+whose proposals follow Ω cannot leave it. `omega_annealing=0` turns it off
+and reproduces fits from before it was introduced.
 `numeric_mstep=:auto` uses an online update for remaining σ coordinates when
 all θ coordinates have a closed-form `MuReferencing` update; otherwise it uses
 the historical running-mixture objective. Either numerical update also moves
@@ -71,6 +79,7 @@ Base.@kwdef struct SAEMOptions
     mstep_interval::Int = 1
     numeric_mstep::Symbol = :auto
     omega_floor::Float64 = 1.0e-8
+    omega_annealing::Float64 = 0.95
     minibatch_size::Union{Nothing, Int} = nothing
 end
 
@@ -98,7 +107,9 @@ struct StandardSAEMMH <: AbstractSAEMKernel end
 MALA with one independent dual-averaging step size per subject. `metric=:prior`
 uses the current Ω as proposal covariance. `metric=:hessian` obtains a fixed
 per-subject covariance from the initial regularized local posterior Hessian,
-falling back to Ω if the model has no Hessian. Gradients are evaluated in
+falling back to Ω if the model has no Hessian. That fallback stays the starting
+Ω: when a variance component then shrinks, the step size shrinks with its
+posterior, and the chains can stop moving. Gradients are evaluated in
 subject batches. The source gradient is reused after each accept or reject
 until a population M-step changes the target. Adaptation continues at every
 transition, including during population updates. This changing-target, continuously adapted mode is
@@ -541,6 +552,7 @@ function _saem_check_options(o::SAEMOptions)
     o.numeric_mstep in (:auto, :online, :mixture) ||
         throw(ArgumentError("numeric_mstep must be :auto, :online, or :mixture"))
     isfinite(o.omega_floor) && o.omega_floor > 0 || throw(ArgumentError("omega_floor must be finite and positive"))
+    0 <= o.omega_annealing < 1 || throw(ArgumentError("omega_annealing must be in [0, 1)"))
     o.minibatch_size === nothing || o.minibatch_size > 0 ||
         throw(ArgumentError("minibatch_size must be positive or nothing"))
     return nothing
@@ -1190,6 +1202,32 @@ function _saem_score_step(model, subjects, θ, σ, free, indices, design, bank,
     return x[1:length(θ)], x[length(θ)+1:end]
 end
 
+# Simulated annealing of Ω during SAEM's exploration phase (as in Monolix and
+# saemix): no covariance family shrinks by more than the factor τ per M-step in
+# any direction, Ω_new ⪰ τ Ω_old in the matrix order, and fixed parts are then
+# re-applied. While γ = 1 each M-step sets Ω from one posterior draw per subject,
+# so Ω wanders; where it wanders towards a singular correlation, kernels whose
+# proposals follow Ω cannot leave it. On the `fixed Ω` test fixture, 3 of 20
+# fits ended there, up to 3.5 log-likelihood units below the maximum, and on
+# the growth model prior-metric MALA collapsed in 3 of 20 full-batch and 4 of
+# 20 minibatch fits; with τ = 0.95 none did.
+function _saem_anneal(layout::NLMELayout, ω_previous, ω, τ, constraints)
+    Ω_previous, Ω = omega_matrix(layout, ω_previous), omega_matrix(layout, ω)
+    ranges, _ = _block_ranges(layout)
+    for r in ranges
+        Ω[r, r] = _saem_anneal_floor(Ω[r, r], Ω_previous[r, r], τ)
+    end
+    return _apply_omega_constraints(constraints, omega_parameters(layout, Ω))
+end
+
+# The covariance closest to Ω (in the eigenbasis of Ω - τ Ω_previous) that is at
+# least τ Ω_previous: Ω itself when it already is, and never below Ω.
+function _saem_anneal_floor(Ω, Ω_previous, τ)
+    A = τ * Ω_previous
+    E = eigen(Symmetric(Ω - A))
+    return Matrix(Symmetric(A + E.vectors * Diagonal(max.(E.values, 0)) * E.vectors'))
+end
+
 _saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
     second_phi, floor, subjects, constraints; require_instances = true) =
     _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi,
@@ -1209,11 +1247,13 @@ _saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
 # `saem-population-8975f340`). Returns θ, σ, ω and the θ of the Gaussian block,
 # whose φ the chains keep (`_saem_recenter!`). With `:online`, only the
 # numerical block is damped by the SA step size γ; the Gaussian block already
-# uses the stochastically averaged statistics. Under minibatch SAEM the
-# numerical update evaluates only the subjects at positions `active`.
+# uses the stochastically averaged statistics. While γ = 1 the Gaussian block's
+# Ω is annealed (`_saem_anneal`). Under minibatch SAEM the numerical update
+# evaluates only the subjects at positions `active`.
 function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indices,
         design, free, bank, weights, mean_phi, second_phi, options, γ,
         constraints, map_objective, active = eachindex(subjects))
+    ω_previous = ω
     θ, Ω = _saem_closed_form_mstep(layout, θ, omega_matrix(layout, ω), indices,
         design, mean_phi, second_phi, options.omega_floor, subjects, constraints;
         require_instances = !map_objective)
@@ -1221,6 +1261,9 @@ function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indice
     if map_objective
         θ, ω = _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
             mean_phi, second_phi, subjects, options.omega_floor, constraints)
+    end
+    if options.omega_annealing > 0 && γ == 1
+        ω = _saem_anneal(layout, ω_previous, ω, options.omega_annealing, constraints)
     end
     θ_centered = θ
     # Without other numerical coordinates there is no ridge to follow, and the

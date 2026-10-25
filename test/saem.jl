@@ -157,6 +157,40 @@ end
     @test model.batch_calls[] > 1
 end
 
+@testset "SAEM anneals Ω while γ = 1" begin
+    # The floor keeps every direction at least τ times the previous Ω and never
+    # lowers the M-step's Ω; an Ω that already clears it is kept.
+    Ω_previous = [0.5 0.3; 0.3 0.4]
+    shrunk = [0.05 0.0; 0.0 0.38]
+    annealed = NE._saem_anneal_floor(shrunk, Ω_previous, 0.95)
+    @test eigmin(Symmetric(annealed - 0.95 * Ω_previous)) >= -1e-12
+    @test eigmin(Symmetric(annealed - shrunk)) >= -1e-12
+    @test NE._saem_anneal_floor(2Ω_previous, Ω_previous, 0.95) ≈ 2Ω_previous
+    layout = NLMELayout(0, 0, [1, 2])
+    ω_previous = omega_parameters(layout, [0.3 0 0; 0 0.5 0.3; 0 0.3 0.4])
+    ω = NE._saem_anneal(layout, ω_previous, omega_parameters(layout,
+        [0.01 0 0; 0 0.05 0.0; 0 0.0 0.38]), 0.95, nothing)
+    Ω = omega_matrix(layout, ω)
+    @test Ω[1, 1] ≈ 0.95 * 0.3
+    @test eigmin(Symmetric(Ω[2:3, 2:3] - 0.95 * [0.5 0.3; 0.3 0.4])) >= -1e-12
+    ragged = RaggedNLMELayout(ntheta = 0, nsigma = 0, family_sizes = [1, 2],
+        subject_families = [[1, 2], [1]])
+    ωr = NE._saem_anneal(ragged, omega_parameters(ragged, [fill(0.3, 1, 1), [0.5 0.3; 0.3 0.4]]),
+        omega_parameters(ragged, [fill(0.01, 1, 1), [0.05 0.0; 0.0 0.38]]), 0.95, nothing)
+    @test omega_matrix(ragged, ωr)[1][1, 1] ≈ 0.95 * 0.3
+    # refused: a factor of 1 or more would forbid Ω from ever shrinking while
+    # γ = 1, so the exploration phase could not move towards the estimate.
+    @test_throws ArgumentError NE._saem_check_options(SAEMOptions(omega_annealing = 1.0))
+    @test_throws ArgumentError NE._saem_check_options(SAEMOptions(omega_annealing = -0.1))
+    # Annealing only acts while γ = 1, and 0 skips it.
+    model = growth_model()
+    θ, σ = [1.0, 0.5], [log(0.3)]
+    ω0 = omega_parameters(NLMELayout(2, 1, [2]), [0.5 0.1; 0.1 0.2])
+    fit(τ) = saem(model, θ, σ, ω0; rng = Xoshiro(3),
+        options = SAEMOptions(iterations = 20, burnin = 10, mcmc_burnin = 2, omega_annealing = τ))
+    @test fit(0.0).omega != fit(0.95).omega
+end
+
 @testset "SAEM Gaussian M-step" begin
     layout = NLMELayout(1, 0, [1])
     mean_phi = reshape([1.0, 3.0], 1, 2)

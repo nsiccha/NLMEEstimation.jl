@@ -104,11 +104,13 @@ end
 
 # The M-step's search starts from a curvature estimate and no longer overshoots
 # from σ0 to below log(0.1); a bound just under the fitted residual SD (about
-# 0.3, ragged 0.27) keeps its trial points crossing it.
+# 0.3, ragged 0.27) keeps its trial points crossing it. With Ω annealed while
+# γ = 1, the fits settle at 0.296-0.303 and no longer cross 0.28 in every
+# configuration, so the bound is 0.29.
 @testset "infeasible trial points: SAEM retraces the -Inf twin" begin
     θ0, σ0 = [1.0, 0.5], [log(0.5)]
     ω0 = omega_parameters(GROWTH_LAYOUT, [0.8 0.0; 0.0 0.3])
-    min_sd = 0.28
+    min_sd = 0.29
     for mode in (:online, :mixture)
         fit, reference, hits = bounded_fits(
             throws -> Bounded(growth_model(); throws, min_sd), θ0, σ0, ω0; numeric_mstep = mode)
