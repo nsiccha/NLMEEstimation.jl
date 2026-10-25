@@ -240,6 +240,50 @@ end
     @test θmap != θ && ωmap != ω
 end
 
+@testset "population prior: the SAEM Gaussian block rejects a singular Ω trial" begin
+    # A trial whose second Cholesky diagonal is below the floor (at -800 it
+    # underflows to zero) next to a large scale. An eigenvalue floor read from
+    # the formed Ω passed some of these, and the Gaussian term then threw
+    # LAPACKException out of `saem`.
+    layout = NLMELayout(0, 0, [2])
+    ragged = RaggedNLMELayout(0, 0, [2], [[1], [1], [1]])
+    constrained = NLMELayout(0, 0, [1, 2])
+    constraints = NE._omega_constraints(constrained, [1 => FixedOmega(sd = [0.3])])
+    admissible(ω) = (NE._omega_admissible(layout, nothing, ω, 1e-8),
+        NE._saem_omega_above_floor(ragged, ω, 1e-8),
+        NE._omega_admissible(constrained, constraints, vcat(log(0.3), ω), 1e-8))
+    for a in range(-2, 12, length = 15), c in (0.0, 1e4, -1e6), b in (-800.0, -40.0)
+        @test admissible([a, c, b]) == (false, false, false)
+    end
+    # Large scales, and a variance near the floor beside one, are above it.
+    for ω in ([0.0, 0.5, 0.0], [log(1e3), 0.0, log(1e3)], [log(1e6), 0.0, log(1e-3)])
+        @test admissible(ω) == (true, true, true)
+    end
+    # The line search through the Gaussian term, with a first step onto such a
+    # trial: the expected statistics shrink Ω and turn its correlation, so the
+    # gradient points the way the step goes in every coordinate.
+    Ω0 = [0.2 0.06; 0.06 0.1]
+    mean_phi = zeros(2, 3)
+    second_phi = repeat([0.002 -0.0005; -0.0005 0.001], 1, 1, 3)
+    design = [zeros(2, 0) for _ in 1:3]
+    function objective(ω)
+        value, _, gradient = NE._saem_gaussian_map_value_gradient(layout, Float64[], ω,
+            Int[], design, mean_phi, second_phi)
+        return value, gradient
+    end
+    ω0 = omega_parameters(layout, Ω0)
+    _, g0 = objective(ω0)
+    for a in range(-3, -1, length = 9), c in (1e5, 1e6)
+        step = [a, copysign(c, g0[2]), -800.0] - ω0
+        @test all(>(0), step ./ g0)
+        ω = NE._bfgs_ascent(objective, ω0, 20,
+            ω -> NE._omega_admissible(layout, nothing, ω, 1e-8);
+            screen = first ∘ objective, inverse_hessian = Diagonal(step ./ g0))
+        @test NE._omega_admissible(layout, nothing, ω, 1e-8)
+        @test first(objective(ω)) > first(objective(ω0))
+    end
+end
+
 @testset "population prior: SAEM with a zero prior retraces the ML fit" begin
     for mode in (:online, :mixture)
         options = SAEMOptions(iterations = 30, burnin = 10, mcmc_burnin = 5,

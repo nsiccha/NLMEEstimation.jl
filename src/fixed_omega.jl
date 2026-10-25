@@ -390,9 +390,8 @@ function _omega_admissible(layout, c::_OmegaConstraints, ω, floor)
         k = c.sizes[f]
         segment = view(ω, c.ranges[f])
         if fam === nothing
-            L = omega_cholesky(NLMELayout(0, 0, [k]), segment)
-            Ω = Matrix(L * L')
-            all(isfinite, Ω) && eigmin(Symmetric(Ω)) >= floor || return false
+            _factor_above_floor(omega_cholesky(NLMELayout(0, 0, [k]), segment),
+                floor) || return false
         elseif !fam.fully_fixed
             _partial_family_admissible(fam, segment, k, floor) || return false
         end

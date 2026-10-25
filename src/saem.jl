@@ -997,11 +997,22 @@ function _saem_numeric_mstep(model, subjects, θ, σ, free, indices, design, ban
     return x[1:length(θ)], x[length(θ)+1:end]
 end
 
+# Whether `Ω = L Lᵀ` is finite with smallest eigenvalue at least `floor`, read
+# from the Cholesky factor `L`: the eigenvalues of the formed product are only
+# resolved to about eps·‖Ω‖, which at a large scale exceeds the floor and passes
+# an exactly singular Ω (a diagonal of L underflowed to zero), whose density then
+# throws. σ_min(L)² is resolved to about (eps·‖L‖)². A diagonal entry of L is one
+# of its eigenvalues and so bounds σ_min(L) exactly, at any scale.
+function _factor_above_floor(L, floor)
+    all(isfinite, L) && all(isfinite, L * L') || return false
+    minimum(abs, diag(L))^2 >= floor || return false
+    return minimum(svdvals(Matrix(L)))^2 >= floor
+end
+
 function _saem_omega_above_floor(layout, ω, floor)
-    Ω = omega_matrix(layout, ω)
-    all(isfinite, Ω) || return false
+    L = omega_cholesky(layout, ω)
     ranges, _ = _block_ranges(layout)
-    return all(r -> eigmin(Symmetric(Ω[r, r])) >= floor, ranges)
+    return all(r -> _factor_above_floor(L[r, r], floor), ranges)
 end
 
 # The Gaussian block of a MAP M-step: the mu-referenced θ and the free Ω
