@@ -201,13 +201,17 @@ end
     @test Ω ≈ ones(1, 1)
 end
 
-# Linear growth with a subject covariate on the intercept and a dense 2 × 2 Ω.
-# With three subjects, the intercept, covariate slope and growth rate can make
-# one draw's residuals collinear, so the covariance maximizer of a γ = 1 M-step
-# is singular. `prior` adds a population prior (a MAP fit).
+# Linear growth with subject covariates on the intercept and a dense 2 × 2 Ω:
+# θ = [intercept, rate, covariate slopes…], `w` holds one row per subject. With
+# three subjects and one covariate, the intercept, covariate slope and growth
+# rate can make one draw's residuals collinear, so the covariance maximizer of a
+# γ = 1 M-step is singular. With three covariates the designs identify only
+# three of the four intercept coefficients: the two standardized covariates are
+# exactly collinear (their raw values have the same sum for every subject).
+# `prior` adds a population prior (a MAP fit).
 struct CovariateGrowth
     t::Vector{Vector{Float64}}
-    w::Vector{Float64}
+    w::Matrix{Float64}
     y::Vector{Vector{Float64}}
     prior::Bool
 end
@@ -218,15 +222,27 @@ function covariate_growth_model(prior; seed = 5)
     t = [[0.5, 1.0, 2.0, 4.0] for _ in w]
     y = [(1.0 + 0.8w[i] + 0.4randn(rng)) .+ (0.5 + 0.2randn(rng)) .* t[i] .+
         0.1 .* randn(rng, 4) for i in eachindex(w)]
+    return CovariateGrowth(t, reshape(w, :, 1), y, prior)
+end
+
+# Three subjects with an indicator and two standardized covariates.
+function wide_covariate_growth_model(prior; seed = 5)
+    rng = Xoshiro(seed)
+    standardize(x) = (x .- sum(x) / 3) ./ sqrt(sum(abs2, x .- sum(x) / 3) / 2)
+    w = hcat([0.0, 1.0, 1.0], standardize([2.0, 5.0, 3.0]), standardize([8.0, 5.0, 7.0]))
+    t = [[0.5, 1.0, 2.0, 4.0] for _ in 1:3]
+    y = [(1.0 + dot([0.3, -0.2, 0.1], w[i, :]) + 0.4randn(rng)) .+
+        (0.5 + 0.2randn(rng)) .* t[i] .+ 0.1 .* randn(rng, 4) for i in 1:3]
     return CovariateGrowth(t, w, y, prior)
 end
 
 NE.nsubjects(m::CovariateGrowth) = length(m.y)
-NE.nlme_layout(::CovariateGrowth) = NLMELayout(3, 1, [2])
-NE.mu_referencing(m::CovariateGrowth) =
-    MuReferencing([1, 2, 3], [[1.0 0.0 w; 0.0 1.0 0.0] for w in m.w])
+NE.nlme_layout(m::CovariateGrowth) = NLMELayout(2 + size(m.w, 2), 1, [2])
+NE.mu_referencing(m::CovariateGrowth) = MuReferencing(collect(1:2+size(m.w, 2)),
+    [[1.0 0.0 m.w[i, :]'; 0.0 1.0 zeros(1, size(m.w, 2))] for i in eachindex(m.y)])
 covariate_growth_residuals(m, i, θ, η) =
-    m.y[i] .- (θ[1] + θ[3] * m.w[i] + η[1]) .- (θ[2] + η[2]) .* m.t[i]
+    m.y[i] .- (θ[1] + dot(view(θ, 3:length(θ)), view(m.w, i, :)) + η[1]) .-
+    (θ[2] + η[2]) .* m.t[i]
 
 function NE.conditional_loglikelihood(m::CovariateGrowth, i, θ, σ, η)
     r = covariate_growth_residuals(m, i, θ, η)
@@ -238,7 +254,7 @@ function NE.conditional_loglikelihood_and_population_gradient(m::CovariateGrowth
     r = covariate_growth_residuals(m, i, θ, η)
     v = exp(2σ[1])
     return NE.conditional_loglikelihood(m, i, θ, σ, η),
-        [sum(r), dot(r, m.t[i]), m.w[i] * sum(r)] ./ v, [sum(abs2, r) / v - length(r)]
+        vcat(sum(r), dot(r, m.t[i]), m.w[i, :] .* sum(r)) ./ v, [sum(abs2, r) / v - length(r)]
 end
 
 NE.population_logprior(m::CovariateGrowth, θ, σ, ω) =
@@ -285,6 +301,66 @@ end
         @test all(isfinite, vcat(fit.theta, fit.sigma, fit.omega))
         @test eigmin(Symmetric(fit.omega_matrix)) >= 1e-8
     end
+end
+
+@testset "SAEM Gaussian M-step keeps θ along combinations the designs do not identify" begin
+    # Three subjects carry four intercept coefficients, so one combination δ of
+    # them (the two collinear covariates' slopes) moves no subject's φ
+    # (X_k δ = 0). A Cholesky solve of the whole generalized-least-squares
+    # system threw a PosDefException.
+    design = NE.mu_referencing(wide_covariate_growth_model(false)).design
+    N = nullspace(reduce(vcat, design))
+    @test size(N) == (5, 1)
+    @test size(NE._saem_identified(design, 1:5)) == (5, 4)
+    @test NE._saem_identified(NE.mu_referencing(covariate_growth_model(false)).design,
+        1:3) === nothing
+    layout = NLMELayout(5, 0, [2])
+    mean_phi = [1.3 0.7 1.6; 0.4 0.9 0.2]
+    second_phi = zeros(2, 2, 3)
+    for k in 1:3
+        second_phi[:, :, k] = mean_phi[:, k] * mean_phi[:, k]' + [0.2 0.03; 0.03 0.1]
+    end
+    θ0, Ω0 = [0.5, 0.2, -0.3, 0.4, 0.1], Matrix(0.25I, 2, 2)
+    θ1, Ω1 = NE._saem_gaussian_mstep(layout, θ0, Ω0, 1:5, design, mean_phi, second_phi, 1e-8)
+    @test N' * θ1 ≈ N' * θ0
+    _, gμ, _ = NE._saem_gaussian_map_value_gradient(layout, θ1,
+        omega_parameters(layout, Ω1), 1:5, design, mean_phi, second_phi)
+    # μ maximizes at the previous Ω of the alternation, which then moved < 1e-8.
+    @test maximum(abs, gμ) < 1e-6
+    @test isposdef(Symmetric(Ω1))
+    ragged = RaggedNLMELayout(ntheta = 5, nsigma = 0, family_sizes = [2],
+        subject_families = [[1], [1], [1]])
+    θr, Ωr = NE._ragged_gaussian_mstep(ragged, θ0, [Ω0], 1:5, design,
+        collect(eachcol(mean_phi)), [second_phi[:, :, k] for k in 1:3], 1e-8, 1:3)
+    @test θr ≈ θ1
+    @test only(Ωr) ≈ Ω1
+end
+
+@testset "SAEM MAP fit where the designs do not identify every mu-referenced θ" begin
+    # The likelihood does not depend on the combination N of the intercept
+    # coefficients that no subject's design carries, so the prior -|θ|²/2 alone
+    # sets it, at N'θ = 0.
+    θ0, σ0, ω0 = [1.0, 0.5, 0.0, 0.0, 0.0], [log(0.2)], [log(0.5), 0.0, log(0.5)]
+    N = nullspace(reduce(vcat, NE.mu_referencing(wide_covariate_growth_model(true)).design))
+    for options in (SAEMOptions(iterations = 2, burnin = 1, mcmc_burnin = 0,
+                adapt_iterations = 0, numeric_maxiter = 2, omega_floor = 0.05),
+            SAEMOptions(iterations = 30, burnin = 10, mcmc_burnin = 5)), seed in 1:3
+        fit = saem(wide_covariate_growth_model(true), θ0, σ0, ω0; rng = Xoshiro(seed),
+            options)
+        @test fit.objective == :MAP
+        @test all(isfinite, vcat(fit.theta, fit.sigma, fit.omega))
+        @test abs(only(N' * fit.theta)) < 1e-5
+    end
+    # refused: without a prior the likelihood is flat along N, so the
+    # maximum-likelihood estimate is not unique.
+    err = try
+        saem(wide_covariate_growth_model(false), θ0, σ0, ω0; rng = Xoshiro(1))
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("combination(s) of θ4, θ5 move", err.msg)
+    @test occursin("population_logprior", err.msg)
 end
 
 @testset "SAEM online numerical M-step" begin
