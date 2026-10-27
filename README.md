@@ -238,8 +238,12 @@ maximizer of the running Gaussian random-effect statistics plus the prior, a
 search that evaluates only the prior; the remaining θ and σ take the numerical
 update with the prior added. Priors on mu-referenced fixed effects and
 covariance coordinates therefore affect the estimate, and a prior adds no model
-evaluations to the step. The reported point and final subject states are
-estimates, not samples from a population posterior.
+evaluations to the step. A combination of mu-referenced fixed effects that no
+subject's design carries (more coefficients on a random effect than subjects,
+or collinear covariates) does not change the likelihood; the prior alone sets
+it, and without a prior `saem` throws an `ArgumentError` naming those
+coefficients. The reported point and final subject states are estimates, not
+samples from a population posterior.
 
 `saem_fit.eta` contains the final Markov-chain states, not EBEs; call
 `empirical_bayes` as above when subject posterior modes are needed for app
