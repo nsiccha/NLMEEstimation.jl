@@ -220,11 +220,12 @@ function _saem_mh_component_sweep!(rng, model, subjects, θ, σ,
 end
 
 # The ragged form of `_saem_gaussian_mstep`, which returns its iterate after 100
-# updates in the same way. Without `require_instances`, an estimated family with
-# no instances among `subjects` keeps its covariance `Ω[f]` (a MAP step then
-# moves it by the prior).
+# updates and keeps θ along unidentified combinations in the same way. Without
+# `require_instances`, an estimated family with no instances among `subjects`
+# keeps its covariance `Ω[f]` (a MAP step then moves it by the prior).
 function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
-        second_phi, floor, subjects, constraints = nothing; require_instances = true)
+        second_phi, floor, subjects, constraints = nothing; require_instances = true,
+        identified = _saem_identified(design, indices))
     μ = copy(θ[indices])
     Ωnew = deepcopy(Ω)
     for _ in 1:100
@@ -241,7 +242,7 @@ function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
                     b += Xr' * P * view(mean_phi[k], r)
                 end
             end
-            μ = cholesky(Symmetric(A)) \ b
+            μ = _saem_gls(A, b, μ, identified)
         end
         sums = [zeros(k, k) for k in layout.family_sizes]
         counts = zeros(Int, length(layout.family_sizes))
@@ -330,9 +331,10 @@ function _saem_anneal(layout::RaggedNLMELayout, ω_previous, ω, τ, constraints
 end
 
 _saem_closed_form_mstep(layout::RaggedNLMELayout, θ, Ω, indices, design, mean_phi,
-    second_phi, floor, subjects, constraints; require_instances = true) =
+    second_phi, floor, subjects, constraints; require_instances = true,
+    identified = _saem_identified(design, indices)) =
     _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi,
-        floor, subjects, constraints; require_instances)
+        floor, subjects, constraints; require_instances, identified)
 
 function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
         options::SAEMOptions, kernel::StandardSAEMMH, node)
@@ -359,6 +361,8 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
         isapprox(gradient_lp, initial_lp; rtol=1e-10, atol=1e-10) || throw(ArgumentError(
             "population_logprior_and_gradient value differs from population_logprior"))
     end
+    identified = _saem_identified(design, indices)
+    map_objective || _saem_require_identified(model, indices, identified)
     H = _ragged_start(η0, layout, ids)
     free = [i for i in 1:(layout.ntheta + layout.nsigma) if i > layout.ntheta || !(i in indices)]
     prior = RaggedNormalREPrior(layout, ω)
@@ -436,7 +440,8 @@ function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η
             θ_before = copy(θ)
             θ, σ, ω, θ_kept = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
                 indices, design, free, bank, weights, mean_phi, second_phi,
-                options, γ, constraints, map_objective, active)
+                options, γ, constraints, map_objective, active;
+                identified)
             _saem_recenter!(H, θ_before, θ_kept, indices, design)
         end
         completed = k

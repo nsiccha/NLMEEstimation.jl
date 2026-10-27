@@ -754,6 +754,49 @@ function _saem_recenter!(H::AbstractMatrix, θ_old, θ_new, indices, design)
     return true
 end
 
+# The mu-referenced coefficient directions that the selected subjects' designs
+# identify: an orthonormal basis of the stacked designs' row space, with the rank
+# counted as `LinearAlgebra.rank` counts it, or `nothing` when they identify every
+# coefficient. A combination δ with X_k δ = 0 for every subject moves no φ, so
+# the likelihood does not depend on it: more coefficients on a random effect
+# than subjects that carry it (three subjects with an intercept and three
+# covariates), or collinear covariates. The closed-form step's matrix
+# Σ_k X_kᵀ P X_k has the stacked designs' null space for every positive-definite
+# precision P, so one basis serves the whole fit.
+function _saem_identified(design, indices)
+    isempty(indices) && return nothing
+    D = reduce(vcat, design)
+    F = svd(D)
+    tolerance = minimum(size(D)) * eps() * maximum(F.S; init = 0.0)
+    rank = count(>(tolerance), F.S)
+    return rank == length(indices) ? nothing : F.V[:, 1:rank]
+end
+
+# The generalized-least-squares update of the mu-referenced θ from μ. With
+# identified directions Q it solves A Δ = b - A μ for Δ in their span, which
+# maximizes the expected Gaussian density (b and A μ lie in that span), and keeps
+# μ along the other directions, which the likelihood does not inform; a MAP
+# M-step's prior then moves them (`_saem_gaussian_map_block`). A Cholesky solve
+# of the whole system failed there, or returned arbitrary values.
+_saem_gls(A, b, μ, ::Nothing) = cholesky(Symmetric(A)) \ b
+_saem_gls(A, b, μ, Q) = μ + Q * (cholesky(Symmetric(Q' * A * Q)) \ (Q' * (b - A * μ)))
+
+# Without a population prior, a combination of mu-referenced θ that the designs
+# do not identify leaves the likelihood flat, so the maximum-likelihood estimate
+# is not unique.
+function _saem_require_identified(model, indices, identified)
+    identified === nothing && return nothing
+    outside = 1 .- vec(sum(abs2, identified; dims = 2))
+    names = parameter_names(model).theta[indices[outside .> sqrt(eps())]]
+    combinations = length(indices) - size(identified, 2)
+    throw(ArgumentError("the mu-referencing designs of the selected subjects do not " *
+        "identify every mu-referenced θ: $combinations combination(s) of " *
+        "$(join(names, ", ")) move no subject's individual parameters, so the " *
+        "likelihood does not depend on them and the maximum-likelihood estimate is " *
+        "not unique. Give the model a population_logprior (a MAP fit estimates " *
+        "them from the prior), remove or recode covariates, or fit more subjects"))
+end
+
 function _saem_moments!(mean_phi, second_phi, Φ, γ)
     mean_phi .*= 1 - γ
     second_phi .*= 1 - γ
@@ -773,9 +816,11 @@ end
 # `floor` ever more slowly (7659 updates to settle at 1e-8 on three PK subjects
 # with a weight slope). After 100 updates the step returns its iterate, as the budgeted
 # searches of the other blocks do, and the next M-step continues from it; a MAP
-# M-step only starts its Gaussian block there.
+# M-step only starts its Gaussian block there. Where the designs do not identify
+# every mu-referenced coefficient (`identified`), the update keeps θ along the
+# combinations they leave out (`_saem_gls`).
 function _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi, floor,
-        constraints = nothing)
+        constraints = nothing; identified = _saem_identified(design, indices))
     m, n = size(mean_phi)
     μ = copy(θ[indices])
     Ωnew = copy(Ω)
@@ -790,7 +835,7 @@ function _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_
                 A += X' * P * X
                 b += X' * P * view(mean_phi, :, k)
             end
-            μ = cholesky(Symmetric(A)) \ b
+            μ = _saem_gls(A, b, μ, identified)
         end
         second_residual = zeros(Float64, m, m)
         for k in 1:n
@@ -1021,9 +1066,12 @@ end
 # term evaluates the model. The search starts where the Gaussian term's
 # closed-form updates (`_saem_gaussian_mstep`) stopped, with that term's inverse
 # curvature as its quasi-Newton matrix, so a prior that is weak against the data
-# moves it in a few steps.
+# moves it in a few steps. Along combinations that the designs do not identify
+# (`_saem_identified`) the Gaussian term has no curvature, and only the prior
+# gives the search a scale there, so it starts with the whole objective's.
 function _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
-        mean_phi, second_phi, subjects, floor, constraints)
+        mean_phi, second_phi, subjects, floor, constraints;
+        identified = _saem_identified(design, indices))
     nμ = length(indices)
     function point(z)
         θz = copy(θ)
@@ -1049,8 +1097,9 @@ function _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
     end
     admissible(z) = _omega_admissible(layout, constraints, last(point(z)), floor)
     z0 = vcat(θ[indices], _free_omega(constraints, ω))
+    curvature = identified === nothing ? gaussian : objective
     z = _bfgs_ascent(objective, z0, 100, admissible; screen,
-        inverse_hessian = _saem_inverse_curvature(gaussian, z0))
+        inverse_hessian = _saem_inverse_curvature(curvature, z0))
     return point(z)
 end
 
@@ -1240,9 +1289,10 @@ function _saem_anneal_floor(Ω, Ω_previous, τ)
 end
 
 _saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
-    second_phi, floor, subjects, constraints; require_instances = true) =
+    second_phi, floor, subjects, constraints; require_instances = true,
+    identified = _saem_identified(design, indices)) =
     _saem_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi,
-        floor, constraints)
+        floor, constraints; identified)
 
 # One population update, for either layout. At fixed Φ the conditional density
 # does not depend on the mu-referenced θ, and Ω enters only the expected Gaussian
@@ -1263,15 +1313,16 @@ _saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
 # evaluates only the subjects at positions `active`.
 function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indices,
         design, free, bank, weights, mean_phi, second_phi, options, γ,
-        constraints, map_objective, active = eachindex(subjects))
+        constraints, map_objective, active = eachindex(subjects);
+        identified = _saem_identified(design, indices))
     ω_previous = ω
     θ, Ω = _saem_closed_form_mstep(layout, θ, omega_matrix(layout, ω), indices,
         design, mean_phi, second_phi, options.omega_floor, subjects, constraints;
-        require_instances = !map_objective)
+        require_instances = !map_objective, identified)
     ω = _apply_omega_constraints(constraints, omega_parameters(layout, Ω))
     if map_objective
         θ, ω = _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
-            mean_phi, second_phi, subjects, options.omega_floor, constraints)
+            mean_phi, second_phi, subjects, options.omega_floor, constraints; identified)
     end
     if options.omega_annealing > 0 && γ == 1
         ω = _saem_anneal(layout, ω_previous, ω, options.omega_annealing, constraints)
@@ -1487,6 +1538,8 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
         isapprox(gradient_lp, initial_lp; rtol = 1e-10, atol = 1e-10) ||
             throw(ArgumentError("population_logprior_and_gradient value differs from population_logprior"))
     end
+    identified = _saem_identified(design, indices)
+    map_objective || _saem_require_identified(model, indices, identified)
     H = η0 === nothing ? zeros(neta(layout), length(ids)) : Matrix{Float64}(η0)
     size(H) == (neta(layout), length(ids)) || throw(DimensionMismatch(
         "η0 has size $(size(H)); expected ($(neta(layout)), $(length(ids)))"))
@@ -1596,7 +1649,8 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                 θ_before, σ_before = copy(θ), copy(σ)
                 θ, σ, ω, θ_kept = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
                     indices, design, free, bank, weights, mean_phi, second_phi,
-                    options, γ, constraints, map_objective, active)
+                    options, γ, constraints, map_objective, active;
+                    identified)
                 if mala_cache !== nothing && any(mala_cache.valid)
                     if θ == θ_before && σ == σ_before
                         _saem_mala_refresh_prior!(mala_cache, H, prior,
