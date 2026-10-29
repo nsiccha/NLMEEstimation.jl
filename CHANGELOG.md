@@ -14,6 +14,19 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.1.6
+
+- **Changed default:** `marginal_loglikelihood` on a `RaggedNLMELayout` whose
+  model reports η Hessians (its own blocks, or a declared
+  `eta_hessian_sparsity`) uses the Laplace approximation,
+  `AdaptiveGaussHermite(nodes = 1)`, instead of `ImportanceSampling()`. This
+  matches the 0.1.5 covariance-step default.
+  - Why: importance sampling's effective draws collapse as a subject grows
+    (4–6 of 2,000 at 1,260 Poisson units).
+  - Laplace's bias on non-Gaussian posteriors grows with the number of units
+    (−2.19 there); the docs give the measured values.
+  - To keep the old behaviour, pass `approximation = ImportanceSampling()`.
+
 ## 0.1.5
 
 - **Changed default:** `covariance_step(model, fit)` for an SAEM fit on a
