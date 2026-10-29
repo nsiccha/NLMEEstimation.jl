@@ -5,9 +5,10 @@ using Test
 import ForwardDiff
 import NLMEEstimation as NE
 import Optim
+using DelimitedFiles
 isdefined(@__MODULE__, :TestCommon) || include("common.jl")
 using .TestCommon: growth_model, growth_exact, occasions_model, occasions_exact_nested,
-    occasions_sparse
+    occasions_sparse, theoph_model
 
 @testset "Louis's identity: nested occasions against the exact information" begin
     # Eight subjects of 10–60 occasions at the exact maximum. The posterior is
@@ -87,4 +88,47 @@ end
     @test with_prior.objective == :MAP
     @test with_prior.R - plain.R ≈ I(6) / 4 atol = 1e-6
     @test with_prior.gradient - plain.gradient ≈ -x̂ / 4 atol = 1e-6
+end
+
+@testset "Louis's identity: nlmixr2 SAEM \"sa\" oracle on theophylline" begin
+    # nlmixr2's SAEM estimate and its default covariance "sa" (Louis's identity from
+    # a covariance phase at the estimate) for the oracle model of test/covariance.jl.
+    # Here Louis's standard errors agree with the observed information of the
+    # 3-node quadrature (5,000 draws: within 1%; 1,000: 3%), and nlmixr2's are
+    # 2–20% smaller, the same with 500 and 5,000 covariance-phase iterations.
+    function data(name)
+        values, _ = readdlm(joinpath(@__DIR__, "data", name), ','; header = true)
+        return String.(values[:, 1]), Float64.(values[:, 2:end])
+    end
+    _, estimates = data("nlmixr2_saem_theoph_estimates.csv")
+    estimates = vec(estimates)
+    model = theoph_model()
+    θ, σ = vcat(estimates[1:3], 0.0), [log(estimates[4])]
+    ω = log.(sqrt.(estimates[5:7]))
+    free = [1, 2, 3, 5, 6, 7, 8]  # the oracle model has no weight effect
+    natural(x) = vcat(x[1:3], exp(x[5]), exp.(2 .* x[6:8]))
+    order = ["tka", "tcl", "tv", "add.sd", "om.eta.ka", "om.eta.cl", "om.eta.v"]
+    function nlmixr2_covariance(n)
+        names, covariance = data("nlmixr2_saem_theoph_cov_sa$n.csv")
+        k = indexin(order, names)
+        return covariance[k, k]
+    end
+    louis = covariance_step(model, θ, σ, ω; free, method = :r,
+        approximation = LouisInformation(draws = 5000, burnin = 200), rng = Xoshiro(1))
+    quadrature = covariance_step(model, θ, σ, ω; free, method = :r,
+        approximation = AdaptiveGaussHermite(nodes = 3))
+    se = delta_method(louis, natural).standard_errors
+    @test se ≈ delta_method(quadrature, natural).standard_errors rtol = 0.02
+    for n in (500, 5000)
+        @test all(r -> 1.0 < r < 1.25, se ./ sqrt.(diag(nlmixr2_covariance(n))))
+    end
+    # The typical values are mu-referenced, so their complete-data information is
+    # exactly N Ω⁻¹ and the information they lose to the unobserved η is the score
+    # variance: Louis's gives 2.2, 24.8 and 187 for ka, CL and V, nlmixr2's "sa"
+    # about two-thirds of that (1.5, 15.9, 125).
+    complete = 12 ./ estimates[5:7]
+    J = ForwardDiff.jacobian(y -> natural(vcat(y[1:3], 0.0, y[4:7])), louis.point[free])
+    nlmixr2_information = J' * inv(nlmixr2_covariance(5000)) * J
+    ratio = (complete - diag(nlmixr2_information)[1:3]) ./ (complete - diag(louis.R)[1:3])
+    @test all(r -> 0.6 < r < 0.72, ratio)
 end

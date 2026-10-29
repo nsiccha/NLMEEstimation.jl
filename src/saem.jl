@@ -573,8 +573,11 @@ function _saem_hessian_metric(model, i, θ, σ, prior, η;
         diagonal && return _prior_variances(prior, i)
         return _prior_covariance(prior, i)
     end
-    H = only(_complete_hessians(model, [i], θ, σ, prior,
-        _single_eta_batch(nlme_layout(model), η)))
+    H = if _declares_eta_hessian_sparsity(model)
+        only(_complete_hessians(model, [i], θ, σ, prior, _single_eta_batch(nlme_layout(model), η)))
+    else
+        last(complete_data_loglikelihood_gradient_and_hessian(model, i, θ, σ, prior, η))
+    end
     diagonal && return inv.(max.(-diag(H), curvature_floor))
     eig = eigen(Symmetric(-Matrix(H)))
     scale = eig.vectors * Diagonal(inv.(max.(eig.values, curvature_floor))) * eig.vectors'
