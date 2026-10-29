@@ -38,6 +38,9 @@ module NLMEEstimation
 
 using LinearAlgebra
 using Random
+import SparseArrays
+using SparseArrays: SparseMatrixCSC, sparse
+import SparseMatrixColorings as SMC
 import ADTypes
 import DifferentiationInterface as DI
 import NLopt
@@ -55,7 +58,7 @@ export nsubjects, nlme_layout, EvaluationStyle, PerSubjectEvaluation, BatchedEva
     conditional_loglikelihood_and_gradient, conditional_loglikelihoods_and_gradients,
     conditional_loglikelihood_gradient_and_hessian, conditional_loglikelihood_hessian_blocks,
     conditional_loglikelihood_and_population_gradient,
-    ad_backend, hessian_ad_backend, provides_eta_hessian, parameter_names,
+    ad_backend, hessian_ad_backend, provides_eta_hessian, eta_hessian_sparsity, parameter_names,
     population_logprior, population_logprior_and_gradient, population_prior_provenance
 export mu_referencing, MuReferencing, observation_model, GaussianObservations,
     observations, observation_moments, observation_moments_and_jacobians
@@ -76,6 +79,7 @@ export saem, saem_population_gradient_style, SAEMOptions, SAEMResult, RaggedSAEM
 include("layout.jl")
 include("protocol.jl")
 include("re_prior.jl")
+include("sparse_curvature.jl")
 include("fixed_omega.jl")
 include("conformance.jl")
 include("empirical_bayes.jl")

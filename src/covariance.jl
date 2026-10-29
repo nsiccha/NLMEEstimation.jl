@@ -165,10 +165,12 @@ objective. For an SAEM fit, all `(θ, σ, ω)` are estimated. A model with
 linearization at the SAEM estimate. Any other model, including every
 [`RaggedNLMELayout`](@ref), defaults to [`ImportanceSampling`](@ref). Its draws,
 from `rng`, are held fixed across the difference points, so the estimated
-marginal is a smooth function of the coordinates. [`AdaptiveGaussHermite`](@ref)
-is the deterministic alternative for few random effects per subject. For those
-two approximations, perturbations of ω and of mu-referenced θ reuse the
-conditional values and cost no model evaluations. `free` selects positions in the
+marginal is a smooth function of the coordinates, and perturbations of ω and of
+mu-referenced θ reuse the conditional values and cost no model evaluations.
+[`AdaptiveGaussHermite`](@ref) is the deterministic alternative. It adapts at
+every difference point, finding the subject modes and curvature there again
+(warm-started from the estimate's, `gtol = 1e-10`), so `nodes = 1` gives the
+Laplace covariance, the one subjects with many random effects need. `free` selects positions in the
 estimated coordinates `[θ; σ; free Ω coordinates]`, which are the concatenated
 `(θ, σ, ω)` unless the model declares [`fixed_omega`](@ref) (see
 [`CovarianceResult`](@ref)). Fixed covariance parts carry no uncertainty and are

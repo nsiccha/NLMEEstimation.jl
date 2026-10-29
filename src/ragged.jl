@@ -33,7 +33,7 @@ function _complete_gradients(model, subjects, θ, σ, prior::RaggedNormalREPrior
     return ℓ, f, G
 end
 
-function _complete_hessians(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
+function _model_complete_hessians(model, subjects, θ, σ, prior::RaggedNormalREPrior, H)
     blocks = conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H)
     length(blocks) == length(subjects) || throw(DimensionMismatch(
         "conditional Hessian batch must return one block per subject"))
@@ -444,6 +444,7 @@ function _check_ragged_protocol(model, layout::RaggedNLMELayout, θ, σ, ω;
     end
     blocks = provides_eta_hessian(model) ?
         conditional_loglikelihood_hessian_blocks(model, ids, θ, σ, H) : nothing
+    _check_eta_hessian_sparsity(violation, model, layout, ids, θ, σ, H, rtol)
     if blocks !== nothing
         length(blocks) == length(ids) || violation("Hessian batch needs one block per subject")
         for (k, i) in enumerate(ids)

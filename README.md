@@ -167,6 +167,14 @@ gradient call, plus batched value calls for its trial steps.
 It throws an `EBEConvergenceError` naming any subject without a mode, unless
 `require_convergence = false`.
 
+A model whose subjects carry thousands of nested random effects declares which
+entries of each subject's η Hessian can be nonzero,
+`NLMEEstimation.eta_hessian_sparsity(model, i)`. Newton then runs on sparse
+Hessians computed from a few batched gradient calls and factored sparsely, and
+the marginal likelihood and covariance step take their curvature from them, so
+time and memory grow linearly with a subject's size. Use
+`AdaptiveGaussHermite(nodes = 1)` (Laplace) for such subjects.
+
 ## FOCE(I) population estimation
 
 ```julia

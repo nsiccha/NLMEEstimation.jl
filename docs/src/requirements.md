@@ -1,6 +1,6 @@
 # PPL and AD requirements
 
-This page lists what a probabilistic programming language (PPL) and its automatic-differentiation (AD) backend must provide for each estimator. **Every implemented method runs on first-order derivatives.** Second derivatives are optional: when available, they are used only as per-subject `K × K` η Hessian blocks, where `K` is the number of random effects per subject. No estimator uses a joint Hessian, third derivatives, or finite differences. The covariance step takes finite differences of objective values and adds no derivative requirement.
+This page lists what a probabilistic programming language (PPL) and its automatic-differentiation (AD) backend must provide for each estimator. **Every implemented method runs on first-order derivatives.** Second derivatives are optional: when available, they are used only as per-subject `K × K` η Hessian blocks, where `K` is the number of random effects per subject. No estimator uses a joint Hessian or third derivatives. Where an estimator needs a subject's η curvature and the model provides no Hessian blocks, it takes differences of batched η gradients, and the covariance step takes finite differences of objective values; neither adds a derivative requirement.
 
 ## What the PPL must expose
 
@@ -26,7 +26,7 @@ Some estimators need more structure:
 | Method | Values | ∇η | J | ∇θσ | Hessian blocks |
 | --- | --- | --- | --- | --- | --- |
 | `empirical_bayes` with `QuasiNewtonEBE()` | ✓ | ✓ | — | — | Optional: stored in the result for `ebe_covariances`, and used for its curvature check |
-| `empirical_bayes` with `NewtonEBE()` | ✓ | ✓ | — | — | Required |
+| `empirical_bayes` with `NewtonEBE()` | ✓ | ✓ | — | — | Required, or a declared `eta_hessian_sparsity` (sparse blocks from ∇η) |
 | `focei` (FOCE and FOCEI) | ✓ | ✓ | ✓ | — | Never used |
 | `saem` with `StandardSAEMMH()` | ✓ | — | — | ✓ | Never used |
 | `saem` with `DualAveragingMALA()` | ✓ | ✓ | — | ✓ | Optional: initial metric with `metric=:hessian` |
@@ -37,8 +37,8 @@ Some estimators need more structure:
 
 All of these are first-order quantities, except the Hessian blocks:
 
-- `empirical_bayes` picks `NewtonEBE()` by default only when the model provides Hessian blocks (`default_ebe_method`); otherwise it uses `QuasiNewtonEBE()`, a lockstep limited-memory BFGS method, whose memory per subject grows linearly with its number of random effects. `ebe_covariances` returns the per-subject Laplace covariance `(-∇²f)⁻¹` and therefore needs the Hessian blocks.
-- `QuasiNewtonEBE()` checks each subject's curvature once no subject is still iterating, and wherever BFGS meets upward curvature. It does not report a saddle point as a mode; it leaves it with a trust-region step. The check uses the Hessian blocks when the model provides them, which costs no extra calls because the result reports those blocks. Otherwise it uses forward differences of batched ∇η, at `K` extra batched gradient calls per check.
+- `empirical_bayes` picks `NewtonEBE()` by default only when the model provides Hessian blocks or declares `eta_hessian_sparsity` (`default_ebe_method`); otherwise it uses `QuasiNewtonEBE()`, a lockstep limited-memory BFGS method, whose memory per subject grows linearly with its number of random effects. `ebe_covariances` returns the per-subject Laplace covariance `(-∇²f)⁻¹` and therefore needs the Hessian blocks.
+- `QuasiNewtonEBE()` checks each subject's curvature once no subject is still iterating, and wherever BFGS meets upward curvature. It does not report a saddle point as a mode; it leaves it with a trust-region step. The check uses sparse blocks when the model declares `eta_hessian_sparsity` (two batched gradient calls per color of the pattern), the Hessian blocks when the model provides them, which costs no extra calls because the result reports those blocks, and otherwise forward differences of batched ∇η, at `K` extra batched gradient calls per check.
 - `focei` always computes its subject modes with `QuasiNewtonEBE()`. Its outer search over `(θ, σ, ω)` is NLopt's derivative-free BOBYQA, so FOCE(I) takes no population derivatives.
 - SAEM's MH transitions use only values. MALA and NUTS need ∇η. A Hessian only seeds their initial metric. Without one, they use Ω.
 - Without a population prior, SAEM updates the mu-referenced θ and Ω in closed form from sufficient statistics, without derivatives. The remaining θ and every σ coordinate use a numerical M-step that needs ∇θσ. In practice that means almost every model, because residual-error parameters live in σ.
@@ -47,6 +47,22 @@ All of these are first-order quantities, except the Hessian blocks:
 - With a population prior, SAEM keeps the same two blocks. The mu-referenced θ and Ω move from their closed-form update to the maximizer with the prior, which needs only the prior's gradient; the remaining θ and σ take the numerical step with the prior added, which needs ∇θσ as before. A prior therefore adds no model evaluations to the M-step. `population_logprior_and_gradient` derives the prior's gradient with `ad_backend(model)` by default.
 
 Ragged nested random effects (`RaggedNLMELayout`) have the same requirements. FOCE(I) does not support them yet; SAEM runs all three kernels on them.
+
+## Sparse η Hessians for subjects with many random effects
+
+Dense Hessian blocks cost a subject with `K` random effects `K` Hessian-vector products (or `K` gradient differences) and `K²` memory: 25,871 products and 5.4 GB for one subject with 25,871 nested effects. Nested effects are sparse in the Hessian, though: a unit's effect shares observations only with the effects above it. A model that knows this declares it:
+
+```julia
+NLMEEstimation.eta_hessian_sparsity(model::MyModel, i) = pattern_of_subject(model, i)
+```
+
+returning, for subject `i`, a `K × K` Boolean matrix (usually a `SparseMatrixCSC{Bool}`) that is `true` where η_j and η_k can enter the same observation's likelihood. The model declares it for every subject or for none. NLMEEstimation then:
+
+- colors the pattern (a star coloring, SparseMatrixColorings.jl), so that each nonzero is read from a row where no other coordinate of its color appears. A subject effect with independent units under it takes two colors however many units there are;
+- computes the conditional Hessian from one pair of batched ∇η evaluations per color, central differences along the color's indicator, and adds the prior precision block by block;
+- factors it with a sparse Cholesky factorization (CHOLMOD, from the SparseArrays standard library) for Newton's trust-region steps, the BFGS curvature check, `ebe_covariances` and the marginal likelihood's curvature and proposal points.
+
+No new derivative is needed: the model's existing batched ∇η suffices. The declared pattern supersedes `conditional_loglikelihood_hessian_blocks`, which is then not called. `check_protocol` compares the Hessian recovered from the pattern with a Hessian-vector product along a random direction, so a pattern that misses a coupling is reported. On the test suite's nested model at 25,872 random effects in one subject, two colors give the Hessian from four batched gradient calls, and the Laplace marginal equals the closed form (`bench/ebe_ragged_scale.jl`).
 
 ## What the AD backend must do
 
@@ -134,7 +150,7 @@ The covariance step needs the Hessian of the objective in `(θ, σ, Ω)`, one or
 2. Provide ∇η: declare a reverse-mode `ad_backend`, or implement `conditional_loglikelihoods_and_gradients`. This enables posthoc and the gradient-based SAEM kernels.
 3. Provide ∇θσ, either from the same backend or with `conditional_loglikelihood_and_population_gradient`. This enables SAEM's numerical M-step.
 4. For FOCE(I), declare `GaussianObservations()` and provide `observations`, `observation_moments`, and their η Jacobians.
-5. Optionally declare `mu_referencing` for closed-form SAEM updates, and Hessian blocks for Newton posthoc steps, `ebe_covariances`, and curvature-based MALA/NUTS metrics.
+5. Optionally declare `mu_referencing` for closed-form SAEM updates, and Hessian blocks for Newton posthoc steps, `ebe_covariances`, and curvature-based MALA/NUTS metrics. For subjects with hundreds or thousands of random effects, declare `eta_hessian_sparsity` instead of dense Hessian blocks.
 6. Run `check_protocol(model, θ, σ, ω)`. It checks the evaluation styles against each other, subject separability, the derivatives the model provides, and the declared traits.
 
 See the [model protocol](protocol.md) for the full interface and the [PK comparison](pk-comparison.md) for a complete BRM+RKPPL model.

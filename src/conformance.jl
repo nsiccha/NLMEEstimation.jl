@@ -31,6 +31,11 @@ subject):
   log-density unchanged;
 - when [`provides_eta_hessian`](@ref): the Hessian blocks are square, symmetric and
   equal the per-subject Hessians;
+- a declared [`eta_hessian_sparsity`](@ref) pattern exists for every checked subject,
+  has its size, and covers every nonzero entry of the η Hessian: the sparse Hessian
+  recovered from it, times a random direction, equals the Hessian-vector product
+  along that direction (central differences of the batched gradients, within
+  `max(rtol, 1e-5)`);
 - a declared [`mu_referencing`](@ref) trait has one design per subject of the right
   size, and the density is invariant under the mu-referencing shift;
 - a declared [`observation_model`](@ref) reproduces the conditional log-density.
@@ -95,6 +100,7 @@ function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
     _check_separability(violation, agrees, model, subjects, θ, σ, H, ℓb)
     blocks = provides_eta_hessian(model) ? conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H) : nothing
     _check_block_shapes(violation, agrees, blocks, subjects, m)
+    _check_eta_hessian_sparsity(violation, model, layout, subjects, θ, σ, H, rtol)
 
     for (k, i) in enumerate(subjects)
         ηi = H[:, k]
@@ -143,6 +149,38 @@ function _check_separability(violation, agrees, model, subjects, θ, σ, H, ℓb
     ℓ2 = conditional_loglikelihoods(model, subjects, θ, σ, others)
     agrees(ℓ2[1], ℓb[1]) || violation(
         "changing the other subjects' η changed subject $(subjects[1])'s log-density; subjects must be conditionally independent")
+    return nothing
+end
+
+# A declared η Hessian pattern must cover every nonzero entry. A coupling it omits
+# makes the sparse Hessian recovered from it differ from the Hessian-vector product
+# along a random direction (unless the direction happens to miss it).
+function _check_eta_hessian_sparsity(violation, model, layout, subjects, θ, σ, H, rtol)
+    _declares_eta_hessian_sparsity(model) || return nothing
+    points = [Vector{Float64}(_eta_column(H, k)) for k in eachindex(subjects)]
+    colorings = map(enumerate(subjects)) do (k, i)
+        pattern = try
+            _eta_hessian_pattern(model, i, length(points[k]))
+        catch err
+            err isa Union{ArgumentError, DimensionMismatch} || rethrow()
+            violation(sprint(showerror, err))
+        end
+        _eta_hessian_coloring(pattern)
+    end
+    hessians = _colored_differences(model, layout, subjects, θ, σ, points, colorings)
+    rng = Xoshiro(0)
+    directions = [randn(rng, length(η)) for η in points]
+    products = _gradient_differences(model, layout, subjects, θ, σ, points, directions)
+    tol = max(rtol, 1.0e-5)
+    for (k, i) in enumerate(subjects)
+        recovered = hessians[k] * directions[k]
+        isapprox(recovered, products[k]; rtol = tol,
+                atol = tol * (1 + maximum(abs, products[k]; init = 0.0))) || violation(
+            "subject $i: its η Hessian has nonzero entries outside eta_hessian_sparsity(model, $i): " *
+            "along a random direction the Hessian recovered from the pattern differs from the " *
+            "Hessian-vector product by up to $(maximum(abs, recovered - products[k])) " *
+            "(largest at η component $(argmax(abs.(recovered - products[k]))))")
+    end
     return nothing
 end
 

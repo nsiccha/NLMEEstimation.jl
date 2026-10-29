@@ -203,6 +203,7 @@ _factor_solve(L::AbstractMatrix, x) = L \ x
 _metric_times(p::_RaggedSubjectPrior, g) = _covariance_times(p, g)
 _factor_times(p::_RaggedSubjectPrior, z) = _blockwise(*, p, p.prior.cholesky_factors, z)
 _factor_solve(p::_RaggedSubjectPrior, x) = _blockwise(\, p, p.prior.cholesky_factors, x)
+_factor_solve(p::NormalREPrior, x) = p.cholesky_factor \ x
 
 _saem_mala_noise(rng, H::AbstractMatrix) = randn(rng, size(H)...)
 
