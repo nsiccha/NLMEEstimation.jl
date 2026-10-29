@@ -57,8 +57,11 @@ function metric_row(model, i, x, prior)
     row = @sprintf("%.3f\t%.1f\t%d\t%.1e", stats.time, stats.bytes / 1e6,
         model.dense_hessians[], error)
     model.declared || return row
-    # The star coloring of the pattern, which the metric computes once.
-    coloring = @elapsed NE._eta_hessian_coloring(NE._eta_hessian_pattern(model, i, length(η)))
+    # The star coloring of the pattern on its own. The metric above colored it
+    # (once per session since 0.1.7, which caches colorings by pattern), so this
+    # times SparseMatrixColorings directly rather than the cache.
+    pattern = NE._eta_hessian_pattern(model, i, length(η))
+    coloring = @elapsed NE.SMC.coloring(pattern, NE._STAR_COLORING...)
     return row * @sprintf("\t%.3f", coloring)
 end
 
