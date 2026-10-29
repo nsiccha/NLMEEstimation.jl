@@ -84,7 +84,7 @@ NE.conditional_loglikelihoods(::ADBatchedMALA, ids, θ, σ, H) =
         Float64[], Float64[], prior, HC; cache)
     @test cached.gradient_calls[] == 6
     refreshed_prior = re_prior(cached, [log(0.7)])
-    NE._saem_mala_refresh_prior!(cache, HC, prior, refreshed_prior)
+    NE._saem_mala_refresh_prior!(cache, HC, prior, refreshed_prior, 1:3)
     _, exact_f, exact_g = NE._complete_gradients(cached, 1:3,
         Float64[], Float64[], refreshed_prior, HC)
     @test cache.f ≈ exact_f

@@ -60,11 +60,20 @@ Log density for subject `i`'s compact η vector, summing one Normal density per
 listed family block.
 """
 function re_logprior(prior::RaggedNormalREPrior, i::Integer, η::AbstractVector)
-    layout = prior.layout
-    _check_length("subject $i η", η, neta(layout, i))
-    value = zero(promote_type(eltype(η), eltype(prior.logdet_omega)))
-    for (family, r) in _ragged_subject_blocks(layout, i)
-        z = prior.cholesky_factors[family] \ view(η, r)
+    _check_length("subject $i η", η, neta(prior.layout, i))
+    return _ragged_logprior(prior, _ragged_subject_blocks(prior.layout, i), η)
+end
+
+# One whitening buffer serves every block, so a subject with thousands of nested
+# effects costs no allocation per block.
+function _ragged_logprior(prior::RaggedNormalREPrior, blocks, η)
+    T = promote_type(eltype(η), eltype(prior.logdet_omega))
+    value = zero(T)
+    buffer = Vector{T}(undef, maximum(prior.layout.family_sizes))
+    for (family, r) in blocks
+        z = view(buffer, 1:length(r))
+        copyto!(z, view(η, r))
+        ldiv!(prior.cholesky_factors[family], z)
         value -= (length(r) * log(2π) + prior.logdet_omega[family] + dot(z, z)) / 2
     end
     return value
@@ -84,6 +93,55 @@ end
 
 re_logprior(model, ω::AbstractVector, i::Integer, η::AbstractVector) =
     re_logprior(RaggedNormalREPrior(nlme_layout(model), ω), i, η)
+
+# The η prior of one subject, for the per-subject kernels and gradients: an
+# equal-size layout's `NormalREPrior` itself, or one subject's slice of a
+# `RaggedNormalREPrior`, whose covariance is block diagonal. The slice works
+# block by block, so a subject with thousands of nested effects never forms a
+# dense covariance, precision or factor.
+struct _RaggedSubjectPrior{T}
+    prior::RaggedNormalREPrior{T}
+    subject::Int
+    blocks::Vector{Pair{Int,UnitRange{Int}}}
+end
+
+_subject_prior(prior::NormalREPrior, i) = prior
+_subject_prior(prior::RaggedNormalREPrior, i) =
+    _RaggedSubjectPrior(prior, Int(i), _ragged_subject_blocks(prior.layout, i))
+
+neta(p::_RaggedSubjectPrior) = isempty(p.blocks) ? 0 : last(last(p.blocks)[2])
+function re_logprior(p::_RaggedSubjectPrior, η::AbstractVector)
+    _check_length("subject $(p.subject) η", η, neta(p))
+    return _ragged_logprior(p.prior, p.blocks, η)
+end
+_subject_logprior(prior, i, η) = re_logprior(_subject_prior(prior, i), η)
+
+# `f(M_family, η_block)` for every block of the subject, with `M` one matrix per
+# family (the MALA proposal factor's products).
+function _blockwise(f, p::_RaggedSubjectPrior, matrices, η)
+    y = zeros(promote_type(eltype(η), eltype(p.prior.logdet_omega)), length(η))
+    for (family, r) in p.blocks
+        y[r] = f(matrices[family], view(η, r))
+    end
+    return y
+end
+
+# Ω⁻¹η: minus the prior's η gradient.
+_precision_times(p::NormalREPrior, η) = p.precision * η
+function _precision_times(p::_RaggedSubjectPrior, η)
+    y = zeros(promote_type(eltype(η), eltype(p.prior.logdet_omega)), length(η))
+    for (family, r) in p.blocks
+        mul!(view(y, r), p.prior.precisions[family], view(η, r))
+    end
+    return y
+end
+
+# The prior variances of subject i's η, the diagonal of Ω_i.
+_factor_row_variances(L) = [sum(abs2(L[j, k]) for k in 1:j) for j in axes(L, 1)]
+_prior_variances(prior::NormalREPrior, i) = _factor_row_variances(prior.cholesky_factor)
+_prior_variances(prior::RaggedNormalREPrior, i) = reduce(vcat,
+    [_factor_row_variances(prior.cholesky_factors[family])
+        for (family, _) in _ragged_subject_blocks(prior.layout, i)])
 
 complete_data_loglikelihood(model, i, θ, σ, prior::RaggedNormalREPrior, η) =
     conditional_loglikelihood(model, i, θ, σ, η) + re_logprior(prior, i, η)

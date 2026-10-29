@@ -1,6 +1,7 @@
 using Test
 
 @testset "NLMEEstimation" begin
+    include("changelog.jl")
     include("layout.jl")
     include("protocol.jl")
     include("empirical_bayes.jl")
@@ -14,6 +15,7 @@ include("saem_nuts.jl")
 include("saem_mala.jl")
 include("saem_nuts_reference.jl")
 include("saem_minibatch.jl")
+include("saem_ragged_kernels.jl")
 include("population_prior.jl")
 include("fixed_omega.jl")
 include("infeasible.jl")

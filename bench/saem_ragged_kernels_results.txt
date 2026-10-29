@@ -1,0 +1,13 @@
+SAEM kernels on a ragged layout with large nested subjects: Julia 1.10.12, 1 threads, NLMEEstimation 9277cb0
+units per subject: 250, 500, 1000, 2000, 4000, 8000 (15750 unit effects plus 6 region effects); SAEMOptions(iterations = 300, burnin = 150)
+closed-form vs dense exact likelihood on the test fixture: 0.000e+00
+seed	kernel	seconds	GB allocated	marginal gap	sd_unit (MLE)	mean z² of unit effects	cor(chain, posterior mean) min–max
+1	MH	31.9	236.94	10747.81	0.2173 (0.3991)	9.53	0.008–0.282
+1	MALA	33.0	235.10	12859.15	0.0165 (0.3991)	7.37	0.045–0.186
+1	NUTS	71.8	305.03	0.01	0.3990 (0.3991)	1.01	0.927–0.938
+2	MH	31.9	236.64	11196.50	0.1615 (0.4013)	8.84	0.027–0.204
+2	MALA	29.4	234.99	13413.04	0.0161 (0.4013)	7.77	0.041–0.233
+2	NUTS	62.8	302.83	0.00	0.4014 (0.4013)	1.00	0.935–0.954
+3	MH	29.4	236.76	12650.55	0.0606 (0.3997)	7.72	0.033–0.183
+3	MALA	29.1	234.66	13172.51	0.0174 (0.3997)	7.62	0.034–0.297
+3	NUTS	67.5	311.85	0.00	0.3997 (0.3997)	1.00	0.914–0.941

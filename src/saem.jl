@@ -137,16 +137,18 @@ end
 
 # `valid[j]` says whether column `j` holds subject `j`'s complete-data value and
 # gradient at the current population parameters. A minibatch round moves some
-# subjects only, so validity is per subject.
-mutable struct _MALACache
+# subjects only, so validity is per subject. `G` has the layout's η shape.
+mutable struct _MALACache{G}
     f::Vector{Float64}
-    G::Matrix{Float64}
+    G::G
     valid::BitVector
 end
 
-_saem_mala_cache(H) = _MALACache(zeros(size(H, 2)), zeros(size(H)), falses(size(H, 2)))
+_saem_mala_cache(H::AbstractMatrix) =
+    _MALACache(zeros(size(H, 2)), zeros(size(H)), falses(size(H, 2)))
 
-function _saem_mala_refresh_prior!(cache::_MALACache, H, old_prior, new_prior)
+function _saem_mala_refresh_prior!(cache::_MALACache, H::AbstractMatrix, old_prior,
+        new_prior, subjects)
     any(cache.valid) || return nothing
     for j in axes(H, 2)
         cache.valid[j] || continue
@@ -182,10 +184,39 @@ end
 
 function _saem_mala_metrics(k::DualAveragingMALA, model, ids, θ, σ, prior, H)
     k.metric == :prior && return nothing
-    return [cholesky(Symmetric(_saem_hessian_metric(model, i, θ, σ, prior,
-        copy(view(H, :, j)); curvature_floor=k.curvature_floor))).L
+    return [_saem_mala_metric(model, i, θ, σ, prior, copy(_column(H, j)), k.curvature_floor)
         for (j, i) in enumerate(ids)]
 end
+
+_saem_mala_metric(model, i, θ, σ, prior::NormalREPrior, η, floor) =
+    cholesky(Symmetric(_saem_hessian_metric(model, i, θ, σ, prior, η;
+        curvature_floor = floor))).L
+
+# A MALA proposal covariance Σ = L Lᵀ, given by its lower factor L: a dense
+# triangular matrix, or a ragged subject's block-diagonal prior factor
+# (`_RaggedSubjectPrior`, applied block by block).
+_proposal_factor(prior::NormalREPrior) = prior.cholesky_factor
+_proposal_factor(prior::_RaggedSubjectPrior) = prior
+_metric_times(L::AbstractMatrix, g) = L * (L' * g)
+_factor_times(L::AbstractMatrix, z) = L * z
+_factor_solve(L::AbstractMatrix, x) = L \ x
+_metric_times(p::_RaggedSubjectPrior, g) =
+    _blockwise((L, x) -> L * (L' * x), p, p.prior.cholesky_factors, g)
+_factor_times(p::_RaggedSubjectPrior, z) = _blockwise(*, p, p.prior.cholesky_factors, z)
+_factor_solve(p::_RaggedSubjectPrior, x) = _blockwise(\, p, p.prior.cholesky_factors, x)
+
+_saem_mala_noise(rng, H::AbstractMatrix) = randn(rng, size(H)...)
+
+# Shape checks on a batch of η-shaped values: a matrix with one column per
+# subject, or one vector per subject.
+_nchains(H::AbstractMatrix) = size(H, 2)
+_nchains(H::AbstractVector{<:AbstractVector}) = length(H)
+_same_shape(A::AbstractMatrix, B::AbstractMatrix) = size(A) == size(B)
+_same_shape(A::AbstractVector{<:AbstractVector}, B::AbstractVector{<:AbstractVector}) =
+    length(A) == length(B) && all(((a, b),) -> length(a) == length(b), zip(A, B))
+_same_shape(A, B) = false
+_all_finite(G::AbstractMatrix) = all(isfinite, G)
+_all_finite(G::AbstractVector{<:AbstractVector}) = all(g -> all(isfinite, g), G)
 
 function _saem_mala_adapt!(state::_MALADAState, k::DualAveragingMALA, alpha)
     state.count += 1
@@ -199,19 +230,19 @@ end
 
 function _saem_mala_logratio(f0, f1, η0, η1, g0, g1, L, stepsize)
     half_e2 = 0.5 * stepsize^2
-    forward = L \ (η1 - η0 - half_e2 * (L * (L' * g0)))
-    reverse = L \ (η0 - η1 - half_e2 * (L * (L' * g1)))
+    forward = _factor_solve(L, η1 - η0 - half_e2 * _metric_times(L, g0))
+    reverse = _factor_solve(L, η0 - η1 - half_e2 * _metric_times(L, g1))
     return f1 - f0 + (sum(abs2, forward) - sum(abs2, reverse)) /
         (2 * stepsize^2)
 end
 
 function _saem_mala_proposal_gradients(model, subjects, θ, σ, prior, proposal, H)
-    n = size(H, 2)
+    n = _nchains(H)
     rejected = falses(n)
     for j in 1:n
-        if !all(isfinite, view(proposal, :, j))
+        if !all(isfinite, _column(proposal, j))
             rejected[j] = true
-            proposal[:, j] = H[:, j]
+            _set_column!(proposal, j, copy(_column(H, j)))
         end
     end
     first_error = nothing
@@ -222,7 +253,7 @@ function _saem_mala_proposal_gradients(model, subjects, θ, σ, prior, proposal,
         first_error = err
     end
     if first_error !== nothing || f1 === nothing || length(f1) != n ||
-            size(G1) != size(H) || !all(isfinite, f1) || !all(isfinite, G1)
+            !_same_shape(G1, H) || !all(isfinite, f1) || !_all_finite(G1)
         # Most proposals need only the two batched value/gradient calls. If one
         # proposal leaves the model's domain, identify it with a value batch,
         # replace it by its current position, then recompute the safe batch.
@@ -231,13 +262,13 @@ function _saem_mala_proposal_gradients(model, subjects, θ, σ, prior, proposal,
             "MALA proposal returned $(length(values)) values for $n subjects"))
         for j in 1:n
             invalid = !isfinite(values[j]) ||
-                !isfinite(re_logprior(prior, view(proposal, :, j)))
-            if !invalid && G1 !== nothing && size(G1) == size(H)
-                invalid = !all(isfinite, view(G1, :, j))
+                !isfinite(_subject_logprior(prior, subjects[j], _column(proposal, j)))
+            if !invalid && G1 !== nothing && _same_shape(G1, H)
+                invalid = !all(isfinite, _column(G1, j))
             end
             if invalid
                 rejected[j] = true
-                proposal[:, j] = H[:, j]
+                _set_column!(proposal, j, copy(_column(H, j)))
             end
         end
         any(rejected) || (first_error === nothing ?
@@ -245,8 +276,8 @@ function _saem_mala_proposal_gradients(model, subjects, θ, σ, prior, proposal,
             throw(first_error))
         _, f1, G1 = _complete_gradients(model, subjects, θ, σ, prior, proposal)
     end
-    length(f1) == n && size(G1) == size(H) && all(isfinite, f1) &&
-        all(isfinite, G1) || throw(DomainError(f1,
+    length(f1) == n && _same_shape(G1, H) && all(isfinite, f1) &&
+        _all_finite(G1) || throw(DomainError(f1,
         "MALA proposed values or gradients remain invalid after rejection repair"))
     return f1, G1, rejected
 end
@@ -254,7 +285,7 @@ end
 function _saem_mala_round!(rng, kernel::DualAveragingMALA, states,
         model, subjects, θ, σ, prior, H; adapt::Bool=true,
         metrics=nothing, cache=nothing)
-    m, n = size(H)
+    n = _nchains(H)
     if cache !== nothing && all(cache.valid)
         f0, G0 = cache.f, cache.G
     else
@@ -266,32 +297,34 @@ function _saem_mala_round!(rng, kernel::DualAveragingMALA, states,
             f0, G0 = cache.f, cache.G
         end
     end
-    size(G0) == size(H) && length(f0) == n && all(isfinite, f0) && all(isfinite, G0) ||
+    _same_shape(G0, H) && length(f0) == n && all(isfinite, f0) && _all_finite(G0) ||
         throw(DomainError(f0, "MALA current values or gradients are invalid"))
-    noise = randn(rng, m, n)
+    noise = _saem_mala_noise(rng, H)
+    factors = [metrics === nothing ? _proposal_factor(_subject_prior(prior, i)) : metrics[j]
+        for (j, i) in enumerate(subjects)]
     proposal = similar(H)
     for j in 1:n
-        L = metrics === nothing ? prior.cholesky_factor : metrics[j]
+        L = factors[j]
         e = exp(states[j].log_stepsize)
-        proposal[:, j] = view(H, :, j) + 0.5 * e^2 *
-            (L * (L' * view(G0, :, j))) +
-            e * (L * view(noise, :, j))
+        _set_column!(proposal, j, _column(H, j) + 0.5 * e^2 *
+            _metric_times(L, _column(G0, j)) +
+            e * _factor_times(L, _column(noise, j)))
     end
     f1, G1, rejected = _saem_mala_proposal_gradients(model, subjects, θ, σ,
         prior, proposal, H)
     for j in 1:n
-        L = metrics === nothing ? prior.cholesky_factor : metrics[j]
+        L = factors[j]
         e = exp(states[j].log_stepsize)
         lr = rejected[j] ? -Inf : _saem_mala_logratio(f0[j], f1[j],
-            view(H, :, j), view(proposal, :, j), view(G0, :, j),
-            view(G1, :, j), L, e)
+            _column(H, j), _column(proposal, j), _column(G0, j),
+            _column(G1, j), L, e)
         isnan(lr) && throw(DomainError(lr, "MALA log acceptance ratio is invalid"))
         if log(rand(rng)) < min(0.0, lr)
-            H[:, j] = proposal[:, j]
+            _set_column!(H, j, _column(proposal, j))
             states[j].accepted += 1
             if cache !== nothing
                 cache.f[j] = f1[j]
-                cache.G[:, j] = G1[:, j]
+                _set_column!(cache.G, j, _column(G1, j))
             end
         end
         adapt && _saem_mala_adapt!(states[j], kernel, exp(min(0.0, lr)))
@@ -303,13 +336,13 @@ end
 # states, metrics and cached values are taken out, moved and put back.
 function _saem_mala_batch_round!(rng, kernel::DualAveragingMALA, states, model, ids,
         θ, σ, prior, H, active; metrics, cache)
-    Hb = H[:, active]
-    sub = _MALACache(cache.f[active], cache.G[:, active], cache.valid[active])
+    Hb = _columns(H, active)
+    sub = _MALACache(cache.f[active], _columns(cache.G, active), cache.valid[active])
     _saem_mala_round!(rng, kernel, states[active], model, ids[active], θ, σ, prior, Hb;
         metrics = metrics === nothing ? nothing : metrics[active], cache = sub)
-    H[:, active] = Hb
+    _set_columns!(H, active, Hb)
     cache.f[active] = sub.f
-    cache.G[:, active] = sub.G
+    _set_columns!(cache.G, active, sub.G)
     cache.valid[active] = sub.valid
     return nothing
 end
@@ -390,20 +423,26 @@ end
 
 SAEM estimate for a [`RaggedNLMELayout`](@ref). `eta[k]` is subject
 `subjects[k]`'s compact latent vector. `omega_matrix[f]` is the shared
-covariance of random-effect family `f`. `objective` is `:MAP` when the model
-supplies a population prior and `:ML` otherwise. `iterations` and `interrupted`
-are as in [`SAEMResult`](@ref).
+covariance of random-effect family `f`. The other fields are those of
+[`SAEMResult`](@ref): `acceptance` and `rw_scale` for the MH kernel, whose
+per-coordinate acceptance is per family coordinate, `nuts_divergences` for
+NUTS, the `mala_` fields for MALA, `objective` (`:MAP` with a population prior,
+`:ML` without one), `iterations` and `interrupted`.
 """
-struct RaggedSAEMResult{T, P}
+struct RaggedSAEMResult{T, A, R, P}
     subjects::Vector{Int}
     theta::Vector{T}
     sigma::Vector{T}
     omega::Vector{T}
     omega_matrix::Vector{Matrix{T}}
     eta::Vector{Vector{T}}
-    acceptance::NamedTuple{(:prior, :random_walk, :coordinates),Tuple{Float64,Float64,Float64}}
-    rw_scale::Float64
+    acceptance::A
+    rw_scale::R
     kernel::Symbol
+    nuts_divergences::Int
+    mala_stepsizes::Union{Missing, Vector{Float64}}
+    mala_acceptance::Union{Missing, Vector{Float64}}
+    mala_adaptation_steps::Int
     numeric_mstep::Symbol
     objective::Symbol
     population_logprior::T
@@ -422,7 +461,8 @@ end
 
 # A position outside the model's domain (its evaluation throws
 # `_InfeasibleEvaluation`) has conditional log-density -Inf and a zero conditional
-# gradient, as if the model had returned -Inf there.
+# gradient, as if the model had returned -Inf there. `prior` is the subject's own
+# η prior (`_subject_prior`).
 LDP.dimension(target::_SAEMSubjectTarget) = neta(target.prior)
 LDP.capabilities(::Type{<:_SAEMSubjectTarget}) = LDP.LogDensityOrder{1}()
 function LDP.logdensity(target::_SAEMSubjectTarget, η)
@@ -433,11 +473,11 @@ end
 function LDP.logdensity_and_gradient(target::_SAEMSubjectTarget, η)
     ℓ, g = something(_feasible(η -> conditional_loglikelihood_and_gradient(target.model,
         target.subject, target.θ, target.σ, η), η), (-Inf, zero(η)))
-    return ℓ + re_logprior(target.prior, η), g - target.prior.precision * η
+    return ℓ + re_logprior(target.prior, η), g - _precision_times(target.prior, η)
 end
 
 _saem_target(model, subject, θ, σ, prior) =
-    _SAEMSubjectTarget(model, subject, copy(θ), copy(σ), prior)
+    _SAEMSubjectTarget(model, subject, copy(θ), copy(σ), _subject_prior(prior, subject))
 
 function _saem_check_nuts(o::WarmupHMCNUTS)
     o.warmup_draws > 0 || throw(ArgumentError("warmup_draws must be positive"))
@@ -462,7 +502,7 @@ function _saem_nuts_warmup!(rng, kernel::WarmupHMCNUTS,
     payloads = NamedTuple[]
     for (k, i) in enumerate(ids)
         target = _saem_target(model, i, θ, σ, prior)
-        η = copy(view(H, :, k))
+        η = copy(_column(H, k))
         Σ = _saem_hessian_metric(model, i, θ, σ, prior, η;
             curvature_floor=kernel.curvature_floor,
             diagonal=kernel.metric == :diagonal)
@@ -500,7 +540,7 @@ end
 function _saem_nuts_restart!(nuts, H, positions = eachindex(nuts.states))
     for k in positions
         nuts.states[k] = WarmupHMC.FixedKernelNUTSState(nuts.payloads[k];
-            nuts.max_tree_depth, position=H[:, k], rng=nuts.states[k].rng)
+            nuts.max_tree_depth, position=copy(_column(H, k)), rng=nuts.states[k].rng)
     end
     return nuts
 end
@@ -513,7 +553,7 @@ function _saem_nuts_round!(states, model, ids, θ, σ, prior, H, active = eachin
         target = _saem_target(model, i, θ, σ, prior)
         step = WarmupHMC.fixed_kernel_nuts_step(states[k], target)
         states[k] = step.state
-        H[:, k] = step.state.position
+        _set_column!(H, k, copy(step.state.position))
         divergences += step.divergent
     end
     return divergences
@@ -521,15 +561,14 @@ end
 
 # Initial covariance for a per-subject HMC warmup. The Hessian is taken only in
 # η_i; an indefinite local negative Hessian is regularized before inversion.
-function _saem_hessian_metric(model, i, θ, σ, prior::NormalREPrior, η;
+# Without η Hessians it is the prior covariance of subject i, or its diagonal.
+function _saem_hessian_metric(model, i, θ, σ, prior, η;
         curvature_floor::Real = 1e-4, diagonal::Bool = false)
     isfinite(curvature_floor) && curvature_floor > 0 || throw(ArgumentError(
         "curvature_floor must be finite and positive"))
     if !provides_eta_hessian(model)
-        L = prior.cholesky_factor
-        diagonal && return [sum(abs2(L[j, k]) for k in 1:j)
-            for j in 1:neta(prior)]
-        return Matrix(L * L')
+        diagonal && return _prior_variances(prior, i)
+        return _prior_covariance(prior, i)
     end
     _, _, _, H = complete_data_loglikelihood_gradient_and_hessian(
         model, i, θ, σ, prior, η)
@@ -1362,7 +1401,10 @@ function _saem_transport!(mean_phi::AbstractVector, second_phi, bank, design, δ
     for k in eachindex(mean_phi)
         d = design[k] * δ
         m = mean_phi[k]
-        second_phi[k] = second_phi[k] + m * d' + d * m' + d * d'
+        for (b, r) in enumerate(_moment_block_ranges(second_phi[k]))
+            mr, dr = m[r], d[r]
+            second_phi[k][b] = second_phi[k][b] + mr * dr' + dr * mr' + dr * dr'
+        end
         mean_phi[k] = m + d
         for Φ in bank
             Φ[k] = Φ[k] + d
@@ -1513,11 +1555,27 @@ function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVect
     end
 end
 
-function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
-        options, kernel, node)
+# The equal-size parts of `_saem`; `src/ragged.jl` has the ragged ones.
+_saem_check_subjects(::NLMELayout, model) = nothing
+function _saem_start(layout::NLMELayout, η0, subjects)
+    H = η0 === nothing ? zeros(neta(layout), length(subjects)) : Matrix{Float64}(η0)
+    size(H) == (neta(layout), length(subjects)) || throw(DimensionMismatch(
+        "η0 has size $(size(H)); expected ($(neta(layout)), $(length(subjects)))"))
+    return H
+end
+_saem_statistics(layout::NLMELayout, subjects, H) =
+    (zeros(neta(layout), length(subjects)), zeros(neta(layout), neta(layout), length(subjects)))
+_saem_ncoordinates(layout::NLMELayout) = neta(layout)
+_saem_result(::NLMELayout, fields...) = SAEMResult(fields...)
+
+# One loop for both layouts and every kernel. The layout decides the η storage
+# (a matrix, or one compact vector per subject), the running statistics, the
+# prior and the result type; each kernel works subject by subject on either.
+function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel, node)
     _saem_check_options(options)
     kernel isa WarmupHMCNUTS && _saem_check_nuts(kernel)
     kernel isa DualAveragingMALA && _saem_check_mala(kernel)
+    _saem_check_subjects(layout, model)
     _check_length("θ", θ0, layout.ntheta)
     _check_length("σ", σ0, layout.nsigma)
     _check_length("ω", ω0, nomega(layout))
@@ -1540,25 +1598,22 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
     end
     identified = _saem_identified(design, indices)
     map_objective || _saem_require_identified(model, indices, identified)
-    H = η0 === nothing ? zeros(neta(layout), length(ids)) : Matrix{Float64}(η0)
-    size(H) == (neta(layout), length(ids)) || throw(DimensionMismatch(
-        "η0 has size $(size(H)); expected ($(neta(layout)), $(length(ids)))"))
+    H = _saem_start(layout, η0, ids)
     free = [i for i in 1:(layout.ntheta + layout.nsigma) if i > layout.ntheta || !(i in indices)]
-    prior = re_prior(model, ω)
+    prior = _re_prior(layout, ω)
     ℓ = conditional_loglikelihoods(model, ids, θ, σ, H)
     length(ℓ) == length(ids) && all(isfinite, ℓ) || throw(DomainError(ℓ,
         "SAEM initial conditional log densities must be finite and one per subject"))
-    bank = Matrix{Float64}[]
+    bank = typeof(H)[]
     weights = Float64[]
     batch = _saem_minibatch(options.minibatch_size, length(ids))
     numeric_mode = _saem_numeric_mode(options.numeric_mstep, free, layout.ntheta, batch)
     numeric_update = batch === nothing ?
         Base.invokelatest(_SAEMNumericUpdate, numeric_mode)::Function :
         Base.invokelatest(_SAEMScoreStep, batch / length(ids))::Function
-    mean_phi = zeros(neta(layout), length(ids))
-    second_phi = zeros(neta(layout), neta(layout), length(ids))
+    mean_phi, second_phi = _saem_statistics(layout, ids, H)
     logscale = log(options.rw_scale)
-    component_logscales = fill(log(options.rw_scale), neta(layout))
+    component_logscales = fill(log(options.rw_scale), _saem_ncoordinates(layout))
     nprior = nrw = ncw = ncw_proposed = sweeps = moved = 0
     ndivergent = 0
     root = kernel isa WarmupHMCNUTS ? mktempdir() : nothing
@@ -1587,7 +1642,7 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
             active = iteration <= max(options.mcmc_burnin, 1) ? Base.OneTo(length(ids)) :
                 _saem_active(rng, length(ids), batch)
             if iteration > options.mcmc_burnin
-                prior = re_prior(model, ω)
+                prior = _re_prior(layout, ω)
                 if batch !== nothing
                     replaced = _saem_batch_loglikelihoods!(rng, model, ids, θ, σ,
                         prior, H, ℓ, active)
@@ -1654,7 +1709,7 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
                 if mala_cache !== nothing && any(mala_cache.valid)
                     if θ == θ_before && σ == σ_before
                         _saem_mala_refresh_prior!(mala_cache, H, prior,
-                            re_prior(model, ω))
+                            _re_prior(layout, ω), ids)
                     else
                         mala_cache.valid .= false
                     end
@@ -1680,7 +1735,7 @@ function _saem(layout::NLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
     final_lp = map_objective ? population_logprior(model, θ, σ, ω) : 0.0
     final_lp isa Real && isfinite(final_lp) || throw(DomainError(final_lp,
         "SAEM final population log prior must be finite"))
-    return SAEMResult(ids, θ, σ, ω, omega_matrix(layout, ω), H,
+    return _saem_result(layout, ids, θ, σ, ω, omega_matrix(layout, ω), H,
         (prior = is_mh ? nprior / denom : missing,
             random_walk = is_mh ? nrw / denom : missing,
             coordinates = is_mh ? ncw / ncw_proposed : missing),

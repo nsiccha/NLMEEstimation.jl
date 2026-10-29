@@ -392,3 +392,36 @@ batched measurements. In both runs, seeded fits returned finite estimates;
 the online population coordinates agreed with the older route to the shown
 precision. These timings compare implementation costs, not statistical
 convergence or accuracy across different models.
+
+## Ragged subjects with thousands of nested effects
+
+`bench/saem_ragged_kernels.jl` fits the test suite's nested-occasions model
+(`occasions_model` in `test/common.jl`) on a ragged layout with six subjects of
+250, 500, 1,000, 2,000, 4,000 and 8,000 nested units. Each subject has one
+subject effect (SD 0.6) and one effect per unit (SD 0.4), and each unit two to
+four observations with error SD 0.25: 15,750 unit effects in all. The model's
+marginal likelihood and every unit effect's posterior have closed forms, so
+each fit is compared with the exact maximum likelihood and each subject's unit
+chains with their exact posterior there. All fits start at the generating
+values with every η at zero and use `SAEMOptions(iterations = 300, burnin =
+150)` and each kernel's defaults. Julia 1.10.12, one thread, NLMEEstimation
+`9277cb0`; raw output in `bench/saem_ragged_kernels_results.txt`.
+
+| Kernel | Log-likelihood gap to the maximum | Unit SD (maximum likelihood 0.40) | Unit chains' correlation with their posterior means | Seconds |
+| --- | ---: | ---: | ---: | ---: |
+| `StandardSAEMMH()` | 10,748–12,651 | 0.06–0.22 | 0.01–0.28 | 29–32 |
+| `DualAveragingMALA()` | 12,859–13,413 | 0.016–0.017 | 0.03–0.30 | 29–33 |
+| `WarmupHMCNUTS()` | 0.00–0.01 | 0.3990–0.4014, the maximum to four digits | 0.91–0.95 | 63–72 |
+
+Ranges are over three seeds. A chain that samples its subject's posterior
+correlates about 0.93 with the posterior means here. The MH and MALA chains
+stay close to their start: the γ = 1 M-steps then estimate the unit
+covariance from them and shrink it, and MALA's proposals, which follow that
+covariance, shrink with it. The test suite checks the NUTS case at 150–600
+units per subject (`test/saem_ragged_kernels.jl`).
+
+Reproduce with:
+
+```
+julia --project=test bench/saem_ragged_kernels.jl 3
+```
