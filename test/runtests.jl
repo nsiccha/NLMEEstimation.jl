@@ -6,6 +6,7 @@ using Test
     include("protocol.jl")
     include("empirical_bayes.jl")
     include("ragged.jl")
+include("ebe_large_subjects.jl")
 include("focei.jl")
 include("covariance.jl")
 include("marginal.jl")

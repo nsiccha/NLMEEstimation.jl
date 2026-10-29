@@ -200,8 +200,7 @@ _proposal_factor(prior::_RaggedSubjectPrior) = prior
 _metric_times(L::AbstractMatrix, g) = L * (L' * g)
 _factor_times(L::AbstractMatrix, z) = L * z
 _factor_solve(L::AbstractMatrix, x) = L \ x
-_metric_times(p::_RaggedSubjectPrior, g) =
-    _blockwise((L, x) -> L * (L' * x), p, p.prior.cholesky_factors, g)
+_metric_times(p::_RaggedSubjectPrior, g) = _covariance_times(p, g)
 _factor_times(p::_RaggedSubjectPrior, z) = _blockwise(*, p, p.prior.cholesky_factors, z)
 _factor_solve(p::_RaggedSubjectPrior, x) = _blockwise(\, p, p.prior.cholesky_factors, x)
 

@@ -14,6 +14,19 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.1.2
+
+- `QuasiNewtonEBE` is limited-memory BFGS. `QuasiNewtonEBE(; memory = 20)`
+  keeps the last `memory` curvature pairs and applies the prior covariance one
+  family block at a time on a `RaggedNLMELayout`, so a subject with `n` random
+  effects stores `O(memory · n)` numbers. The dense BFGS it replaces kept an
+  `n × n` inverse Hessian per subject and updated it at `O(n³)` cost per
+  iteration: 2.9 s and 3.9 GB of allocation for one subject of 1,001 effects.
+  The initial matrix is now rescaled at every update, not only the first, and
+  nested subjects of 126 to 4,001 effects took fewer iterations than with the
+  dense update. Modes agree with the earlier ones to the convergence tolerance
+  but are not identical, and iteration counts change.
+
 ## 0.1.1
 
 - `saem` runs the `DualAveragingMALA` and `WarmupHMCNUTS` kernels on a
