@@ -110,10 +110,9 @@ function _covariance_matrices(prepared::_PreparedLouis, split, ŷ, free, step, m
             _saem_nuts_round!(nuts.states, model, ids, θ, σ, prior, H)
             counter === nothing || update_progress!(counter, round)
             round <= a.burnin && continue
-            _saem_moments!(mean_phi, second_phi, _saem_phi(H, θ, indices, design),
-                1 / (round - a.burnin))
+            _louis_add_moments!(mean_phi, second_phi, _saem_phi(H, θ, indices, design))
             for (k, i) in enumerate(ids)
-                s = _louis_score(model, layout, i, θ, σ, ω, constraints, indices,
+                s = _louis_score(model, layout, i, θ, σ, ω, prior, constraints, indices,
                     design[k], _column(H, k), p)
                 sums[:, k] .+= s
                 squares[:, :, k] .+= s * s'
@@ -131,6 +130,7 @@ function _covariance_matrices(prepared::_PreparedLouis, split, ŷ, free, step, m
     end
     K = a.draws
     curvature ./= K
+    _louis_scale_moments!(mean_phi, second_phi, 1 / K)
     # The Gaussian prior's expected curvature is linear in the draws' moments, so
     # it is the curvature at the mean moments.
     prior_gradient(y) = _louis_gaussian_gradient(layout, split(y)..., constraints, indices,
@@ -160,13 +160,9 @@ _louis_shift(y, j, δ) = (z = copy(y); z[j] += δ; z)
 # ∂ψ log p(y_i, η_i | ψ) for one draw, in the full estimated coordinates: the
 # conditional's gradient in the non-mu-referenced θ and σ, and the Gaussian
 # prior's in the mu-referenced θ and the free ω (with η = φ - Xθ_μ held at its φ).
-function _louis_score(model, layout, i, θ, σ, ω, constraints, indices, X, η, p)
+function _louis_score(model, layout, i, θ, σ, ω, prior, constraints, indices, X, η, p)
     _, gθ, gσ = conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)
-    mean_phi, second_phi = _saem_statistics(layout, [i], _single_eta_batch(layout, η))
-    _saem_moments!(mean_phi, second_phi, _saem_phi(_single_eta_batch(layout, η), θ,
-        indices, [X]), 1.0)
-    prior_part = _louis_gaussian_gradient(layout, θ, σ, ω, constraints, indices, [X],
-        mean_phi, second_phi, [i])
+    prior_part = _louis_prior_score(layout, θ, σ, ω, prior, constraints, indices, X, η, i)
     s = zeros(p)
     nθ = layout.ntheta
     s[1:nθ] = gθ
@@ -174,6 +170,69 @@ function _louis_score(model, layout, i, θ, σ, ω, constraints, indices, X, η,
     s[nθ .+ (1:layout.nsigma)] = gσ
     s .+= prior_part
     return s
+end
+
+# One draw's Gaussian-prior score: from the draw's own moments on an equal-size
+# layout (a few random effects), and block by block on a ragged one, where the
+# per-family sums Σ η_b η_bᵀ and Σ X_bᵀ Ω_f⁻¹ η_b are all `_ragged_gaussian_*`
+# would read from the subject's moments, without forming them.
+function _louis_prior_score(layout::NLMELayout, θ, σ, ω, prior, constraints, indices, X, η, i)
+    H = _single_eta_batch(layout, η)
+    mean_phi, second_phi = _saem_statistics(layout, [i], H)
+    _louis_add_moments!(mean_phi, second_phi, _saem_phi(H, θ, indices, [X]))
+    return _louis_gaussian_gradient(layout, θ, σ, ω, constraints, indices, [X],
+        mean_phi, second_phi, [i])
+end
+
+function _louis_prior_score(layout::RaggedNLMELayout, θ, σ, ω, prior, constraints, indices,
+        X, η, i)
+    sums = [zeros(k, k) for k in layout.family_sizes]
+    counts = zeros(Int, length(layout.family_sizes))
+    gμ = zeros(length(indices))
+    for (family, r) in _ragged_subject_blocks(layout, i)
+        ηr = view(η, r)
+        mul!(sums[family], ηr, ηr', 1.0, 1.0)
+        counts[family] += 1
+        isempty(indices) || mul!(gμ, view(X, r, :)', prior.precisions[family] * ηr, 1.0, 1.0)
+    end
+    gω = zeros(length(ω))
+    for (f, range) in enumerate(_ragged_family_ranges(layout))
+        counts[f] == 0 && continue
+        gω[range] = last(_gaussian_family_value_gradient(prior.cholesky_factors[f],
+            prior.precisions[f], sums[f], counts[f]))
+    end
+    g = zeros(layout.ntheta + layout.nsigma)
+    g[indices] = gμ
+    return vcat(g, _free_omega_gradient(constraints, ω, gω))
+end
+
+# Sums of the draws' φ moments, in place (then scaled to their means): per subject
+# the vector φ and, per block of a ragged subject (the whole η of an equal-size
+# one), φ_b φ_bᵀ.
+function _louis_add_moments!(mean_phi::AbstractMatrix, second_phi, Φ)
+    mean_phi .+= Φ
+    for k in axes(Φ, 2)
+        φ = view(Φ, :, k)
+        mul!(view(second_phi, :, :, k), φ, φ', 1.0, 1.0)
+    end
+    return nothing
+end
+function _louis_add_moments!(mean_phi::AbstractVector, second_phi, Φ)
+    for k in eachindex(Φ)
+        mean_phi[k] .+= Φ[k]
+        for (b, r) in enumerate(_moment_block_ranges(second_phi[k]))
+            φ = view(Φ[k], r)
+            mul!(second_phi[k][b], φ, φ', 1.0, 1.0)
+        end
+    end
+    return nothing
+end
+_louis_scale_moments!(mean_phi::AbstractMatrix, second_phi, c) =
+    (mean_phi .*= c; second_phi .*= c; nothing)
+function _louis_scale_moments!(mean_phi::AbstractVector, second_phi, c)
+    foreach(m -> m .*= c, mean_phi)
+    foreach(blocks -> foreach(S -> S .*= c, blocks), second_phi)
+    return nothing
 end
 
 # The Gaussian random-effect prior's gradient in the full estimated coordinates

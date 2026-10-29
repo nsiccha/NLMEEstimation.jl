@@ -40,6 +40,18 @@ using .TestCommon: growth_model, growth_exact, occasions_model, occasions_exact_
         rng = Xoshiro(2))
     @test s.R === nothing
     @test s.S ≈ rs.S
+    # A ragged subject's prior score, block by block, equals the one read from its
+    # moments by the Gaussian M-step's gradient.
+    layout = nlme_layout(model)
+    prior = re_prior(model, x̂[3:4])
+    indices, design = NE._saem_mu_trait(model, [3], layout)
+    η = randn(Xoshiro(5), 1 + length(model.y[3]))
+    mean_phi, second_phi = NE._saem_statistics(layout, [3], [η])
+    NE._louis_add_moments!(mean_phi, second_phi, NE._saem_phi([η], x̂[1:1], indices, design))
+    @test NE._louis_prior_score(layout, x̂[1:1], x̂[2:2], x̂[3:4], prior, nothing, indices,
+            design[1], η, 3) ≈
+        NE._louis_gaussian_gradient(layout, x̂[1:1], x̂[2:2], x̂[3:4], nothing, indices,
+            design, mean_phi, second_phi, [3]) rtol = 1e-12
     # refused: Louis's identity gives information matrices, not a likelihood
     @test_throws ArgumentError marginal_loglikelihood(model, x̂[1:1], x̂[2:2], x̂[3:4];
         approximation = louis)
