@@ -26,7 +26,42 @@ function _eta_hessian_pattern(model, i, n)
     return S .| permutedims(S) .| sparse(I, n, n)
 end
 
-_eta_hessian_coloring(pattern) = SMC.coloring(pattern, _STAR_COLORING...)
+# The greedy star coloring takes time quadratic in a subject's effects when one
+# effect shares observations with all the others (1.2 s at 35,783 nested units,
+# with every ordering SparseMatrixColorings offers), and Newton's iterations, the
+# Laplace marginal and the covariance step's re-adaptations ask for the same
+# subjects' patterns again and again. The coloring depends only on the pattern,
+# so it is cached by the pattern's content: the same colors, so the same Hessians.
+# The cache holds at most `_COLORING_CACHE_LIMIT` pattern nonzeros and is emptied
+# when a new pattern would exceed that.
+const _COLORING_CACHE = Dict{UInt, Vector{Tuple{SparseMatrixCSC, Any}}}()
+const _COLORING_CACHE_LOCK = ReentrantLock()
+const _COLORING_CACHE_LIMIT = 50_000_000
+const _COLORING_CACHE_NNZ = Ref(0)
+
+_same_pattern(P, Q) = size(P) == size(Q) && P.colptr == Q.colptr && P.rowval == Q.rowval
+
+function _eta_hessian_coloring(pattern::SparseMatrixCSC)
+    key = hash(pattern.rowval, hash(pattern.colptr, hash(size(pattern))))
+    cached = lock(_COLORING_CACHE_LOCK) do
+        for (P, coloring) in get(_COLORING_CACHE, key, ())
+            _same_pattern(P, pattern) && return coloring
+        end
+        return nothing
+    end
+    cached === nothing || return cached
+    coloring = SMC.coloring(pattern, _STAR_COLORING...)
+    lock(_COLORING_CACHE_LOCK) do
+        if _COLORING_CACHE_NNZ[] + SparseArrays.nnz(pattern) > _COLORING_CACHE_LIMIT
+            empty!(_COLORING_CACHE)
+            _COLORING_CACHE_NNZ[] = 0
+        end
+        push!(get!(Vector{Tuple{SparseMatrixCSC, Any}}, _COLORING_CACHE, key),
+            (copy(pattern), coloring))
+        _COLORING_CACHE_NNZ[] += SparseArrays.nnz(pattern)
+    end
+    return coloring
+end
 
 # Central differences of the batched conditional η gradients along one direction
 # per subject, (g(η + hd) - g(η - hd)) / 2h ≈ ∇²ℓ d, with h = cbrt(eps)·max(1, ‖η‖∞)

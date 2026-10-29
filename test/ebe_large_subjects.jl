@@ -77,6 +77,15 @@ end
         @test hessians[i] ≈ exact rtol = 1e-9
         @test SparseArrays.nnz(hessians[i]) == 3 * size(exact, 1) - 2
     end
+    # A pattern is colored once (the greedy star coloring is quadratic in time on
+    # nested patterns): an equal pattern, rebuilt, gets the cached coloring, and a
+    # different one its own.
+    P = NE._eta_hessian_pattern(model, 2, 301)
+    coloring = NE._eta_hessian_coloring(P)
+    @test NE._eta_hessian_coloring(NE._eta_hessian_pattern(model, 2, 301)) === coloring
+    @test NE._eta_hessian_coloring(NE._eta_hessian_pattern(model, 1, 151)) !== coloring
+    @test NE.SMC.column_colors(coloring) ==
+        NE.SMC.column_colors(NE.SMC.coloring(P, NE._STAR_COLORING...))
     # On small subjects the sparse Hessian equals the dense difference Hessian.
     small = occasions_model()
     points = [zeros(1 + length(o)) .+ 0.1 for o in small.y]

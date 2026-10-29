@@ -133,11 +133,15 @@ function main()
     report("\none subject of $LARGEST nested units ($(LARGEST + 1) random effects), at the estimate above")
     report("declared, Newton\t", ebes(largest, occasions_sparse(largest), x, NewtonEBE()))
     report("declared, BFGS\t", ebes(largest, occasions_sparse(largest), x, QuasiNewtonEBE()))
-    stats = @timed marginal_loglikelihood(occasions_sparse(largest), x[1:1], x[2:2], x[3:4];
-        approximation = AdaptiveGaussHermite(nodes = 1))
-    report(@sprintf("Laplace marginal: %.2f s, %.1f MB; minus the exact marginal: %.1e",
-        stats.time, stats.bytes / 1e6,
-        stats.value.loglikelihood - occasions_exact_nested(largest, x)))
+    # The first call colors the subject's pattern (time quadratic in its effects);
+    # later calls reuse the coloring.
+    for label in ("Laplace marginal", "Laplace marginal again")
+        stats = @timed marginal_loglikelihood(occasions_sparse(largest), x[1:1], x[2:2], x[3:4];
+            approximation = AdaptiveGaussHermite(nodes = 1))
+        report(@sprintf("%s: %.2f s, %.1f MB; minus the exact marginal: %.1e", label,
+            stats.time, stats.bytes / 1e6,
+            stats.value.loglikelihood - occasions_exact_nested(largest, x)))
+    end
 end
 
 main()

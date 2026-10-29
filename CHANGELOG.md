@@ -14,6 +14,19 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.1.7
+
+- The star coloring of a declared `eta_hessian_sparsity` pattern is computed
+  once per pattern and cached.
+  - SparseMatrixColorings' greedy star coloring takes time quadratic in a
+    nested subject's effects (1.2 s at 35,783 units), and was repeated at every
+    sparse Hessian: each Newton iteration, each Laplace marginal, and each
+    point of the covariance step.
+  - The colors, and so the Hessians, are unchanged.
+  - On `bench/ebe_ragged_scale.jl`, the Laplace covariance step of six subjects
+    of 250–8,000 units went from 10.1 s to 2.1 s, and Newton on one subject of
+    25,872 effects from 1.8 s to 0.7 s.
+
 ## 0.1.6
 
 - **Changed default:** `marginal_loglikelihood` on a `RaggedNLMELayout` whose
