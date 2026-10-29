@@ -64,10 +64,16 @@ function re_logprior(prior::RaggedNormalREPrior, i::Integer, η::AbstractVector)
     return _ragged_logprior(prior, _ragged_subject_blocks(prior.layout, i), η)
 end
 
+# One whitening buffer serves every block, so a subject with thousands of nested
+# effects costs no allocation per block.
 function _ragged_logprior(prior::RaggedNormalREPrior, blocks, η)
-    value = zero(promote_type(eltype(η), eltype(prior.logdet_omega)))
+    T = promote_type(eltype(η), eltype(prior.logdet_omega))
+    value = zero(T)
+    buffer = Vector{T}(undef, maximum(prior.layout.family_sizes))
     for (family, r) in blocks
-        z = prior.cholesky_factors[family] \ view(η, r)
+        z = view(buffer, 1:length(r))
+        copyto!(z, view(η, r))
+        ldiv!(prior.cholesky_factors[family], z)
         value -= (length(r) * log(2π) + prior.logdet_omega[family] + dot(z, z)) / 2
     end
     return value
@@ -111,7 +117,7 @@ end
 _subject_logprior(prior, i, η) = re_logprior(_subject_prior(prior, i), η)
 
 # `f(M_family, η_block)` for every block of the subject, with `M` one matrix per
-# family.
+# family (the MALA proposal factor's products).
 function _blockwise(f, p::_RaggedSubjectPrior, matrices, η)
     y = zeros(promote_type(eltype(η), eltype(p.prior.logdet_omega)), length(η))
     for (family, r) in p.blocks
@@ -122,7 +128,13 @@ end
 
 # Ω⁻¹η: minus the prior's η gradient.
 _precision_times(p::NormalREPrior, η) = p.precision * η
-_precision_times(p::_RaggedSubjectPrior, η) = _blockwise(*, p, p.prior.precisions, η)
+function _precision_times(p::_RaggedSubjectPrior, η)
+    y = zeros(promote_type(eltype(η), eltype(p.prior.logdet_omega)), length(η))
+    for (family, r) in p.blocks
+        mul!(view(y, r), p.prior.precisions[family], view(η, r))
+    end
+    return y
+end
 
 # The prior variances of subject i's η, the diagonal of Ω_i.
 _factor_row_variances(L) = [sum(abs2(L[j, k]) for k in 1:j) for j in axes(L, 1)]
