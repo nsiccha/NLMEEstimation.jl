@@ -572,10 +572,9 @@ end
         subject_families=[[1], [1, 1], [1, 1, 1]])
     rdesign = [ones(1, 1), ones(2, 1), ones(3, 1)]
     rdraws = [[randn(rng, n) for n in 1:3] for _ in 1:4]
-    rmean = [zeros(n) for n in 1:3]
-    rsecond = [zeros(n, n) for n in 1:3]
+    rmean, rsecond = NE._saem_statistics(ragged, 1:3, [zeros(n) for n in 1:3])
     for (j, Φ) in enumerate(rdraws)
-        NE._ragged_moments!(rmean, rsecond, Φ, 1 / j)
+        NE._saem_moments!(rmean, rsecond, Φ, 1 / j)
     end
     rΩ = [ones(1, 1)]
     θr1, Ωr1 = NE._saem_closed_form_mstep(ragged, [0.0], rΩ, [1], rdesign, rmean,

@@ -19,7 +19,7 @@ export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH,
     JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN,
     LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
-    DoubleWell, SteepWell, GradientOnly
+    occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -334,11 +334,28 @@ end
 occasions_exact(m::RaggedOccasions, x) =
     sum(i -> occasions_exact_subject(m, i, x), 1:NE.nsubjects(m))
 
-function occasions_model(; seed = 9, n = 8, gaussian = false)
+# The exact posterior mean and standard deviation of subject i's occasion effects
+# at x = [θ, σ, ω], integrating out the subject effect: given it, each occasion
+# effect's posterior is Gaussian with shrinkage s_j = ω_b² w_j, where
+# w_j = n_j / (σ² + n_j ω_b²) is the weight of occasion j's mean.
+function occasions_unit_posterior(m::RaggedOccasions, i, x)
+    θ, s2, a2, b2 = x[1], exp(2x[2]), exp(2x[3]), exp(2x[4])
+    counts = length.(m.y[i])
+    means = [sum(o) / length(o) for o in m.y[i]]
+    w = counts ./ (s2 .+ counts .* b2)
+    va = inv(inv(a2) + sum(w))
+    ma = va * sum(w .* (means .- θ))
+    shrink = b2 .* w
+    return shrink .* (means .- θ .- ma),
+        sqrt.(b2 .* s2 ./ (s2 .+ counts .* b2) .+ shrink .^ 2 .* va)
+end
+
+# `units[i]` occasions for subject i, when given; otherwise one to three.
+function occasions_model(; seed = 9, n = 8, gaussian = false, units = nothing)
     rng = Xoshiro(seed)
-    y = map(1:n) do _
+    y = map(1:(units === nothing ? n : length(units))) do i
         a = 0.6 * randn(rng)
-        map(1:rand(rng, 1:3)) do _
+        map(1:(units === nothing ? rand(rng, 1:3) : units[i])) do _
             b = 0.4 * randn(rng)
             2.0 + a + b .+ 0.25 .* randn(rng, rand(rng, 2:4))
         end

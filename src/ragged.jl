@@ -26,9 +26,9 @@ function _complete_gradients(model, subjects, θ, σ, prior::RaggedNormalREPrior
     G = Vector{Vector{Float64}}(undef, length(subjects))
     for (k, i) in enumerate(subjects)
         _check_length("subject $i conditional gradient", Gc[k], neta(prior.layout, i))
-        lp, gp, _ = re_logprior_gradient_and_hessian(prior, i, H[k])
-        f[k] = ℓ[k] + lp
-        G[k] = Gc[k] + gp
+        p = _subject_prior(prior, i)
+        f[k] = ℓ[k] + re_logprior(p, H[k])
+        G[k] = Gc[k] - _precision_times(p, H[k])
     end
     return ℓ, f, G
 end
@@ -123,10 +123,31 @@ function _saem_recenter!(H::AbstractVector{<:AbstractVector}, θ_old, θ_new, in
     return true
 end
 
-function _ragged_moments!(mean_phi, second_phi, Φ, γ)
+# The running statistics of a ragged fit: per subject the mean of φ and, for
+# each of its blocks in η order, the second moment of that block alone. The
+# M-step reads only those blocks (a family's covariance pools its instances), so
+# the subject's off-block second moments, n_k² entries for a subject with n_k
+# nested effects, are never formed.
+function _saem_statistics(layout::RaggedNLMELayout, subjects, H)
+    mean_phi = [zeros(length(h)) for h in H]
+    second_phi = [[zeros(length(r), length(r)) for (_, r) in _ragged_subject_blocks(layout, i)]
+        for i in subjects]
+    return mean_phi, second_phi
+end
+
+# The η ranges of a subject's blocks, from its block second moments.
+function _moment_block_ranges(blocks::AbstractVector{<:AbstractMatrix})
+    ends = cumsum(size.(blocks, 1))
+    return [(e - size(S, 1) + 1):e for (S, e) in zip(blocks, ends)]
+end
+
+function _saem_moments!(mean_phi::AbstractVector{<:AbstractVector}, second_phi, Φ, γ)
     for k in eachindex(Φ)
         mean_phi[k] = (1 - γ) * mean_phi[k] + γ * Φ[k]
-        second_phi[k] = (1 - γ) * second_phi[k] + γ * (Φ[k] * Φ[k]')
+        for (b, r) in enumerate(_moment_block_ranges(second_phi[k]))
+            φ = Φ[k][r]
+            second_phi[k][b] = (1 - γ) * second_phi[k][b] + γ * (φ * φ')
+        end
     end
     return nothing
 end
@@ -249,11 +270,10 @@ function _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi,
         for (k, i) in enumerate(subjects)
             xμ = design[k] * μ
             φ = mean_phi[k]
-            S = second_phi[k]
-            for (family, r) in _ragged_subject_blocks(layout, i)
+            for (b, (family, r)) in enumerate(_ragged_subject_blocks(layout, i))
                 a = view(xμ, r)
                 p = view(φ, r)
-                sums[family] += view(S, r, r) - p * a' - a * p' + a * a'
+                sums[family] += second_phi[k][b] - p * a' - a * p' + a * a'
                 counts[family] += 1
             end
         end
@@ -299,13 +319,12 @@ function _saem_gaussian_map_value_gradient(layout::RaggedNLMELayout, θ, ω,
         X = design[k]
         xμ = X * μ
         φ = mean_phi[k]
-        S = second_phi[k]
-        for (family, r) in _ragged_subject_blocks(layout, i)
+        for (b, (family, r)) in enumerate(_ragged_subject_blocks(layout, i))
             a = view(xμ, r)
             p = view(φ, r)
             Xr = view(X, r, :)
             P = precisions[family]
-            sums[family] += view(S, r, r) - p * a' - a * p' + a * a'
+            sums[family] += second_phi[k][b] - p * a' - a * p' + a * a'
             counts[family] += 1
             gμ += Xr' * P * (p - a)
         end
@@ -336,139 +355,46 @@ _saem_closed_form_mstep(layout::RaggedNLMELayout, θ, Ω, indices, design, mean_
     _ragged_gaussian_mstep(layout, θ, Ω, indices, design, mean_phi, second_phi,
         floor, subjects, constraints; require_instances, identified)
 
-function _saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
-        options::SAEMOptions, kernel::StandardSAEMMH, node)
-    _saem_check_options(options)
+# The ragged parts of `_saem`, which runs every kernel on both layouts.
+function _saem_check_subjects(layout::RaggedNLMELayout, model)
     length(layout.subject_families) == nsubjects(model) || throw(DimensionMismatch(
         "ragged layout has $(length(layout.subject_families)) subjects; model has $(nsubjects(model))"))
-    _check_length("θ", θ0, layout.ntheta)
-    _check_length("σ", σ0, layout.nsigma)
-    _check_length("ω", ω0, nomega(layout))
-    constraints = _checked_omega_constraints(model, layout, ω0)
-    ids = subjects === nothing ? collect(1:nsubjects(model)) : collect(Int, subjects)
-    !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= nsubjects(model), ids) ||
-        throw(ArgumentError("subjects must be distinct valid model subject indices"))
-    indices, design = _saem_mu_trait(model, ids, layout)
-    θ, σ, ω = Float64.(θ0), Float64.(σ0), Float64.(ω0)
-    initial_lp = population_logprior(model, θ, σ, ω)
-    initial_lp === nothing || initial_lp isa Real || throw(ArgumentError(
-        "population_logprior must return a real log density or nothing"))
-    map_objective = initial_lp !== nothing
-    map_objective && !isfinite(initial_lp) && throw(DomainError(initial_lp,
-        "SAEM initial population log prior must be finite"))
-    if map_objective
-        gradient_lp = first(population_logprior_and_gradient(model, θ, σ, ω))
-        isapprox(gradient_lp, initial_lp; rtol=1e-10, atol=1e-10) || throw(ArgumentError(
-            "population_logprior_and_gradient value differs from population_logprior"))
-    end
-    identified = _saem_identified(design, indices)
-    map_objective || _saem_require_identified(model, indices, identified)
-    H = _ragged_start(η0, layout, ids)
-    free = [i for i in 1:(layout.ntheta + layout.nsigma) if i > layout.ntheta || !(i in indices)]
-    prior = RaggedNormalREPrior(layout, ω)
-    ℓ = conditional_loglikelihoods(model, ids, θ, σ, H)
-    length(ℓ) == length(ids) && all(isfinite, ℓ) || throw(DomainError(ℓ,
-        "SAEM initial conditional log densities must be finite and one per subject"))
-    bank = Vector{Vector{Float64}}[]
-    weights = Float64[]
-    batch = _saem_minibatch(options.minibatch_size, length(ids))
-    numeric_mode = _saem_numeric_mode(options.numeric_mstep, free, layout.ntheta, batch)
-    numeric_update = batch === nothing ?
-        Base.invokelatest(_SAEMNumericUpdate, numeric_mode)::Function :
-        Base.invokelatest(_SAEMScoreStep, batch / length(ids))::Function
-    mean_phi = [zeros(length(h)) for h in H]
-    second_phi = [zeros(length(h), length(h)) for h in H]
-    logscale = log(options.rw_scale)
-    component_logscales = fill(log(options.rw_scale), sum(layout.family_sizes))
-    nprior = nrw = ncw = ncw_proposed = sweeps = moved = 0
-    phases = _saem_phases(node, kernel, options, length(ids))
-    completed = 0
-    interrupted = false
-    loglikelihood = nothing
-    for iteration in 1:(options.mcmc_burnin + options.iterations)
-        if interrupt_requested(node)
-            interrupted = true
-            break
-        end
-        phase = _saem_phase!(phases, iteration, options.mcmc_burnin)
-        active = iteration <= max(options.mcmc_burnin, 1) ? Base.OneTo(length(ids)) :
-            _saem_active(rng, length(ids), batch)
-        if iteration > options.mcmc_burnin
-            prior = RaggedNormalREPrior(layout, ω)
-            if batch === nothing
-                ℓ = _saem_current_loglikelihoods(model, ids, θ, σ, H)
-                loglikelihood = sum(ℓ)
-            else
-                _saem_batch_loglikelihoods!(rng, model, ids, θ, σ, prior, H, ℓ, active)
-                loglikelihood = _saem_batch_estimate(ℓ, active, length(ids))
-            end
-        end
-        for _ in 1:options.mh_rounds
-            Hb, ℓb = _columns(H, active), ℓ[active]
-            ap, ar, ac, apc = _saem_mh_round!(rng, model, ids[active], θ, σ, prior, Hb, ℓb,
-                exp(logscale), exp.(component_logscales))
-            _set_columns!(H, active, Hb)
-            ℓ[active] = ℓb
-            nprior += ap
-            nrw += ar
-            ncw += sum(ac)
-            ncw_proposed += sum(apc)
-            sweeps += 1
-            moved += length(active)
-            if sweeps <= options.adapt_iterations
-                logscale = _saem_adapt_mh_scales!(logscale, component_logscales, ar,
-                    length(active), ac, apc, sweeps)
-            end
-        end
-        if iteration <= options.mcmc_burnin
-            if phase !== nothing
-                update_progress!(phase, iteration)
-                _saem_report!(phase, nothing, nothing, nothing, _saem_kernel_stats(kernel,
-                    nprior, nrw, ncw, ncw_proposed, moved, 0, nothing))
-            end
-            continue
-        end
-        k = iteration - options.mcmc_burnin
-        γ = k <= options.burnin ? 1.0 : (k - options.burnin)^(-options.step_exponent)
-        Φ = _saem_phi(H, θ, indices, design)
-        _ragged_moments!(mean_phi, second_phi, Φ, γ)
-        _saem_record!(numeric_mode, bank, weights, Φ, γ)
-        if k % options.mstep_interval == 0 || k == options.iterations
-            phase === nothing || _saem_report!(phase, "M-step", γ, loglikelihood,
-                _saem_kernel_stats(kernel, nprior, nrw, ncw, ncw_proposed,
-                    moved, 0, nothing))
-            θ_before = copy(θ)
-            θ, σ, ω, θ_kept = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
-                indices, design, free, bank, weights, mean_phi, second_phi,
-                options, γ, constraints, map_objective, active;
-                identified)
-            _saem_recenter!(H, θ_before, θ_kept, indices, design)
-        end
-        completed = k
-        if phase !== nothing
-            update_progress!(phase, k)
-            _saem_report!(phase, nothing, γ, loglikelihood, _saem_kernel_stats(kernel,
-                nprior, nrw, ncw, ncw_proposed, moved, 0, nothing))
-        end
-    end
-    _saem_finish_phase!(phases.burnin)
-    _saem_finish_phase!(phases.sa)
-    interrupted && update_progress!(node, _saem_stop_message(completed, options))
-    denom = moved
-    final_lp = map_objective ? population_logprior(model, θ, σ, ω) : 0.0
-    final_lp isa Real && isfinite(final_lp) || throw(DomainError(final_lp,
-        "SAEM final population log prior must be finite"))
-    return RaggedSAEMResult(ids, θ, σ, ω, omega_matrix(layout, ω), H,
-        (prior=nprior / denom, random_walk=nrw / denom, coordinates=ncw / ncw_proposed),
-        exp(logscale),
-        :standard_mh, _saem_mode_name(numeric_mode), map_objective ? :MAP : :ML,
-        final_lp, map_objective ? population_prior_provenance(model) : nothing,
-        completed, interrupted)
+    return nothing
+end
+_saem_start(layout::RaggedNLMELayout, η0, subjects) = _ragged_start(η0, layout, subjects)
+# The MH coordinate sweep has one scale per family coordinate.
+_saem_ncoordinates(layout::RaggedNLMELayout) = sum(layout.family_sizes)
+_saem_result(::RaggedNLMELayout, fields...) = RaggedSAEMResult(fields...)
+
+_saem_mala_cache(H::AbstractVector{<:AbstractVector}) =
+    _MALACache(zeros(length(H)), [zeros(length(h)) for h in H], falses(length(H)))
+
+# One standard normal vector per subject, drawn as one vector of all their
+# coordinates; for subjects of equal size these are the columns the matrix
+# layout draws.
+function _saem_mala_noise(rng, H::AbstractVector{<:AbstractVector})
+    z = randn(rng, sum(length, H))
+    ends = cumsum(length.(H))
+    return [z[(e - length(h) + 1):e] for (h, e) in zip(H, ends)]
 end
 
-_saem(layout::RaggedNLMELayout, model, θ0, σ0, ω0, rng, subjects, η0,
-    options::SAEMOptions, kernel::AbstractSAEMKernel, node) = throw(ArgumentError(
-    "ragged SAEM currently supports StandardSAEMMH; got $(typeof(kernel))"))
+function _saem_mala_refresh_prior!(cache::_MALACache, H::AbstractVector{<:AbstractVector},
+        old_prior, new_prior, subjects)
+    any(cache.valid) || return nothing
+    for (j, i) in enumerate(subjects)
+        cache.valid[j] || continue
+        old, new = _subject_prior(old_prior, i), _subject_prior(new_prior, i)
+        cache.f[j] += re_logprior(new, H[j]) - re_logprior(old, H[j])
+        cache.G[j] = cache.G[j] + _precision_times(old, H[j]) - _precision_times(new, H[j])
+    end
+    return nothing
+end
+
+# Without η Hessians the `:hessian` metric is the starting Ω, whose factor is
+# the subject's block-diagonal prior factor, never formed as a dense matrix.
+_saem_mala_metric(model, i, θ, σ, prior::RaggedNormalREPrior, η, floor) =
+    provides_eta_hessian(model) ? cholesky(Symmetric(_saem_hessian_metric(model, i, θ, σ,
+        prior, η; curvature_floor = floor))).L : _subject_prior(prior, i)
 
 function _check_ragged_protocol(model, layout::RaggedNLMELayout, θ, σ, ω;
         subjects, η, reference_backend, reference_hessian_backend,

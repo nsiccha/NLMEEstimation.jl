@@ -85,6 +85,45 @@ end
 re_logprior(model, ω::AbstractVector, i::Integer, η::AbstractVector) =
     re_logprior(RaggedNormalREPrior(nlme_layout(model), ω), i, η)
 
+# The η prior of one subject, for the per-subject kernels and gradients: an
+# equal-size layout's `NormalREPrior` itself, or one subject's slice of a
+# `RaggedNormalREPrior`, whose covariance is block diagonal. The slice works
+# block by block, so a subject with thousands of nested effects never forms a
+# dense covariance, precision or factor.
+struct _RaggedSubjectPrior{T}
+    prior::RaggedNormalREPrior{T}
+    subject::Int
+    blocks::Vector{Pair{Int,UnitRange{Int}}}
+end
+
+_subject_prior(prior::NormalREPrior, i) = prior
+_subject_prior(prior::RaggedNormalREPrior, i) =
+    _RaggedSubjectPrior(prior, Int(i), _ragged_subject_blocks(prior.layout, i))
+
+neta(p::_RaggedSubjectPrior) = neta(p.prior.layout, p.subject)
+re_logprior(p::_RaggedSubjectPrior, η::AbstractVector) = re_logprior(p.prior, p.subject, η)
+
+# `f(M_family, η_block)` for every block of the subject, with `M` one matrix per
+# family.
+function _blockwise(f, p::_RaggedSubjectPrior, matrices, η)
+    y = zeros(promote_type(eltype(η), eltype(p.prior.logdet_omega)), length(η))
+    for (family, r) in p.blocks
+        y[r] = f(matrices[family], view(η, r))
+    end
+    return y
+end
+
+# Ω⁻¹η: minus the prior's η gradient.
+_precision_times(p::NormalREPrior, η) = p.precision * η
+_precision_times(p::_RaggedSubjectPrior, η) = _blockwise(*, p, p.prior.precisions, η)
+
+# The prior variances of subject i's η, the diagonal of Ω_i.
+_factor_row_variances(L) = [sum(abs2(L[j, k]) for k in 1:j) for j in axes(L, 1)]
+_prior_variances(prior::NormalREPrior, i) = _factor_row_variances(prior.cholesky_factor)
+_prior_variances(prior::RaggedNormalREPrior, i) = reduce(vcat,
+    [_factor_row_variances(prior.cholesky_factors[family])
+        for (family, _) in _ragged_subject_blocks(prior.layout, i)])
+
 complete_data_loglikelihood(model, i, θ, σ, prior::RaggedNormalREPrior, η) =
     conditional_loglikelihood(model, i, θ, σ, η) + re_logprior(prior, i, η)
 
