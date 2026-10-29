@@ -1,0 +1,66 @@
+using NLMEEstimation
+using LinearAlgebra
+using Random
+using Test
+import ForwardDiff
+import NLMEEstimation as NE
+import Optim
+isdefined(@__MODULE__, :TestCommon) || include("common.jl")
+using .TestCommon: occasions_model, occasions_sparse, poisson_model, poisson_sparse,
+    poisson_exact
+
+# The exact maximum of a Poisson nested model's marginal, and minus its Hessian
+# there, through the fixed-node quadrature (re-centred at each outer step).
+function poisson_maximum(m, x)
+    for _ in 1:4
+        f = poisson_exact(m, x)
+        x = Optim.minimizer(Optim.optimize(y -> -f(y), y -> -ForwardDiff.gradient(f, y), x,
+            Optim.LBFGS(); inplace = false))
+    end
+    return x, -ForwardDiff.hessian(poisson_exact(m, x), x)
+end
+
+@testset "Laplace standard errors on non-Gaussian nested posteriors" begin
+    # Four subjects of 10–80 units with two to four counts each, at mean counts
+    # near 1.6 (28% zeros) and 0.4. The Laplace marginal is not exact here, but
+    # its curvature is close to the exact one: SEs measured within 1.5% and
+    # 2.6%. Louis's identity needs no curvature and no population gradient (θ is
+    # mu-referenced and there is no σ), but at 1,000 draws its unit-variance SE
+    # was off by 7% and 50%: the curvature and score variance of each weakly
+    # informed unit nearly cancel, and their Monte Carlo errors add up.
+    for θ in (0.0, -1.5)
+        m = poisson_model(; θ)
+        x, exact_R = poisson_maximum(m, [θ, log(0.5), log(0.5)])
+        exact_se = sqrt.(diag(inv(exact_R)))
+        for model in (m, poisson_sparse(m))
+            laplace = covariance_step(model, x[1:1], Float64[], x[2:3]; method = :r,
+                approximation = AdaptiveGaussHermite(nodes = 1))
+            @test laplace.standard_errors ≈ exact_se rtol = 0.04
+        end
+        louis = covariance_step(m, x[1:1], Float64[], x[2:3]; method = :r,
+            approximation = LouisInformation(), rng = Xoshiro(1))
+        @test louis.standard_errors[1] ≈ exact_se[1] rtol = 0.05
+    end
+end
+
+@testset "ragged SAEM fits: the default covariance approximation" begin
+    # Decision 0hwegve: Laplace where the model reports η Hessians (a declared
+    # pattern or its own blocks, as for default_ebe_method), Louis's identity
+    # where it does not. Importance sampling, the earlier default, loses
+    # effective draws as subjects grow.
+    occasions = occasions_model()
+    fit = saem(occasions, [1.9], [log(0.3)], [log(0.5), log(0.4)];
+        rng = Xoshiro(5), options = SAEMOptions(iterations = 120, burnin = 60))
+    @test covariance_step(occasions, fit; method = :s, rng = Xoshiro(1)).approximation isa
+        LouisInformation
+    @test covariance_step(occasions_sparse(occasions), fit; method = :s).approximation ==
+        AdaptiveGaussHermite(nodes = 1)
+    # A model with only the η gradient, fitted end to end: its default needs no
+    # population gradient.
+    poisson = poisson_model()
+    fit = saem(poisson, [0.0], Float64[], [log(0.5), log(0.5)];
+        rng = Xoshiro(2), options = SAEMOptions(iterations = 120, burnin = 60))
+    default = covariance_step(poisson, fit; rng = Xoshiro(3))
+    @test default.approximation isa LouisInformation
+    @test all(isfinite, default.standard_errors)
+end

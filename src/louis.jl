@@ -113,7 +113,7 @@ function _covariance_matrices(prepared::_PreparedLouis, split, ŷ, free, step, m
             _louis_add_moments!(mean_phi, second_phi, _saem_phi(H, θ, indices, design))
             for (k, i) in enumerate(ids)
                 s = _louis_score(model, layout, i, θ, σ, ω, prior, constraints, indices,
-                    design[k], _column(H, k), p)
+                    design[k], _column(H, k))
                 sums[:, k] .+= s
                 squares[:, :, k] .+= s * s'
             end
@@ -160,15 +160,17 @@ _louis_shift(y, j, δ) = (z = copy(y); z[j] += δ; z)
 # ∂ψ log p(y_i, η_i | ψ) for one draw, in the full estimated coordinates: the
 # conditional's gradient in the non-mu-referenced θ and σ, and the Gaussian
 # prior's in the mu-referenced θ and the free ω (with η = φ - Xθ_μ held at its φ).
-function _louis_score(model, layout, i, θ, σ, ω, prior, constraints, indices, X, η, p)
-    _, gθ, gσ = conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)
-    prior_part = _louis_prior_score(layout, θ, σ, ω, prior, constraints, indices, X, η, i)
-    s = zeros(p)
+# With every θ mu-referenced and no σ, the conditional takes no part, and the model
+# need not provide its population gradient (SAEM does not need it either).
+function _louis_score(model, layout, i, θ, σ, ω, prior, constraints, indices, X, η)
+    s = _louis_prior_score(layout, θ, σ, ω, prior, constraints, indices, X, η, i)
     nθ = layout.ntheta
-    s[1:nθ] = gθ
-    s[indices] .= 0
-    s[nθ .+ (1:layout.nsigma)] = gσ
-    s .+= prior_part
+    length(indices) == nθ && layout.nsigma == 0 && return s
+    _, gθ, gσ = conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)
+    gθ = copy(gθ)
+    gθ[indices] .= 0
+    s[1:nθ] .+= gθ
+    s[nθ .+ (1:layout.nsigma)] .+= gσ
     return s
 end
 

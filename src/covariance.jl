@@ -165,8 +165,12 @@ For a FOCE(I) fit, the defaults reuse its subjects, its fitted coordinates
 (`fit.free`) and its interaction setting, so the step differentiates the fitted
 objective. For an SAEM fit, all `(θ, σ, ω)` are estimated. A model with
 [`GaussianObservations`](@ref) and an [`NLMELayout`](@ref) defaults to the FOCE(I)
-linearization at the SAEM estimate. Any other model, including every
-[`RaggedNLMELayout`](@ref), defaults to [`ImportanceSampling`](@ref). Its draws,
+linearization at the SAEM estimate. A model with a [`RaggedNLMELayout`](@ref)
+defaults to the Laplace approximation, `AdaptiveGaussHermite(nodes = 1)`, when
+it reports η Hessians (its own blocks, or a declared
+[`eta_hessian_sparsity`](@ref): the rule [`default_ebe_method`](@ref) uses for
+Newton), and to [`LouisInformation`](@ref) otherwise. Any other model defaults to
+[`ImportanceSampling`](@ref). Its draws,
 from `rng`, are held fixed across the difference points, so the estimated
 marginal is a smooth function of the coordinates, and perturbations of ω and of
 mu-referenced θ reuse the conditional values and cost no model evaluations.
@@ -192,14 +196,20 @@ function covariance_step(model, fit::FOCEResult; approximation = FOCEApproximati
 end
 
 function covariance_step(model, fit::Union{SAEMResult, RaggedSAEMResult};
-        approximation = _default_saem_approximation(nlme_layout(model), observation_model(model)),
+        approximation = _default_saem_approximation(model, nlme_layout(model), observation_model(model)),
         kwargs...)
     return covariance_step(model, fit.theta, fit.sigma, fit.omega;
         subjects = fit.subjects, η0 = fit.eta, approximation, kwargs...)
 end
 
-_default_saem_approximation(::NLMELayout, ::GaussianObservations) = FOCEApproximation()
-_default_saem_approximation(layout, observation_model) = ImportanceSampling()
+_default_saem_approximation(model, ::NLMELayout, ::GaussianObservations) = FOCEApproximation()
+# A ragged subject can carry thousands of nested effects. Importance sampling
+# loses effective draws as it grows, and Louis's identity loses accuracy for
+# weakly informed nested effects, so Laplace takes it wherever the η Hessians
+# are cheap (decision 0hwegve).
+_default_saem_approximation(model, ::RaggedNLMELayout, observation_model) =
+    _reports_eta_hessians(model) ? AdaptiveGaussHermite(nodes = 1) : LouisInformation()
+_default_saem_approximation(model, layout, observation_model) = ImportanceSampling()
 
 function covariance_step(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, free = nothing, η0 = nothing, method::Symbol = :rs,

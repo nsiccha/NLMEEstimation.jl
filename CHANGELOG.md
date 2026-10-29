@@ -14,6 +14,23 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.1.5
+
+- **Changed default:** `covariance_step(model, fit)` for an SAEM fit on a
+  `RaggedNLMELayout` no longer defaults to `ImportanceSampling()`.
+  - It uses the Laplace approximation, `AdaptiveGaussHermite(nodes = 1)`, when
+    the model reports η Hessians: its own blocks, or a declared
+    `eta_hessian_sparsity`. This is the rule `default_ebe_method` uses for Newton.
+  - It uses `LouisInformation()` otherwise.
+  - Why: importance sampling loses effective draws as a subject grows. On a
+    Poisson nested model with an exact `R`, Laplace's standard errors stayed
+    within 4%, while importance sampling's `R` was not positive definite on one
+    of two seeds and Louis's identity was furthest off on the unit variance.
+  - To keep the old behaviour, pass `approximation = ImportanceSampling()`.
+- `LouisInformation` no longer calls
+  `conditional_loglikelihood_and_population_gradient` when every θ is
+  mu-referenced and there is no σ, so it works for any model SAEM fits.
+
 ## 0.1.4
 
 - `covariance_step(…; approximation = LouisInformation(; draws, burnin, kernel))`
