@@ -64,3 +64,23 @@ end
     @test default.approximation isa LouisInformation
     @test all(isfinite, default.standard_errors)
 end
+
+@testset "ragged marginal likelihood: the default, and Laplace's bias" begin
+    # Decision 1jf8d4p: on a ragged layout whose model reports η Hessians the
+    # marginal defaults to Laplace, as the covariance step does; elsewhere to
+    # importance sampling.
+    occasions = occasions_model()
+    x = [2.0, log(0.25), log(0.6), log(0.4)]
+    @test marginal_loglikelihood(occasions, x[1:1], x[2:2], x[3:4];
+        rng = Xoshiro(1)).approximation isa ImportanceSampling
+    @test marginal_loglikelihood(occasions_sparse(occasions), x[1:1], x[2:2], x[3:4]).approximation ==
+        AdaptiveGaussHermite(nodes = 1)
+    # On non-Gaussian counts Laplace's marginal is biased, by an amount that adds
+    # up over the units (measured −0.22 here, −2.19 at 1,260 units), while its
+    # curvature stays accurate (the first testset).
+    m = poisson_model()
+    x, _ = poisson_maximum(m, [0.0, log(0.5), log(0.5)])
+    laplace = marginal_loglikelihood(poisson_sparse(m), x[1:1], Float64[], x[2:3])
+    @test laplace.approximation == AdaptiveGaussHermite(nodes = 1)
+    @test -0.4 < laplace.loglikelihood - poisson_exact(m, x)(x) < -0.1
+end

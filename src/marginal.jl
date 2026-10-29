@@ -365,10 +365,10 @@ struct MarginalLikelihoodResult{T, A, E}
 end
 
 """
-    marginal_loglikelihood(model, fit; approximation = ImportanceSampling(),
+    marginal_loglikelihood(model, fit; approximation = <see below>,
                            rng = Random.default_rng(), nobs = nothing, progress = nothing)
     marginal_loglikelihood(model, θ, σ, ω; subjects = 1:nsubjects(model), η0 = nothing,
-                           approximation = ImportanceSampling(), rng = Random.default_rng(),
+                           approximation = <see below>, rng = Random.default_rng(),
                            nparameters = nothing, nobs = nothing, progress = nothing)
         -> MarginalLikelihoodResult
 
@@ -377,7 +377,11 @@ estimate or at given population coordinates, with OFV, AIC and BIC. This gives
 SAEM fits a likelihood-based objective. `approximation` is
 [`ImportanceSampling`](@ref), [`AdaptiveGaussHermite`](@ref) or
 [`FOCEApproximation`](@ref). The first two need only conditional values and
-η gradients, so they apply to any likelihood and to ragged layouts. Subject
+η gradients, so they apply to any likelihood and to ragged layouts. The default
+is `ImportanceSampling()`, except on a [`RaggedNLMELayout`](@ref) whose model
+reports η Hessians (its own blocks, or a declared [`eta_hessian_sparsity`](@ref)):
+there it is the Laplace approximation, `AdaptiveGaussHermite(nodes = 1)`, because
+importance sampling loses effective draws as a subject grows. Subject
 modes warm-start from the fit's EBEs or final chain states (`η0`).
 `nparameters`, the AIC/BIC parameter count, defaults to the estimated
 coordinates: θ, σ and the Ω coordinates that [`fixed_omega`](@ref) leaves free,
@@ -398,8 +402,17 @@ function marginal_loglikelihood(model, fit::FOCEResult; nobs = nothing, kwargs..
         nobs, kwargs...)
 end
 
+# Laplace where a ragged subject's η Hessians are cheap: importance sampling's
+# effective draws collapse as a subject grows, and Laplace is what lme4 and
+# glmmTMB use for nested effects at that scale (decision 1jf8d4p).
+_default_marginal_approximation(model) =
+    _default_marginal_approximation(model, nlme_layout(model))
+_default_marginal_approximation(model, ::RaggedNLMELayout) =
+    _reports_eta_hessians(model) ? AdaptiveGaussHermite(nodes = 1) : ImportanceSampling()
+_default_marginal_approximation(model, layout) = ImportanceSampling()
+
 function marginal_loglikelihood(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
-        subjects = nothing, η0 = nothing, approximation = ImportanceSampling(),
+        subjects = nothing, η0 = nothing, approximation = _default_marginal_approximation(model),
         rng::AbstractRNG = Random.default_rng(), nparameters = nothing, nobs = nothing,
         progress = nothing)
     layout = nlme_layout(model)
