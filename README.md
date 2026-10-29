@@ -118,15 +118,20 @@ sums the appropriate family densities for subject `i`.
 
 `empirical_bayes` and `posthoc` return `RaggedEBEResult`: `modes[k]` has the
 actual length of `subjects[k]`, and Hessian blocks have matching dimensions.
-`saem` with `StandardSAEMMH()` returns `RaggedSAEMResult`; its `eta[k]` is the
-compact final chain state and its `omega_matrix[f]` is the pooled covariance
-for family `f`. A model's optional `population_logprior` is included once in
+`saem` returns `RaggedSAEMResult`; its `eta[k]` is the compact final chain
+state and its `omega_matrix[f]` is the pooled covariance for family `f`. All
+three kernels run on ragged layouts: `StandardSAEMMH()`, `DualAveragingMALA()`
+and `WarmupHMCNUTS()`. Each moves a subject's chain on that subject's own
+coordinates, MALA with its own step size and NUTS with its own warmup. A
+subject with hundreds or thousands of nested effects needs `WarmupHMCNUTS()`:
+there the MH random walks and the prior-metric MALA proposals move the chains
+too little, and the fit settles with the nested variance collapsed. A model's optional `population_logprior` is included once in
 the MAP M-step and recorded by `objective` and `population_logprior`.
 Mu-referencing designs have `neta(layout, i)` rows. When
 `parameter_names` is not supplied by the model, `eta[i]` contains the default
 names for subject `i`; a model can supply its own subject and nested-unit labels.
-Ragged layouts currently support SAEM with the standard MH kernel and posthoc;
-FOCE(I), MALA and NUTS still use the equal-size layout.
+Ragged layouts support SAEM with every kernel and posthoc; FOCE(I) still uses
+the equal-size layout.
 
 ## Empirical Bayes estimates (posthoc)
 

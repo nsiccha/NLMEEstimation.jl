@@ -46,7 +46,7 @@ All of these are first-order quantities, except the Hessian blocks:
 - `marginal_loglikelihood` with importance sampling or adaptive Gauss–Hermite quadrature needs conditional values at its points and ∇η for each subject's mode. The curvature at the mode comes from the Hessian blocks when provided, and otherwise from central differences of batched ∇η. These approximations need no Gaussian observation model and support ragged layouts.
 - With a population prior, SAEM keeps the same two blocks. The mu-referenced θ and Ω move from their closed-form update to the maximizer with the prior, which needs only the prior's gradient; the remaining θ and σ take the numerical step with the prior added, which needs ∇θσ as before. A prior therefore adds no model evaluations to the M-step. `population_logprior_and_gradient` derives the prior's gradient with `ad_backend(model)` by default.
 
-Ragged nested random effects (`RaggedNLMELayout`) have the same requirements. FOCE(I) does not support them yet, and SAEM supports only the MH kernel.
+Ragged nested random effects (`RaggedNLMELayout`) have the same requirements. FOCE(I) does not support them yet; SAEM runs all three kernels on them.
 
 ## What the AD backend must do
 
