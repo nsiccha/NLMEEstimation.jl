@@ -1,6 +1,7 @@
 using Test
 
 @testset "NLMEEstimation" begin
+    include("changelog.jl")
     include("layout.jl")
     include("protocol.jl")
     include("empirical_bayes.jl")

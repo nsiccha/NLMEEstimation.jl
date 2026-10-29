@@ -19,7 +19,7 @@ export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH,
     JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN,
     LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
-    occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly
+    occasions_exact_nested, occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -333,6 +333,29 @@ end
 
 occasions_exact(m::RaggedOccasions, x) =
     sum(i -> occasions_exact_subject(m, i, x), 1:NE.nsubjects(m))
+
+# The same marginal log-likelihood, with each occasion effect and then the subject
+# effect integrated out in closed form: O(observations) per subject, where
+# `occasions_exact_subject` factors the dense covariance of all its observations.
+function occasions_exact_nested(m::RaggedOccasions, x)
+    θ, s2, a2, b2 = x[1], exp(2x[2]), exp(2x[3]), exp(2x[4])
+    value = zero(θ)
+    for occasions in m.y
+        W = S = Q = zero(θ)
+        for o in occasions
+            n = length(o)
+            ybar = sum(o) / n
+            value -= (n * log(2π) + (n - 1) * log(s2) + log(s2 + n * b2) +
+                sum(abs2, o .- ybar) / s2) / 2
+            w = n / (s2 + n * b2)
+            W += w
+            S += w * (ybar - θ)
+            Q += w * (ybar - θ)^2
+        end
+        value -= (log(1 + a2 * W) + Q - S^2 / (inv(a2) + W)) / 2
+    end
+    return value
+end
 
 # The exact posterior mean and standard deviation of subject i's occasion effects
 # at x = [θ, σ, ω], integrating out the subject effect: given it, each occasion

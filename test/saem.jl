@@ -287,7 +287,7 @@ NE.population_logprior_and_gradient(m::CovariateGrowth, θ, σ, ω) =
     ragged = RaggedNLMELayout(ntheta = 3, nsigma = 0, family_sizes = [2],
         subject_families = [[1], [1], [1]])
     θr, Ωr = NE._ragged_gaussian_mstep(ragged, θ0, [Ω0], 1:3, design,
-        collect(eachcol(mean_phi)), [second_phi[:, :, k] for k in 1:3], 1e-8, 1:3)
+        collect(eachcol(mean_phi)), [[second_phi[:, :, k]] for k in 1:3], 1e-8, 1:3)
     @test θr ≈ θ1
     @test only(Ωr) ≈ Ω1
 end
@@ -331,7 +331,7 @@ end
     ragged = RaggedNLMELayout(ntheta = 5, nsigma = 0, family_sizes = [2],
         subject_families = [[1], [1], [1]])
     θr, Ωr = NE._ragged_gaussian_mstep(ragged, θ0, [Ω0], 1:5, design,
-        collect(eachcol(mean_phi)), [second_phi[:, :, k] for k in 1:3], 1e-8, 1:3)
+        collect(eachcol(mean_phi)), [[second_phi[:, :, k]] for k in 1:3], 1e-8, 1:3)
     @test θr ≈ θ1
     @test only(Ωr) ≈ Ω1
 end

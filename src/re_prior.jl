@@ -60,10 +60,13 @@ Log density for subject `i`'s compact η vector, summing one Normal density per
 listed family block.
 """
 function re_logprior(prior::RaggedNormalREPrior, i::Integer, η::AbstractVector)
-    layout = prior.layout
-    _check_length("subject $i η", η, neta(layout, i))
+    _check_length("subject $i η", η, neta(prior.layout, i))
+    return _ragged_logprior(prior, _ragged_subject_blocks(prior.layout, i), η)
+end
+
+function _ragged_logprior(prior::RaggedNormalREPrior, blocks, η)
     value = zero(promote_type(eltype(η), eltype(prior.logdet_omega)))
-    for (family, r) in _ragged_subject_blocks(layout, i)
+    for (family, r) in blocks
         z = prior.cholesky_factors[family] \ view(η, r)
         value -= (length(r) * log(2π) + prior.logdet_omega[family] + dot(z, z)) / 2
     end
@@ -100,8 +103,12 @@ _subject_prior(prior::NormalREPrior, i) = prior
 _subject_prior(prior::RaggedNormalREPrior, i) =
     _RaggedSubjectPrior(prior, Int(i), _ragged_subject_blocks(prior.layout, i))
 
-neta(p::_RaggedSubjectPrior) = neta(p.prior.layout, p.subject)
-re_logprior(p::_RaggedSubjectPrior, η::AbstractVector) = re_logprior(p.prior, p.subject, η)
+neta(p::_RaggedSubjectPrior) = isempty(p.blocks) ? 0 : last(last(p.blocks)[2])
+function re_logprior(p::_RaggedSubjectPrior, η::AbstractVector)
+    _check_length("subject $(p.subject) η", η, neta(p))
+    return _ragged_logprior(p.prior, p.blocks, η)
+end
+_subject_logprior(prior, i, η) = re_logprior(_subject_prior(prior, i), η)
 
 # `f(M_family, η_block)` for every block of the subject, with `M` one matrix per
 # family.

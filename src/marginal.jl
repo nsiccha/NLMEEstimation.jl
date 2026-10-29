@@ -180,9 +180,6 @@ end
 _eta_batch(::NLMELayout, columns) = reduce(hcat, columns)
 _eta_batch(::RaggedNLMELayout, columns) = columns
 
-_subject_logprior(prior::NormalREPrior, i, η) = re_logprior(prior, η)
-_subject_logprior(prior::RaggedNormalREPrior, i, η) = re_logprior(prior, i, η)
-
 # Conditional log-likelihoods at every point. By mu-referencing they depend on
 # (θ, σ) only through the non-mu-referenced θ and σ, so evaluations that change
 # only mu-referenced θ or ω reuse them. Keys within one coordinate of the

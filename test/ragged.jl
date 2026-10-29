@@ -138,7 +138,9 @@ NE.population_prior_provenance(::RaggedMAPFixture) = "synthetic Normal(0, 0.5) c
     @test dense_hessian[3, 4] == 0
     dense_design = [zeros(3, 0), zeros(4, 0)]
     dense_mean = [zeros(3), zeros(4)]
-    dense_second = [Matrix{Float64}(I, 3, 3), Matrix{Float64}(I, 4, 4)]
+    # Second moments are kept per block, as `_saem_statistics` lays them out.
+    dense_second = [[D[r, r] for (_, r) in NE._ragged_subject_blocks(dense_layout, i)]
+        for (i, D) in enumerate([Matrix{Float64}(I, 3, 3), Matrix{Float64}(I, 4, 4)])]
     _, _, dense_gradient = NE._saem_gaussian_map_value_gradient(dense_layout,
         Float64[], dense_ω, Int[], dense_design, dense_mean, dense_second, 1:2)
     for j in eachindex(dense_ω)
@@ -237,9 +239,11 @@ NE.population_prior_provenance(::RaggedMAPFixture) = "synthetic Normal(0, 0.5) c
     @test ad_values == values
     @test ad_gradients ≈ gradients
 
-    family_moments = [Diagonal([4.0, 1.0]) |> Matrix,
-        Diagonal([9.0, 4.0, 9.0, 16.0]) |> Matrix,
-        Diagonal([16.0, 25.0, 36.0]) |> Matrix]
+    # Second moments are kept per block, as `_saem_statistics` lays them out.
+    family_moments = [[D[r, r] for (_, r) in NE._ragged_subject_blocks(layout, i)]
+        for (i, D) in enumerate([Diagonal([4.0, 1.0]) |> Matrix,
+            Diagonal([9.0, 4.0, 9.0, 16.0]) |> Matrix,
+            Diagonal([16.0, 25.0, 36.0]) |> Matrix])]
     _, pooled = NE._ragged_gaussian_mstep(layout, Float64[], omega_matrix(layout, ω),
         Int[], [zeros(neta(layout, i), 0) for i in 1:3],
         [zeros(neta(layout, i)) for i in 1:3], family_moments, 1e-8, 1:3)

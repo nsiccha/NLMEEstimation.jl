@@ -262,7 +262,7 @@ function _saem_mala_proposal_gradients(model, subjects, θ, σ, prior, proposal,
             "MALA proposal returned $(length(values)) values for $n subjects"))
         for j in 1:n
             invalid = !isfinite(values[j]) ||
-                !isfinite(re_logprior(_subject_prior(prior, subjects[j]), _column(proposal, j)))
+                !isfinite(_subject_logprior(prior, subjects[j], _column(proposal, j)))
             if !invalid && G1 !== nothing && _same_shape(G1, H)
                 invalid = !all(isfinite, _column(G1, j))
             end
