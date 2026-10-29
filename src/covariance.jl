@@ -299,9 +299,13 @@ _point_from_coordinates(::Nothing, y, nθσ) = y
 _point_from_coordinates(c::_OmegaConstraints, y, nθσ) =
     vcat(y[1:nθσ], _constrained_omega(c, y[nθσ+1:end]))
 
+# S = GGᵀ is singular exactly when the subject scores G (coordinates × subjects) do
+# not span every coordinate, for instance with fewer subjects than coordinates. A
+# Cholesky factorization alone can succeed on such an S through rounding, so the
+# rank of G decides.
 function _covariance_from(::Val{:s}, R, S, G, gradient, names)
     F = cholesky(Symmetric(S); check = false)
-    issuccess(F) || throw(CovarianceStepError(
+    issuccess(F) && rank(G) == size(G, 1) || throw(CovarianceStepError(
         "S is singular; method :s needs at least as many informative subjects as estimated coordinates",
         R, S, gradient, names))
     return Matrix(inv(F))
