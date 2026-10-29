@@ -13,13 +13,15 @@ import ForwardDiff
 using DelimitedFiles
 using LinearAlgebra
 using Random
+using SparseArrays: sparse
 import Optim
 
 export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH, theoph_model,
     JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN,
     LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
-    occasions_exact_nested, occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly
+    occasions_exact_nested, occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly,
+    SparseDeclared, occasions_pattern, occasions_sparse
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -98,6 +100,25 @@ NE.conditional_loglikelihood(m::GradientOnly, i, θ, σ, η) = NE.conditional_lo
 NE.conditional_loglikelihood_and_gradient(m::GradientOnly, i, θ, σ, η) =
     NE.conditional_loglikelihood_and_gradient(m.inner, i, θ, σ, η)
 NE.provides_eta_hessian(::GradientOnly) = false
+
+# A model with gradients only that declares its η Hessian pattern
+# (`eta_hessian_sparsity`): `pattern(i)` gives subject i's. Everything else is the
+# inner model's.
+struct SparseDeclared{M, F}
+    inner::M
+    pattern::F
+end
+NE.nsubjects(m::SparseDeclared) = NE.nsubjects(m.inner)
+NE.nlme_layout(m::SparseDeclared) = NE.nlme_layout(m.inner)
+NE.mu_referencing(m::SparseDeclared) = NE.mu_referencing(m.inner)
+NE.conditional_loglikelihood(m::SparseDeclared, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood(m.inner, i, θ, σ, η)
+NE.conditional_loglikelihood_and_gradient(m::SparseDeclared, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood_and_gradient(m.inner, i, θ, σ, η)
+NE.conditional_loglikelihood_and_population_gradient(m::SparseDeclared, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood_and_population_gradient(m.inner, i, θ, σ, η)
+NE.provides_eta_hessian(::SparseDeclared) = false
+NE.eta_hessian_sparsity(m::SparseDeclared, i) = m.pattern(i)
 
 # Typical-value parameters of the standard one-compartment Theoph fit (no weight
 # effect), additive error.
@@ -372,6 +393,14 @@ function occasions_unit_posterior(m::RaggedOccasions, i, x)
     return shrink .* (means .- θ .- ma),
         sqrt.(b2 .* s2 ./ (s2 .+ counts .* b2) .+ shrink .^ 2 .* va)
 end
+
+# The occasions model's η Hessian pattern for subject i: the subject effect (η₁)
+# shares observations with every occasion effect, and occasion effects share none.
+function occasions_pattern(m::RaggedOccasions, i)
+    n = 1 + length(m.y[i])
+    return sparse(vcat(1:n, fill(1, n - 1), 2:n), vcat(1:n, 2:n, fill(1, n - 1)), true, n, n)
+end
+occasions_sparse(m::RaggedOccasions) = SparseDeclared(m, i -> occasions_pattern(m, i))
 
 # `units[i]` occasions for subject i, when given; otherwise one to three.
 function occasions_model(; seed = 9, n = 8, gaussian = false, units = nothing)

@@ -67,18 +67,51 @@ end
 
 _marginal_subjects(prepared::_PreparedPoints) = prepared.subjects
 
-function _prepare_marginal(approximation::Union{ImportanceSampling, AdaptiveGaussHermite},
-        model, θ, σ, ω, subjects, η0, rng, progress = nothing)
+# Adaptive Gauss–Hermite quadrature adapts its points to the integrand at every
+# point (θ, σ, ω) it is evaluated at: the subject modes and their curvature are
+# found again there, warm-started from the estimate's modes with the tightened
+# tolerance `FOCEApproximation` uses, so the terms are smooth in the coordinates.
+# Points held fixed at the estimate would not adapt: with one node (Laplace) the
+# covariance step's R would then be the complete-data information at the
+# estimate's modes, larger than the observed information and without its cross
+# terms. `points` are the estimate's own, which `marginal_loglikelihood` reports.
+struct _PreparedAdaptive{M, A <: AdaptiveGaussHermite, E, P <: _PreparedPoints}
+    model::M
+    approximation::A
+    center::E
+    points::P
+    calls::Base.RefValue{Int}
+end
+
+_marginal_subjects(prepared::_PreparedAdaptive) = prepared.points.subjects
+
+function _prepare_marginal(approximation::ImportanceSampling, model, θ, σ, ω, subjects,
+        η0, rng, progress = nothing)
     _check_approximation(approximation)
-    layout = nlme_layout(model)
     ebe = _run_empirical_bayes(model, θ, σ, ω, subjects, η0, default_ebe_method(model),
         EBEOptions(), true, progress, false)
+    return _points_at_modes(approximation, model, θ, σ, ω, ebe, rng)
+end
+
+function _prepare_marginal(approximation::AdaptiveGaussHermite, model, θ, σ, ω, subjects,
+        η0, rng, progress = nothing)
+    _check_approximation(approximation)
+    ebe = _run_empirical_bayes(model, θ, σ, ω, subjects, η0, default_ebe_method(model),
+        EBEOptions(), true, progress, false)
+    return _PreparedAdaptive(model, approximation, ebe,
+        _points_at_modes(approximation, model, θ, σ, ω, ebe, rng), Ref(0))
+end
+
+# The approximation's points around each subject's conditional mode in `ebe`,
+# scaled by the inverse curvature there.
+function _points_at_modes(approximation, model, θ, σ, ω, ebe, rng)
+    layout = nlme_layout(model)
     ids = collect(Int, ebe.subjects)
     indices, design = _saem_mu_trait(model, ids, layout)
     modes = [Vector{Float64}(_eta_column(ebe.modes, k)) for k in eachindex(ids)]
     hessians = ebe.hessians === nothing ?
         _difference_eta_hessians(model, layout, ids, θ, σ, re_prior(model, ω), modes) :
-        [Matrix{Float64}(H) for H in ebe.hessians]
+        [convert(AbstractMatrix{Float64}, H) for H in ebe.hessians]
     θμ = Float64.(θ[indices])
     phi = Matrix{Float64}[]
     offset = Vector{Float64}[]
@@ -86,9 +119,9 @@ function _prepare_marginal(approximation::Union{ImportanceSampling, AdaptiveGaus
         F = cholesky(Symmetric(-hessians[k]); check = false)
         issuccess(F) || throw(DomainError(hessians[k],
             "subject $i: the complete-data curvature at its conditional mode is not positive definite"))
-        A = inv(UpperTriangular(F.U))
-        Z, w = _marginal_points(approximation, rng, length(modes[k]), -sum(log, diag(F.U)))
-        push!(phi, (modes[k] .+ design[k] * θμ) .+ A * Z)
+        scale, logdet_A = _curvature_scale(F)
+        Z, w = _marginal_points(approximation, rng, length(modes[k]), logdet_A)
+        push!(phi, (modes[k] .+ design[k] * θμ) .+ scale(Z))
         push!(offset, w)
     end
     nonmu = setdiff(1:layout.ntheta, indices)
@@ -96,6 +129,13 @@ function _prepare_marginal(approximation::Union{ImportanceSampling, AdaptiveGaus
     return _PreparedPoints(model, approximation, layout, ids, indices, design, phi,
         offset, reference, Dict{Vector{Float64}, Vector{Vector{Float64}}}(), Ref(0))
 end
+
+# The map from standardized points Z to proposal offsets AZ, with AAᵀ = (-H)⁻¹ for
+# the Cholesky factor F of -H, and log|det A|. A sparse (CHOLMOD) factor with
+# P(-H)Pᵀ = LLᵀ applies A = PᵀL⁻ᵀ by one triangular solve, never forming a dense
+# matrix.
+_curvature_scale(F::Cholesky) = (Z -> inv(UpperTriangular(F.U)) * Z, -sum(log, diag(F.U)))
+_curvature_scale(F::SparseArrays.CHOLMOD.Factor) = (Z -> F.UP \ Z, -logdet(F) / 2)
 
 # Standardized points Z (d × K, before the factor A) and their offsets, given
 # log|det A|.
@@ -120,13 +160,18 @@ function _marginal_points(a::ImportanceSampling, rng, d, logdet_A)
 end
 
 function _marginal_points(a::AdaptiveGaussHermite, rng, d, logdet_A)
+    # In BigInt: nodes^d overflows Int for large d (2^64 wraps to 0 points).
+    big(a.nodes)^d <= a.max_points || throw(ArgumentError(
+        "AdaptiveGaussHermite with $(a.nodes) nodes needs $(a.nodes)^$d points for a subject with $d random effects (max_points = $(a.max_points)); use fewer nodes or ImportanceSampling"))
     npoints = a.nodes^d
-    npoints <= a.max_points || throw(ArgumentError(
-        "AdaptiveGaussHermite with $(a.nodes) nodes needs $npoints points for a subject with $d random effects (max_points = $(a.max_points)); use fewer nodes or ImportanceSampling"))
     x, w = _gauss_hermite(a.nodes)
     Z = zeros(d, npoints)
     offset = zeros(npoints)
-    for (j, index) in enumerate(CartesianIndices(ntuple(_ -> a.nodes, d)))
+    # Point j's node per dimension, the first dimension varying fastest; no tuple of
+    # length d, so a single Laplace point serves thousands of random effects.
+    nodes(j) = a.nodes == 1 ? ones(Int, d) : digits(j - 1; base = a.nodes, pad = d) .+ 1
+    for j in 1:npoints
+        index = nodes(j)
         z = [x[index[c]] for c in 1:d]
         Z[:, j] = sqrt(2) .* z
         offset[j] = sum(c -> log(w[index[c]]), 1:d; init = 0.0) + sum(abs2, z) +
@@ -249,14 +294,23 @@ end
 _subject_marginals(prepared::_PreparedPoints, θ, σ, ω, progress = nothing) =
     first(_point_marginals(prepared, θ, σ, ω, progress))
 
+function _subject_marginals(prepared::_PreparedAdaptive, θ, σ, ω, progress = nothing)
+    model = prepared.model
+    ebe = _run_empirical_bayes(model, θ, σ, ω, prepared.center.subjects, prepared.center,
+        default_ebe_method(model), EBEOptions(gtol = 1.0e-10), true, progress, true)
+    points = _points_at_modes(prepared.approximation, model, θ, σ, ω, ebe, nothing)
+    terms = _subject_marginals(points, θ, σ, ω, progress)
+    prepared.calls[] += points.calls[]
+    return terms
+end
+
 # Marginal terms with Monte Carlo error: `nothing` effective sample sizes and
 # zero standard errors for the deterministic approximations.
 _marginal_terms(prepared::_PreparedPoints{<:Any, ImportanceSampling}, θ, σ, ω, progress) =
     _point_marginals(prepared, θ, σ, ω, progress)
 
-function _marginal_terms(prepared::_PreparedPoints{<:Any, AdaptiveGaussHermite}, θ, σ, ω,
-        progress)
-    ℓ, _, _ = _point_marginals(prepared, θ, σ, ω, progress)
+function _marginal_terms(prepared::_PreparedAdaptive, θ, σ, ω, progress)
+    ℓ, _, _ = _point_marginals(prepared.points, θ, σ, ω, progress)
     return ℓ, zero(ℓ), nothing
 end
 
@@ -266,6 +320,7 @@ function _marginal_terms(prepared::_PreparedFOCE, θ, σ, ω, progress)
 end
 
 _marginal_calls(prepared::_PreparedPoints) = prepared.calls[]
+_marginal_calls(prepared::_PreparedAdaptive) = prepared.points.calls[] + prepared.calls[]
 _marginal_calls(prepared::_PreparedFOCE) = missing
 
 """

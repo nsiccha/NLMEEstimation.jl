@@ -14,6 +14,42 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.1.3
+
+- New optional protocol method `eta_hessian_sparsity(model, i)`: a model
+  declares which entries of subject `i`'s conditional η Hessian can be
+  nonzero, for every subject or for none. The estimators then compute that
+  Hessian as a sparse matrix from the model's batched η gradients, one pair of
+  evaluations per color of a star coloring of the pattern
+  (SparseMatrixColorings.jl), and factor it sparsely (CHOLMOD). A subject with
+  thousands of nested random effects costs time and memory linear in its
+  size: on the test suite's nested model, one subject of 25,872 random effects
+  takes 1.9 s and 265 MB for its mode, and its Laplace marginal equals the
+  closed form. New dependencies: SparseArrays (standard library) and
+  SparseMatrixColorings.
+- With a declared pattern, `default_ebe_method` is `NewtonEBE` even without
+  Hessian blocks, and the result's `hessians` are `SparseMatrixCSC`s
+  (`EBEResult` and `RaggedEBEResult` accept them). Newton's trust-region step
+  on a sparse Hessian is found by sparse Cholesky factorizations of
+  `-H + νΩ⁻¹` (Moré & Sorensen) instead of an eigendecomposition.
+  `QuasiNewtonEBE`'s curvature check, `ebe_covariances`, and the curvature,
+  log-determinant and proposal points of `marginal_loglikelihood` use the
+  sparse Hessians too.
+- `check_protocol` checks a declared pattern: its size, that every checked
+  subject has one, and that the Hessian recovered from it agrees with a
+  Hessian-vector product along a random direction.
+- `covariance_step` with `AdaptiveGaussHermite` adapts its quadrature at every
+  evaluated point: it finds the subject modes and curvature there again
+  (warm-started, `gtol = 1e-10`, as `FOCEApproximation` does). It used to keep
+  the points at the estimate's modes, and with one node (Laplace) `R` was then
+  the complete-data information at those modes, with its cross terms missing
+  (on the test model 6.60 against the exact 6.52, and 0 against 25.4).
+  `ImportanceSampling` keeps its fixed draws. `marginal_loglikelihood` values
+  are unchanged.
+- `AdaptiveGaussHermite` counts its points without integer overflow
+  (`nodes^d` used to wrap to 0 for large `d`) and builds a single Laplace point
+  for any number of random effects.
+
 ## 0.1.2
 
 - `QuasiNewtonEBE` is limited-memory BFGS. `QuasiNewtonEBE(; memory = 20)`

@@ -144,6 +144,23 @@ _factor_transpose_times(p::NormalREPrior, v) = p.cholesky_factor' * v
 _factor_transpose_times(p::_RaggedSubjectPrior, v) =
     _blockwise((L, x) -> L' * x, p, p.prior.cholesky_factors, v)
 
+# The subject's prior precision Ω⁻¹ as a sparse matrix, block by block for a
+# ragged subject.
+_precision_matrix(p::NormalREPrior) = sparse(p.precision)
+function _precision_matrix(p::_RaggedSubjectPrior)
+    rows, columns = Int[], Int[]
+    values = eltype(p.prior.logdet_omega)[]
+    for (family, r) in p.blocks
+        P = p.prior.precisions[family]
+        for (b, j) in enumerate(r), (a, i) in enumerate(r)
+            push!(rows, i)
+            push!(columns, j)
+            push!(values, P[a, b])
+        end
+    end
+    return sparse(rows, columns, values, neta(p), neta(p))
+end
+
 # The prior variances of subject i's η, the diagonal of Ω_i.
 _factor_row_variances(L) = [sum(abs2(L[j, k]) for k in 1:j) for j in axes(L, 1)]
 _prior_variances(prior::NormalREPrior, i) = _factor_row_variances(prior.cholesky_factor)
@@ -227,5 +244,5 @@ function _complete_gradients(model, subjects, θ, σ, prior::NormalREPrior, H)
     f = ℓ .+ [re_logprior(prior, view(H, :, k)) for k in axes(H, 2)]
     return ℓ, f, Gc .- prior.precision * H
 end
-_complete_hessians(model, subjects, θ, σ, prior::NormalREPrior, H) =
+_model_complete_hessians(model, subjects, θ, σ, prior::NormalREPrior, H) =
     [B - prior.precision for B in conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H)]

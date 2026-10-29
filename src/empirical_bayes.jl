@@ -4,7 +4,7 @@
 Per-subject mode search of [`empirical_bayes`](@ref):
 
 - [`NewtonEBE`](@ref): Newton on the η Hessian blocks, needs
-  [`provides_eta_hessian`](@ref).
+  [`provides_eta_hessian`](@ref) or a declared [`eta_hessian_sparsity`](@ref).
 - [`QuasiNewtonEBE`](@ref): BFGS on η gradients only.
 
 [`default_ebe_method`](@ref) picks Newton when Hessian blocks are available.
@@ -23,6 +23,13 @@ upward, out to the radius. The radius shrinks after a rejected step or a poor
 prediction and grows after a good step that reached it. A subject converges once
 `gᵀ(-H)⁻¹g / 2 ≤ decrement_tol`; the Newton step from there is taken as a final
 polishing step, so the returned mode is stationary to roundoff.
+
+The Hessian blocks are the model's own ([`provides_eta_hessian`](@ref)), or sparse
+matrices computed from its batched gradients when it declares
+[`eta_hessian_sparsity`](@ref). On a sparse block the trust-region step is found by
+sparse Cholesky factorizations of `-H + νΩ⁻¹` (Moré & Sorensen 1983) instead of an
+eigendecomposition, so a subject with thousands of nested effects costs time and
+memory proportional to the Hessian's nonzeros.
 """
 struct NewtonEBE <: EBEMethod end
 
@@ -43,10 +50,12 @@ direction in which the density curves upward: a saddle point passes the gradient
 test, and next to one the steps along that direction stay tiny. The solver therefore
 checks the complete-data Hessian block where BFGS meets upward curvature (a curvature
 pair with `sᵀy ≤ 0`, which BFGS skips) and, once no subject is still iterating, at
-every subject that passed the gradient test. The block is the model's own when it
-[`provides_eta_hessian`](@ref) (the one the result reports, so the check adds no model
-calls), and otherwise forward differences of batched gradients (`neta` batched
-gradient calls per check, not reported in the result). Where `-H` is not positive
+every subject that passed the gradient test. The block is sparse when the model
+declares [`eta_hessian_sparsity`](@ref) (two batched gradient calls per color of
+its pattern), else the model's own when it [`provides_eta_hessian`](@ref) (the one
+the result reports, so the check adds no model calls), and otherwise forward
+differences of batched gradients (`neta` batched gradient calls per check, not
+reported in the result). Where `-H` is not positive
 definite, the next step is [`NewtonEBE`](@ref)'s trust-region step with a radius of
 one prior standard deviation, halved until the density increases, and BFGS restarts
 from Ω.
@@ -62,9 +71,10 @@ end
 """
     default_ebe_method(model) -> EBEMethod
 
-[`NewtonEBE`](@ref) if [`provides_eta_hessian`](@ref), else [`QuasiNewtonEBE`](@ref).
+[`NewtonEBE`](@ref) if [`provides_eta_hessian`](@ref) or the model declares
+[`eta_hessian_sparsity`](@ref), else [`QuasiNewtonEBE`](@ref).
 """
-default_ebe_method(model) = provides_eta_hessian(model) ? NewtonEBE() : QuasiNewtonEBE()
+default_ebe_method(model) = _reports_eta_hessians(model) ? NewtonEBE() : QuasiNewtonEBE()
 
 """
     EBEOptions(; maxiter = 200, decrement_tol = 1e-14, gtol = 1e-8, max_backtracks = 30)
@@ -97,14 +107,16 @@ subject `subjects[k]`.
 - `modes`: `neta × length(subjects)` matrix of empirical Bayes estimates η̂_i.
 - `hessians`: the `neta × neta` Hessian in η of the complete-data log-density
   `log p(y_i, η_i | θ, σ, Ω)` at η̂_i per subject, or `nothing` when the model
-  provides no second order (see `ebe_covariances`).
+  provides no second order (see `ebe_covariances`). They are `SparseMatrixCSC`s
+  when the model declares [`eta_hessian_sparsity`](@ref).
 - `conditional_loglikelihood`, `complete_data_loglikelihood`: the two log-densities
   at η̂_i.
 - `converged`, `iterations`: per-subject solver diagnostics.
 - `gradient_norm`: the standardized complete-data gradient `‖Lᵀg‖∞` at η̂_i.
 - `method`: the [`EBEMethod`](@ref) used.
 """
-struct EBEResult{T <: Real, HS <: Union{Nothing, Vector{Matrix{T}}}, M <: EBEMethod} <: AbstractEBEResult
+struct EBEResult{T <: Real, HS <: Union{Nothing, Vector{Matrix{T}}, Vector{SparseMatrixCSC{T, Int}}},
+        M <: EBEMethod} <: AbstractEBEResult
     subjects::Vector{Int}
     modes::Matrix{T}
     hessians::HS
@@ -120,12 +132,14 @@ end
     RaggedEBEResult
 
 Empirical Bayes result for a [`RaggedNLMELayout`](@ref). `modes[k]` and
-`hessians[k]` have the actual dimension of `subjects[k]`, without padding.
+`hessians[k]` have the actual dimension of `subjects[k]`, without padding; the
+Hessians are `SparseMatrixCSC`s when the model declares
+[`eta_hessian_sparsity`](@ref).
 """
 struct RaggedEBEResult{T <: Real, M <: EBEMethod} <: AbstractEBEResult
     subjects::Vector{Int}
     modes::Vector{Vector{T}}
-    hessians::Union{Nothing,Vector{Matrix{T}}}
+    hessians::Union{Nothing, Vector{Matrix{T}}, Vector{SparseMatrixCSC{T, Int}}}
     conditional_loglikelihood::Vector{T}
     complete_data_loglikelihood::Vector{T}
     converged::Vector{Bool}
@@ -251,7 +265,10 @@ Hessians or some `-H_i` is not positive definite.
 """
 ebe_covariances(result::EBEResult) = _ebe_covariances(result.hessians)
 ebe_covariances(result::RaggedEBEResult) = _ebe_covariances(result.hessians)
-_ebe_covariances(hessians::Vector) = [inv(cholesky(Symmetric(-H))) for H in hessians]
+_ebe_covariances(hessians::Vector) = [_laplace_covariance(H) for H in hessians]
+_laplace_covariance(H::AbstractMatrix) = inv(cholesky(Symmetric(-H)))
+# Dense: the covariance of a subject with a sparse Hessian is in general dense.
+_laplace_covariance(H::SparseMatrixCSC) = cholesky(Symmetric(-H)) \ Matrix{eltype(H)}(I, size(H)...)
 _ebe_covariances(::Nothing) = throw(ArgumentError(
     "this EBEResult carries no Hessians: the model provides no η second order (provides_eta_hessian)"))
 
@@ -422,25 +439,26 @@ _resolution(f) = sqrt(eps(typeof(f))) * max(one(f), abs(f))
 
 # ── Newton ────────────────────────────────────────────────────────────────────
 
-# Newton's state per subject: the complete-data Hessian block, the prior's Cholesky
-# factor L (the trust region is a ball in the standardized coordinates L⁻¹η, where
-# the prior is N(0, I)), and the trust-region radius. The first radius is the length
-# of the full Newton step where that step exists, so a concave start takes it, and
-# one prior standard deviation elsewhere.
-struct NewtonState{HS, FS, R}
+# Newton's state per subject: the complete-data Hessian block (sparse for a model
+# that declares `eta_hessian_sparsity`), the subject's prior (the trust region is a
+# ball in the standardized coordinates L⁻¹η, with Ω = LLᵀ, where the prior is
+# N(0, I)), and the trust-region radius. The first radius is the length of the full
+# Newton step where that step exists, so a concave start takes it, and one prior
+# standard deviation elsewhere.
+struct NewtonState{HS, PS, R}
     hessians::HS
-    factors::FS
+    priors::PS
     radii::R
 end
 
 function _initial_curvature(::NewtonEBE, model, subjects, θ, σ, prior, H, G)
     hessians = _complete_hessians(model, subjects, θ, σ, prior, H)
-    factors = [_prior_factor(prior, i) for i in subjects]
+    priors = [_subject_prior(prior, i) for i in subjects]
     radii = map(eachindex(subjects)) do k
         p, _ = _newton_step(_column(G, k), hessians[k])
-        p === nothing ? one(eltype(hessians[k])) : norm(factors[k] \ p)
+        p === nothing ? one(eltype(hessians[k])) : norm(_factor_solve(priors[k], p))
     end
-    return NewtonState(hessians, factors, radii)
+    return NewtonState(hessians, priors, radii)
 end
 
 function _is_converged(::NewtonEBE, state, k, g, prior, i, opt)
@@ -453,7 +471,7 @@ end
 function _newton_step(g, Hk)
     ch = cholesky(Symmetric(-Hk); check = false)
     issuccess(ch) || return nothing, oftype(float(zero(eltype(g))), NaN)
-    p = ch \ g
+    p = ch \ collect(g)
     return p, dot(g, p)
 end
 
@@ -470,11 +488,11 @@ end
 _predicted(trial::TrustRegionTrial, g) = trial.predicted
 
 _first_trial(::NewtonEBE, state, k, g) =
-    _trust_region_trial(state.hessians[k], state.factors[k], g, state.radii[k])
+    _trust_region_trial(state.hessians[k], state.priors[k], g, state.radii[k])
 
 # A rejected step shrinks the region to a quarter of that step's length.
 _next_trial(::NewtonEBE, trial, state, k, g) =
-    _trust_region_trial(state.hessians[k], state.factors[k], g, trial.length / 4)
+    _trust_region_trial(state.hessians[k], state.priors[k], g, trial.length / 4)
 
 # The trust-region subproblem in standardized coordinates q = L⁻¹p: maximize
 # aᵀc - Σⱼ λⱼcⱼ²/2 over ‖c‖ ≤ Δ in the eigenbasis -LᵀHL = Q Diagonal(λ) Qᵀ, with
@@ -484,13 +502,17 @@ _next_trial(::NewtonEBE, trial, state, k, g) =
 # are ≥ 0, with d₁ = 0 when -H is not positive definite, so the root stays resolved
 # however close it lies to that bound. If a has no component where d = 0 and the
 # other components fit inside the region (the hard case, e.g. a start exactly at a
-# saddle point), the remaining length goes along the first eigenvector.
-function _trust_region_trial(Hk, L, g, Δ)
+# saddle point), the remaining length goes along the first eigenvector. A sparse
+# Hessian has its own method, by sparse factorizations (`sparse_curvature.jl`).
+_trust_region_trial(Hk::AbstractMatrix, prior, g, Δ) =
+    _eigen_trust_region_trial(Hk, _prior_factor(prior), g, Δ)
+
+function _eigen_trust_region_trial(Hk, L, g, Δ)
     λ, Q = eigen(Symmetric(-(L' * Hk * L)))
     a = Q' * (L' * g)
     if first(λ) > 0
         c = a ./ λ
-        norm(c) <= Δ && return _trust_region_trial(L, Q, λ, a, c, Δ, true)
+        norm(c) <= Δ && return _eigen_trial(L, Q, λ, a, c, Δ, true)
     end
     d = λ .+ max(zero(eltype(λ)), -first(λ))
     flat = iszero.(d)
@@ -498,14 +520,14 @@ function _trust_region_trial(Hk, L, g, Δ)
         c = [iszero(dⱼ) ? zero(aⱼ) : aⱼ / dⱼ for (aⱼ, dⱼ) in zip(a, d)]
         if norm(c) <= Δ
             c[1] = sqrt(max(Δ^2 - sum(abs2, c), zero(Δ)))
-            return _trust_region_trial(L, Q, λ, a, c, Δ, false)
+            return _eigen_trial(L, Q, λ, a, c, Δ, false)
         end
     end
     c = a ./ (d .+ _boundary_shift(a, d, Δ))
-    return _trust_region_trial(L, Q, λ, a, c, Δ, false)
+    return _eigen_trial(L, Q, λ, a, c, Δ, false)
 end
 
-function _trust_region_trial(L, Q, λ, a, c, Δ, full)
+function _eigen_trial(L, Q, λ, a, c, Δ, full)
     predicted = dot(a, c) - sum(λ .* c .^ 2) / 2
     return TrustRegionTrial(L * (Q * c), predicted, full, Δ, norm(c))
 end
@@ -596,13 +618,14 @@ _reopen_nonconcave!(::NewtonEBE, state, model, subjects, θ, σ, prior, H, G, co
 # 125–4,000 units with 20 pairs, and kept them below the full BFGS update's.
 # Ω is applied through the subject's prior, block by block for a ragged subject.
 # Alongside: the complete-data Hessian block at the subject's current point where
-# it has been computed (`nothing` otherwise; a step discards it).
+# it has been computed (`nothing` otherwise; a step discards it), sparse for a model
+# that declares `eta_hessian_sparsity`.
 struct BFGSState{T, P}
     priors::Vector{P}
     scales::Vector{T}
     pairs::Vector{Vector{Tuple{Vector{T}, Vector{T}, T}}}
     memory::Int
-    hessians::Vector{Union{Nothing, Matrix{T}}}
+    hessians::Vector{Union{Nothing, Matrix{T}, SparseMatrixCSC{T, Int}}}
 end
 
 function _initial_curvature(method::QuasiNewtonEBE, model, subjects, θ, σ, prior, H, G)
@@ -610,7 +633,7 @@ function _initial_curvature(method::QuasiNewtonEBE, model, subjects, θ, σ, pri
     n = length(subjects)
     return BFGSState([_subject_prior(prior, i) for i in subjects], ones(T, n),
         [Tuple{Vector{T}, Vector{T}, T}[] for _ in 1:n], method.memory,
-        Vector{Union{Nothing, Matrix{T}}}(nothing, n))
+        Vector{Union{Nothing, Matrix{T}, SparseMatrixCSC{T, Int}}}(nothing, n))
 end
 
 # Back to γΩ with no pairs, after an escape step.
@@ -667,7 +690,7 @@ _predicted(trial::QuasiNewtonTrial, g) = trial.slope + trial.curvature / 2
 function _first_trial(::QuasiNewtonEBE, state, k, g)
     if _nonconcave(state, k)
         Hk = state.hessians[k]
-        step = _trust_region_trial(Hk, _prior_factor(state.priors[k]), g, one(eltype(Hk))).step
+        step = _trust_region_trial(Hk, state.priors[k], g, one(eltype(Hk))).step
         return QuasiNewtonTrial(step, dot(g, step), dot(step, Hk * step), true, true)
     end
     step = _inverse_hessian_times(state, k, g)
@@ -715,12 +738,13 @@ function _reopen_nonconcave!(::QuasiNewtonEBE, state, model, subjects, θ, σ, p
 end
 
 # The complete-data Hessian blocks of subjects `ks` at their points `Hks` (with
-# complete-data gradients `Gks` there): the model's own when it provides them, or
-# else forward differences of batched gradients.
+# complete-data gradients `Gks` there): sparse from the declared patterns, the
+# model's own blocks, or else forward differences of batched gradients.
 function _store_hessians!(state::BFGSState, model, subjects, θ, σ, prior, ks, Hks, Gks)
     isempty(ks) && return state
-    state.hessians[ks] = provides_eta_hessian(model) ?
-        _complete_hessians(model, subjects[ks], θ, σ, prior, Hks) :
+    state.hessians[ks] = _declares_eta_hessian_sparsity(model) ?
+        _sparse_complete_hessians(model, subjects[ks], θ, σ, prior, Hks) :
+        provides_eta_hessian(model) ? _model_complete_hessians(model, subjects[ks], θ, σ, prior, Hks) :
         _difference_blocks(model, subjects[ks], θ, σ, prior,
             [Vector(_column(Hks, j)) for j in eachindex(ks)], [Vector(_column(Gks, j)) for j in eachindex(ks)])
     return state
@@ -741,11 +765,12 @@ end
 
 _polish!(::QuasiNewtonEBE, model, subjects, θ, σ, prior, H, ℓ, f, G, state, iterations, done) = nothing
 
-# The model's Hessian blocks at the final points, computing those not yet known;
-# none for a gradient-only model, whose difference blocks served only the checks.
-function _final_hessians(::QuasiNewtonEBE, state::BFGSState{T}, model, subjects, θ, σ, prior, H) where {T}
-    provides_eta_hessian(model) || return nothing
+# The Hessian blocks at the final points (the model's, or sparse from its patterns),
+# computing those not yet known; none for a gradient-only model without patterns,
+# whose difference blocks served only the checks.
+function _final_hessians(::QuasiNewtonEBE, state::BFGSState, model, subjects, θ, σ, prior, H)
+    _reports_eta_hessians(model) || return nothing
     ks = findall(isnothing, state.hessians)
     isempty(ks) || (state.hessians[ks] = _complete_hessians(model, subjects[ks], θ, σ, prior, _columns(H, ks)))
-    return Vector{Matrix{T}}(state.hessians)
+    return identity.(state.hessians)
 end

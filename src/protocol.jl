@@ -184,6 +184,34 @@ itself returns `true`. Second order is only ever requested as per-subject
 provides_eta_hessian(model) = hessian_ad_backend(model) !== nothing
 
 """
+    eta_hessian_sparsity(model, i) -> Union{Nothing, AbstractMatrix{Bool}}
+
+**Optional.** Which entries of subject `i`'s conditional η Hessian `∇²η ℓ_i` can be
+nonzero: an `n × n` Boolean matrix, usually a `SparseMatrixCSC{Bool}`, with
+`n = neta(nlme_layout(model), i)`. Entry `(j, k)` is `true` when η_j and η_k can
+enter the same observation's likelihood. The default `nothing` declares nothing,
+and the Hessian is treated as dense. A model declares a pattern for every subject
+or for none.
+
+With a pattern, the estimators compute the subject's η Hessian as a sparse matrix
+from a few batched gradient evaluations, one pair per color of a star coloring
+of the pattern (central differences of
+[`conditional_loglikelihoods_and_gradients`](@ref)), and factor it sparsely. A
+subject of nested random effects, whose units interact only through the effects
+above them, then costs memory and time linear in its number of effects; dense
+Hessian blocks cost their square. [`empirical_bayes`](@ref) uses
+[`NewtonEBE`](@ref) by default for such a model, its result's `hessians` are
+sparse, and [`marginal_loglikelihood`](@ref) and [`covariance_step`](@ref) take
+their curvature from them. The pattern supersedes
+[`conditional_loglikelihood_hessian_blocks`](@ref): a model that declares one is
+not asked for dense blocks. [`check_protocol`](@ref) checks a declared pattern
+against Hessian-vector products along random directions.
+
+The diagonal and symmetry are implied: `P .| P' .| I` is used.
+"""
+eta_hessian_sparsity(model, i) = nothing
+
+"""
     conditional_loglikelihood_and_gradient(model, i, θ, σ, η) -> (ℓ, ∇η ℓ)
 
 The conditional log-density of subject `i` and its gradient in η_i. Implement it,
