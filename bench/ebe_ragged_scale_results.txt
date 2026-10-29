@@ -1,21 +1,26 @@
-Empirical Bayes, marginal likelihood and covariance step on ragged subjects with many nested effects: Julia 1.10.12, NLMEEstimation 2277fce
+Empirical Bayes, marginal likelihood and covariance step on ragged subjects with many nested effects: Julia 1.10.12, NLMEEstimation e664fc3
 subjects: 250, 500, 1000, 2000, 4000, 8000 nested units; exact maximum-likelihood estimate 2.3548, -1.3714, -0.3339, -0.9185
 
 empirical_bayes per subject (seconds, MB allocated, model calls, iterations, max |mode − exact|)
 units	declared, Newton	declared, BFGS	undeclared BFGS (dense curvature check)
-250	0.00	2.8	16	2	7.3e-16	0.01	10.9	87	33	1.1e-11	0.02	36.9	334	33	1.1e-11
+250	0.01	2.8	16	2	7.3e-16	0.01	10.9	87	33	1.1e-11	0.02	36.9	334	33	1.1e-11
 500	0.00	5.3	16	2	8.9e-16	0.02	26.4	122	49	4.5e-13	0.08	119.1	619	49	4.5e-13
-1000	0.01	10.7	16	2	1.0e-15	0.03	54.5	117	49	2.0e-12	0.41	443.6	1114	49	2.0e-12
-2000	0.02	21.7	16	2	7.8e-16	0.07	81.6	86	33	1.4e-13	0.76	1707.0	2083	33	1.4e-13
-4000	0.05	41.1	16	2	6.1e-16	0.46	162.2	101	37	2.4e-15	(skipped: n² memory)
-8000	0.20	82.7	16	2	7.8e-16	0.35	459.0	135	55	5.1e-15	(skipped: n² memory)
-all six	0.28	156.3	96	2	1.0e-15	0.59	788.7	648	55	1.1e-11
+1000	0.01	10.7	16	2	1.0e-15	0.04	54.5	117	49	2.0e-12	0.23	443.6	1114	49	2.0e-12
+2000	0.02	21.7	16	2	7.8e-16	0.04	81.6	86	33	1.4e-13	0.99	1707.0	2083	33	1.4e-13
+4000	0.06	41.1	16	2	6.1e-16	0.11	162.2	101	37	2.4e-15	(skipped: n² memory)
+8000	0.19	82.7	16	2	7.8e-16	0.34	459.0	135	55	5.1e-15	(skipped: n² memory)
+all six	0.27	156.3	96	2	1.0e-15	0.58	788.7	648	55	1.1e-11
 
-Laplace marginal of all six: 0.28 s, 170.2 MB; minus the exact marginal: -2.5e-11
-covariance step (:r, Laplace) of all six: 10.03 s, 5716.0 MB, 33 evaluations; max relative error of R against the exact Hessian: 6.4e-07
+Laplace marginal of all six: 0.27 s, 170.2 MB; minus the exact marginal: -2.5e-11
+covariance step (:r, Laplace) of all six: 10.09 s, 5716.0 MB, 33 evaluations; max relative error of R against the exact Hessian: 6.4e-07
 standard errors: 0.29243, 0.00398, 0.28882, 0.00647; exact: 0.29241, 0.00398, 0.28877, 0.00647
 
+covariance step (:r) of all six by approximation: seconds, MB, max |SE/exact SE − 1|
+ImportanceSampling() (default)	68.8	95408	0.006	(1.000, 0.994, 1.001, 0.995)
+AdaptiveGaussHermite(nodes = 1)	9.4	5718	0.000	(1.000, 1.000, 1.000, 1.000)
+LouisInformation()	87.6	194479	0.013	(1.000, 1.013, 1.000, 0.996)
+
 one subject of 25871 nested units (25872 random effects), at the estimate above
-declared, Newton	1.99	264.5	16	2	7.8e-16
-declared, BFGS	1.79	1550.5	149	58	1.6e-14
-Laplace marginal: 1.86 s, 288.6 MB; minus the exact marginal: 1.0e-08
+declared, Newton	1.77	264.5	16	2	7.8e-16
+declared, BFGS	1.58	1550.5	149	58	1.6e-14
+Laplace marginal: 1.82 s, 288.6 MB; minus the exact marginal: 1.0e-08

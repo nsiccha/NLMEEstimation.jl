@@ -71,7 +71,7 @@ export focei, focei_evaluate, FOCEOptions, FOCEResult, FOCEEvaluation
 export covariance_step, CovarianceResult, CovarianceStepError, FOCEApproximation,
     delta_method, omega_elements
 export marginal_loglikelihood, MarginalLikelihoodResult, ImportanceSampling,
-    AdaptiveGaussHermite
+    AdaptiveGaussHermite, LouisInformation
 export residual_diagnostics, ResidualDiagnostics
 export saem, saem_population_gradient_style, SAEMOptions, SAEMResult, RaggedSAEMResult,
     StandardSAEMMH, WarmupHMCNUTS, DualAveragingMALA
@@ -88,6 +88,7 @@ include("saem.jl")
 include("ragged.jl")
 include("covariance.jl")
 include("marginal.jl")
+include("louis.jl")
 include("diagnostics.jl")
 include("ReferenceModels.jl")
 

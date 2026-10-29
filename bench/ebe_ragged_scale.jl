@@ -18,6 +18,7 @@ using NLMEEstimation
 import NLMEEstimation as NE
 using LinearAlgebra
 using Printf
+using Random
 import ForwardDiff
 import Optim
 include(joinpath(@__DIR__, "..", "test", "common.jl"))
@@ -75,6 +76,12 @@ function main()
         approximation = AdaptiveGaussHermite(nodes = 1))
     covariance_step(occasions_sparse(small), xs[1:1], xs[2:2], xs[3:4];
         approximation = AdaptiveGaussHermite(nodes = 1), method = :r)
+    # S alone (eight subjects, so it has full rank): twenty draws need not give a
+    # positive definite R.
+    for approximation in (ImportanceSampling(draws = 20), LouisInformation(draws = 20, burnin = 5))
+        covariance_step(occasions_sparse(occasions_model()), xs[1:1], xs[2:2], xs[3:4];
+            approximation, method = :s)
+    end
 
     model = occasions_model(seed = 101, units = UNITS)
     x = maximum_likelihood(model)
@@ -106,6 +113,21 @@ function main()
             maximum(abs, stats.value.R - exact_R) / maximum(abs, exact_R)))
     report("standard errors: ", join((@sprintf("%.5f", v) for v in stats.value.standard_errors), ", "),
         "; exact: ", join((@sprintf("%.5f", v) for v in sqrt.(diag(inv(exact_R)))), ", "))
+
+    # The covariance step's approximations on the same six subjects: today's
+    # default for a ragged SAEM fit (importance sampling, t₄ proposal), Laplace,
+    # and Louis's identity from NUTS draws; standard errors against the exact ones.
+    report("\ncovariance step (:r) of all six by approximation: seconds, MB, max |SE/exact SE − 1|")
+    exact_se = sqrt.(diag(inv(exact_R)))
+    for (name, approximation) in (("ImportanceSampling() (default)", ImportanceSampling()),
+            ("AdaptiveGaussHermite(nodes = 1)", AdaptiveGaussHermite(nodes = 1)),
+            ("LouisInformation()", LouisInformation()))
+        stats = @timed covariance_step(declared, x[1:1], x[2:2], x[3:4]; approximation,
+            rng = Xoshiro(1), method = :r)
+        ratio = stats.value.standard_errors ./ exact_se
+        report(@sprintf("%s\t%.1f\t%.0f\t%.3f", name, stats.time, stats.bytes / 1e6,
+            maximum(abs, ratio .- 1)), "\t(", join((@sprintf("%.3f", v) for v in ratio), ", "), ")")
+    end
 
     largest = occasions_model(seed = 102, units = [LARGEST])
     report("\none subject of $LARGEST nested units ($(LARGEST + 1) random effects), at the estimate above")

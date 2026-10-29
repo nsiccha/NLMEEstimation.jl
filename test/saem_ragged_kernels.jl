@@ -8,7 +8,8 @@ import NLMEEstimation as NE
 import Optim
 isdefined(@__MODULE__, :TestCommon) || include("common.jl")
 using .TestCommon: GROWTH_LAYOUT, LinearGrowth, growth_model, RaggedOccasions,
-    occasions_model, occasions_exact, occasions_exact_nested, occasions_unit_posterior
+    occasions_model, occasions_exact, occasions_exact_nested, occasions_unit_posterior,
+    occasions_sparse
 
 # The growth model on a ragged layout with one block of its single family per
 # subject: the same model, with each subject's η as its own vector.
@@ -126,4 +127,33 @@ end
             @test cor(fit.eta[k][2:end], mean_b) > 0.85
         end
     end
+end
+
+@testset "NUTS warmup metric from a declared η Hessian pattern" begin
+    # A model that declares `eta_hessian_sparsity` seeds each subject's NUTS
+    # metric from its sparse Hessian (the diagonal of the inverse curvature) rather
+    # than from dense Hessian blocks, which for a subject with thousands of nested
+    # effects would be an n × n matrix. A model that declares nothing and has no
+    # Hessian blocks keeps the prior variances.
+    inner = occasions_model(seed = 3, units = [150, 300, 600])
+    model = occasions_sparse(inner)
+    x = [2.0, log(0.25), log(0.6), log(0.4)]
+    prior = re_prior(model, x[3:4])
+    s2, a2, b2 = exp(2x[2]), exp(2x[3]), exp(2x[4])
+    η = zeros(1 + length(inner.y[2]))
+    counts = length.(inner.y[2])
+    exact_diagonal = vcat(sum(counts) / s2 + 1 / a2, counts ./ s2 .+ 1 / b2)
+    metric = NE._saem_hessian_metric(model, 2, x[1:1], x[2:2], prior, η; diagonal = true)
+    @test metric ≈ inv.(exact_diagonal) rtol = 1e-8
+    @test NE._saem_hessian_metric(inner, 2, x[1:1], x[2:2], prior, η; diagonal = true) ==
+        NE._prior_variances(prior, 2)
+    # NUTS on the declared model reaches the exact maximum, as on the undeclared one.
+    exact(y) = occasions_exact_nested(inner, y)
+    x̂, best = exact_maximum(exact, vcat(OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0))
+    nuts = WarmupHMCNUTS(warmup_draws = 8, warmup_evaluations = 50,
+        stepsize_adaptation_limit = 10, max_tree_depth = 6)
+    fit = saem(model, OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0; rng = Xoshiro(1),
+        kernel = nuts, options = SAEMOptions(iterations = 60, burnin = 30))
+    @test best - exact(vcat(fit.theta, fit.sigma, fit.omega)) < 0.5
+    @test exp(fit.omega[2]) ≈ exp(x̂[4]) rtol = 0.02
 end
