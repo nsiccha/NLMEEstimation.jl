@@ -156,7 +156,10 @@ log-likelihoods of `approximation`, which needs objective values only: no
 population derivatives of the model. Each coordinate `j` moves by
 `step * max(1, |x_j|)`. `:s` takes `2p + 1` evaluations for `p` estimated
 coordinates; `:r` and `:rs` take `2p² + 1`. Every evaluation warm-starts the
-subject modes from the same solution at the estimate.
+subject modes from the same solution at the estimate. With
+[`LouisInformation`](@ref) both matrices come instead from posterior draws of
+the random effects at the point (Louis's identity), and `step` only differences
+the population gradient for the curvature in θ and σ.
 
 For a FOCE(I) fit, the defaults reuse its subjects, its fitted coordinates
 (`fit.free`) and its interaction setting, so the step differentiates the fitted
@@ -234,9 +237,9 @@ function _covariance_step(model, θ, σ, ω, subjects, η0, method, step, approx
     lp0 === nothing || lp0 isa Real || throw(ArgumentError(
         "population_logprior must return a real log density or nothing"))
     p = length(free)
-    R, S, G, gradient, h, evaluations = with_progress(progress,
-            method == :s ? 2p + 1 : 2p^2 + 1;
-            description = "Marginal likelihoods") do counter
+    count, label = _covariance_progress(prepared, method, p)
+    R, S, G, gradient, h, evaluations = with_progress(progress, count;
+            description = label) do counter
         _covariance_matrices(prepared, split, ŷ, free, step, method, lp0, subject_ids,
             model, counter)
     end

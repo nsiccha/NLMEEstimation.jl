@@ -562,16 +562,19 @@ end
 # Initial covariance for a per-subject HMC warmup. The Hessian is taken only in
 # η_i; an indefinite local negative Hessian is regularized before inversion.
 # Without η Hessians it is the prior covariance of subject i, or its diagonal.
+# A model that declares `eta_hessian_sparsity` gives a sparse Hessian, so the
+# diagonal metric of a subject with thousands of nested effects never forms a
+# dense matrix; the dense metric still does.
 function _saem_hessian_metric(model, i, θ, σ, prior, η;
         curvature_floor::Real = 1e-4, diagonal::Bool = false)
     isfinite(curvature_floor) && curvature_floor > 0 || throw(ArgumentError(
         "curvature_floor must be finite and positive"))
-    if !provides_eta_hessian(model)
+    if !_reports_eta_hessians(model)
         diagonal && return _prior_variances(prior, i)
         return _prior_covariance(prior, i)
     end
-    _, _, _, H = complete_data_loglikelihood_gradient_and_hessian(
-        model, i, θ, σ, prior, η)
+    H = only(_complete_hessians(model, [i], θ, σ, prior,
+        _single_eta_batch(nlme_layout(model), η)))
     diagonal && return inv.(max.(-diag(H), curvature_floor))
     eig = eigen(Symmetric(-Matrix(H)))
     scale = eig.vectors * Diagonal(inv.(max.(eig.values, curvature_floor))) * eig.vectors'

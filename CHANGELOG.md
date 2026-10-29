@@ -14,6 +14,22 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.1.4
+
+- `covariance_step(…; approximation = LouisInformation(; draws, burnin, kernel))`
+  builds `R` and `S` by Louis's missing-information identity from NUTS draws
+  of every subject's random effects at the point: SAEM's stochastic-approximation
+  Fisher information (Monolix's default, nlmixr2's SAEM `"sa"`). It needs no
+  marginal likelihood and no η curvature, works for any likelihood and layout,
+  and keeps no `n × n` matrix per subject. `R` and `S` carry Monte Carlo error,
+  largest for weakly informed variance components. `marginal_loglikelihood`
+  refuses it.
+- SAEM's NUTS warmup metric (and MALA's `:hessian` metric) uses the sparse η
+  Hessian when the model declares `eta_hessian_sparsity`, so the default
+  diagonal metric of a subject with thousands of nested effects no longer
+  forms a dense `n × n` matrix. A gradient-only model that declares a pattern
+  now gets a curvature-based metric instead of the prior's.
+
 ## 0.1.3
 
 - New optional protocol method `eta_hessian_sparsity(model, i)`: a model
