@@ -136,6 +136,14 @@ function _precision_times(p::_RaggedSubjectPrior, η)
     return y
 end
 
+# Ωv and Lᵀv, with Ω = LLᵀ the subject's prior covariance.
+_covariance_times(p::NormalREPrior, v) = p.cholesky_factor * (p.cholesky_factor' * v)
+_covariance_times(p::_RaggedSubjectPrior, v) =
+    _blockwise((L, x) -> L * (L' * x), p, p.prior.cholesky_factors, v)
+_factor_transpose_times(p::NormalREPrior, v) = p.cholesky_factor' * v
+_factor_transpose_times(p::_RaggedSubjectPrior, v) =
+    _blockwise((L, x) -> L' * x, p, p.prior.cholesky_factors, v)
+
 # The prior variances of subject i's η, the diagonal of Ω_i.
 _factor_row_variances(L) = [sum(abs2(L[j, k]) for k in 1:j) for j in axes(L, 1)]
 _prior_variances(prior::NormalREPrior, i) = _factor_row_variances(prior.cholesky_factor)

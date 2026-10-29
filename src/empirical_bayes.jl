@@ -27,11 +27,13 @@ polishing step, so the returned mode is stationary to roundoff.
 struct NewtonEBE <: EBEMethod end
 
 """
-    QuasiNewtonEBE()
+    QuasiNewtonEBE(; memory = 20)
 
-BFGS per subject on η gradients, starting from the prior covariance Ω as the
-inverse-Hessian approximation (rescaled to the observed curvature at the first
-update), with backtracking (halving) to the Armijo condition.
+Limited-memory BFGS per subject on η gradients, with backtracking (halving) to the
+Armijo condition. The inverse-Hessian approximation applies the last `memory`
+curvature pairs to the prior covariance Ω, rescaled at every update to the curvature
+last observed. A subject with `n` random effects therefore stores `O(memory · n)`
+numbers, and Ω is applied block by block for a [`RaggedNLMELayout`](@ref).
 A subject converges once its standardized gradient `‖Lᵀg‖∞ ≤ gtol`, with `Ω = LLᵀ`
 (the gradient with respect to the standardized random effects `L⁻¹η`), and the
 complete-data density is concave there.
@@ -49,7 +51,13 @@ definite, the next step is [`NewtonEBE`](@ref)'s trust-region step with a radius
 one prior standard deviation, halved until the density increases, and BFGS restarts
 from Ω.
 """
-struct QuasiNewtonEBE <: EBEMethod end
+struct QuasiNewtonEBE <: EBEMethod
+    memory::Int
+    function QuasiNewtonEBE(; memory::Integer = 20)
+        memory >= 1 || throw(ArgumentError("QuasiNewtonEBE memory must be positive, got $memory"))
+        return new(memory)
+    end
+end
 
 """
     default_ebe_method(model) -> EBEMethod
@@ -386,11 +394,14 @@ function _ebe_result(H::AbstractVector{<:AbstractVector}, subjects, hessians, �
 end
 
 # The lower Cholesky factor L of the prior covariance of subject i's η, Ω_i = LLᵀ;
-# from it the covariance and the standardized gradient ‖Lᵀg‖∞.
+# from it the covariance and the standardized gradient ‖Lᵀg‖∞, which is taken block
+# by block for a ragged subject.
 _prior_eltype(prior::NormalREPrior) = eltype(prior.precision)
 _prior_factor(prior::NormalREPrior, i) = prior.cholesky_factor
+_prior_factor(prior::NormalREPrior) = prior.cholesky_factor
 _prior_covariance(prior, i) = (L = _prior_factor(prior, i); Matrix(L * L'))
-_standardized_norm(prior, i, g) = maximum(abs, _prior_factor(prior, i)' * g; init = zero(eltype(g)))
+_standardized_norm(prior, i, g) =
+    maximum(abs, _factor_transpose_times(_subject_prior(prior, i), g); init = zero(eltype(g)))
 
 # Sufficient increase: at least 1e-4 of the predicted increase (the Armijo test for
 # a BFGS step's linear prediction, the ratio test for a quadratic model) — or, for a
@@ -576,24 +587,54 @@ _reopen_nonconcave!(::NewtonEBE, state, model, subjects, θ, σ, prior, H, G, co
 
 # ── Quasi-Newton (BFGS) ───────────────────────────────────────────────────────
 
-# Per-subject inverse-Hessian approximations of -f. They start from the prior
-# covariance Ω (the exact inverse Hessian when the data are uninformative), rescaled
-# at the first update by sᵀy / yᵀΩy (Shanno–Phua) to the curvature actually observed.
-# Alongside: the prior's Cholesky factor L per subject, and the complete-data Hessian
-# block at the subject's current point where it has been computed (`nothing`
-# otherwise; a step discards it).
-struct BFGSState{T, FS}
-    inverse_hessians::Vector{Matrix{T}}
-    rescaled::Vector{Bool}
-    factors::FS
+# Per-subject limited-memory inverse-Hessian approximations of -f (Nocedal & Wright
+# 2006, Algorithm 7.4): the last `memory` curvature pairs (s, y, 1/sᵀy) applied to
+# the initial matrix γΩ. It starts at γ = 1, the prior covariance Ω (the exact
+# inverse Hessian when the data are uninformative), and every stored pair sets
+# γ = sᵀy / yᵀΩy (Shanno–Phua), the curvature last observed. Rescaling at every
+# update rather than only the first halved the iterations on nested subjects of
+# 125–4,000 units with 20 pairs, and kept them below the full BFGS update's.
+# Ω is applied through the subject's prior, block by block for a ragged subject.
+# Alongside: the complete-data Hessian block at the subject's current point where
+# it has been computed (`nothing` otherwise; a step discards it).
+struct BFGSState{T, P}
+    priors::Vector{P}
+    scales::Vector{T}
+    pairs::Vector{Vector{Tuple{Vector{T}, Vector{T}, T}}}
+    memory::Int
     hessians::Vector{Union{Nothing, Matrix{T}}}
 end
 
-function _initial_curvature(::QuasiNewtonEBE, model, subjects, θ, σ, prior, H, G)
+function _initial_curvature(method::QuasiNewtonEBE, model, subjects, θ, σ, prior, H, G)
     T = _eta_eltype(H)
     n = length(subjects)
-    return BFGSState([Matrix{T}(_prior_covariance(prior, i)) for i in subjects], fill(false, n),
-        [_prior_factor(prior, i) for i in subjects], Vector{Union{Nothing, Matrix{T}}}(nothing, n))
+    return BFGSState([_subject_prior(prior, i) for i in subjects], ones(T, n),
+        [Tuple{Vector{T}, Vector{T}, T}[] for _ in 1:n], method.memory,
+        Vector{Union{Nothing, Matrix{T}}}(nothing, n))
+end
+
+# Back to γΩ with no pairs, after an escape step.
+function _restart!(state::BFGSState, k)
+    state.scales[k] = one(eltype(state.scales))
+    empty!(state.pairs[k])
+    return state
+end
+
+# The approximate inverse Hessian of subject k times g, by the two-loop recursion.
+function _inverse_hessian_times(state::BFGSState, k, g)
+    pairs = state.pairs[k]
+    q = Vector{eltype(state.scales)}(g)
+    α = similar(q, length(pairs))
+    for j in reverse(eachindex(pairs))
+        s, y, ρ = pairs[j]
+        α[j] = ρ * dot(s, q)
+        axpy!(-α[j], y, q)
+    end
+    r = state.scales[k] * _covariance_times(state.priors[k], q)
+    for (j, (s, y, ρ)) in enumerate(pairs)
+        axpy!(α[j] - ρ * dot(y, r), s, r)
+    end
+    return r
 end
 
 # Whether subject k's Hessian block shows that the density is not concave at its
@@ -626,26 +667,25 @@ _predicted(trial::QuasiNewtonTrial, g) = trial.slope + trial.curvature / 2
 function _first_trial(::QuasiNewtonEBE, state, k, g)
     if _nonconcave(state, k)
         Hk = state.hessians[k]
-        step = _trust_region_trial(Hk, state.factors[k], g, one(eltype(Hk))).step
+        step = _trust_region_trial(Hk, _prior_factor(state.priors[k]), g, one(eltype(Hk))).step
         return QuasiNewtonTrial(step, dot(g, step), dot(step, Hk * step), true, true)
     end
-    step = state.inverse_hessians[k] * g
+    step = _inverse_hessian_times(state, k, g)
     return QuasiNewtonTrial(step, dot(g, step), zero(eltype(step)), true, false)
 end
 _next_trial(::QuasiNewtonEBE, trial, state, k, g) =
     QuasiNewtonTrial(trial.step / 2, trial.slope / 2, trial.curvature / 4, false, trial.escape)
 
-# BFGS update of the inverse Hessian of -f with s = Δη, y = Δ(-g). A pair with
-# sᵀy ≤ 0 shows the density curving upward along s: BFGS cannot represent that, so the
-# update is skipped and the Hessian block at the new point is checked. After an escape
-# step BFGS restarts from Ω.
+# BFGS update of the inverse Hessian of -f with s = Δη, y = Δ(-g): the pair is stored,
+# dropping the oldest beyond `memory`. A pair with sᵀy ≤ 0 shows the density curving
+# upward along s: BFGS cannot represent that, so the update is skipped and the Hessian
+# block at the new point is checked. After an escape step BFGS restarts from Ω.
 function _update_curvature!(::QuasiNewtonEBE, state, model, subjects, θ, σ, prior, H, accepted, trials, gains, previous_G, Ga)
     upward = Int[]
     for (j, k) in enumerate(accepted)
         state.hessians[k] = nothing
         if trials[j].escape
-            state.inverse_hessians[k] = _prior_covariance(prior, subjects[k])
-            state.rescaled[k] = false
+            _restart!(state, k)
             continue
         end
         s = trials[j].step
@@ -655,14 +695,10 @@ function _update_curvature!(::QuasiNewtonEBE, state, model, subjects, θ, σ, pr
             push!(upward, j)
             continue
         end
-        B = state.inverse_hessians[k]
-        if !state.rescaled[k]
-            B = (sy / dot(y, B * y)) * B
-            state.rescaled[k] = true
-        end
-        ρ = 1 / sy
-        V = I - ρ * y * s'
-        state.inverse_hessians[k] = V' * B * V + ρ * s * s'
+        state.scales[k] = sy / dot(y, _covariance_times(state.priors[k], y))
+        pairs = state.pairs[k]
+        length(pairs) == state.memory && popfirst!(pairs)
+        push!(pairs, (copy(s), y, 1 / sy))
     end
     ks = accepted[upward]
     _store_hessians!(state, model, subjects, θ, σ, prior, ks, _columns(H, ks), _columns(Ga, upward))

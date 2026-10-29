@@ -65,12 +65,14 @@ _ragged_start(η0, layout, subjects) = throw(ArgumentError(
 
 _prior_eltype(::RaggedNormalREPrior{T}) where {T} = T
 
-# Block diagonal: one family factor per block instance.
-function _prior_factor(prior::RaggedNormalREPrior{T}, i) where {T}
-    n = neta(prior.layout, i)
+# Block diagonal: one family factor per block instance. Dense, for the solver
+# steps that work on a dense Hessian block.
+_prior_factor(prior::RaggedNormalREPrior, i) = _prior_factor(_subject_prior(prior, i))
+function _prior_factor(p::_RaggedSubjectPrior{T}) where {T}
+    n = neta(p)
     L = zeros(T, n, n)
-    for (family, r) in _ragged_subject_blocks(prior.layout, i)
-        L[r, r] = prior.cholesky_factors[family]
+    for (family, r) in p.blocks
+        L[r, r] = p.prior.cholesky_factors[family]
     end
     return LowerTriangular(L)
 end

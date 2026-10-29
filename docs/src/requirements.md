@@ -37,7 +37,7 @@ Some estimators need more structure:
 
 All of these are first-order quantities, except the Hessian blocks:
 
-- `empirical_bayes` picks `NewtonEBE()` by default only when the model provides Hessian blocks (`default_ebe_method`); otherwise it uses `QuasiNewtonEBE()`, a lockstep BFGS method. `ebe_covariances` returns the per-subject Laplace covariance `(-∇²f)⁻¹` and therefore needs the Hessian blocks.
+- `empirical_bayes` picks `NewtonEBE()` by default only when the model provides Hessian blocks (`default_ebe_method`); otherwise it uses `QuasiNewtonEBE()`, a lockstep limited-memory BFGS method, whose memory per subject grows linearly with its number of random effects. `ebe_covariances` returns the per-subject Laplace covariance `(-∇²f)⁻¹` and therefore needs the Hessian blocks.
 - `QuasiNewtonEBE()` checks each subject's curvature once no subject is still iterating, and wherever BFGS meets upward curvature. It does not report a saddle point as a mode; it leaves it with a trust-region step. The check uses the Hessian blocks when the model provides them, which costs no extra calls because the result reports those blocks. Otherwise it uses forward differences of batched ∇η, at `K` extra batched gradient calls per check.
 - `focei` always computes its subject modes with `QuasiNewtonEBE()`. Its outer search over `(θ, σ, ω)` is NLopt's derivative-free BOBYQA, so FOCE(I) takes no population derivatives.
 - SAEM's MH transitions use only values. MALA and NUTS need ∇η. A Hessian only seeds their initial metric. Without one, they use Ω.

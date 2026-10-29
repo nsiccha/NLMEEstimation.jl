@@ -158,7 +158,8 @@ gradient call, plus batched value calls for its trial steps.
 - **`NewtonEBE()`**: trust-region Newton on the Hessian blocks, which also leaves
   saddle points and non-concave regions of a subject's density. This is the default
   when the model provides Hessian blocks.
-- **`QuasiNewtonEBE()`**: BFGS on gradients. This is the default for gradient-only
+- **`QuasiNewtonEBE()`**: limited-memory BFGS on gradients (`memory = 20`
+  curvature pairs per subject). This is the default for gradient-only
   models. It checks each subject's curvature and leaves saddle points with
   Newton's trust-region step. The check uses the Hessian blocks when the model
   provides them, and forward differences of batched gradients otherwise.
