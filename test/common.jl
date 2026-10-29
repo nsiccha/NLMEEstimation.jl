@@ -21,8 +21,8 @@ export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH,
     LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
     occasions_exact_nested, occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly,
-    SparseDeclared, occasions_pattern, occasions_sparse, PoissonOccasions, poisson_model,
-    poisson_sparse, poisson_exact
+    SparseDeclared, occasions_pattern, occasions_sparse, OccasionsBlocks, PoissonOccasions,
+    poisson_model, poisson_sparse, poisson_exact
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -402,6 +402,43 @@ function occasions_pattern(m, i)
     return sparse(vcat(1:n, fill(1, n - 1), 2:n), vcat(1:n, 2:n, fill(1, n - 1)), true, n, n)
 end
 occasions_sparse(m::RaggedOccasions) = SparseDeclared(m, i -> occasions_pattern(m, i))
+
+# The occasions model with dense η Hessians, per subject and as blocks, and with its
+# pattern declared too unless `declared = false`: the shape of a model that provides
+# Hessian blocks at one Hessian-vector product per coordinate (BRM's adapter), where
+# every subject's Hessian is an n × n matrix. `dense_hessians` counts the Hessians
+# formed.
+struct OccasionsBlocks
+    inner::RaggedOccasions
+    declared::Bool
+    dense_hessians::Base.RefValue{Int}
+end
+OccasionsBlocks(inner; declared = true) = OccasionsBlocks(inner, declared, Ref(0))
+NE.nsubjects(m::OccasionsBlocks) = NE.nsubjects(m.inner)
+NE.nlme_layout(m::OccasionsBlocks) = NE.nlme_layout(m.inner)
+NE.mu_referencing(m::OccasionsBlocks) = NE.mu_referencing(m.inner)
+NE.conditional_loglikelihood(m::OccasionsBlocks, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood(m.inner, i, θ, σ, η)
+NE.conditional_loglikelihood_and_gradient(m::OccasionsBlocks, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood_and_gradient(m.inner, i, θ, σ, η)
+NE.conditional_loglikelihood_and_population_gradient(m::OccasionsBlocks, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood_and_population_gradient(m.inner, i, θ, σ, η)
+NE.provides_eta_hessian(::OccasionsBlocks) = true
+NE.eta_hessian_sparsity(m::OccasionsBlocks, i) = m.declared ? occasions_pattern(m.inner, i) : nothing
+function occasions_dense_hessian(m::OccasionsBlocks, i, σ)
+    m.dense_hessians[] += 1
+    counts = length.(m.inner.y[i])
+    B = Matrix(Diagonal(vcat(sum(counts), counts)))
+    B[1, 2:end] .= counts
+    B[2:end, 1] .= counts
+    return B ./ -exp(2σ[1])
+end
+function NE.conditional_loglikelihood_gradient_and_hessian(m::OccasionsBlocks, i::Integer, θ, σ, η)
+    ℓ, g = NE.conditional_loglikelihood_and_gradient(m.inner, i, θ, σ, η)
+    return ℓ, g, occasions_dense_hessian(m, i, σ)
+end
+NE.conditional_loglikelihood_hessian_blocks(m::OccasionsBlocks, subjects, θ, σ, H) =
+    [occasions_dense_hessian(m, i, σ) for i in subjects]
 
 # Nested Poisson counts, log λ_ijk = θ + a_i + b_ij, with a_i ~ N(0, ωa²) and
 # b_ij ~ N(0, ωb²) from two covariance families and two to four counts per unit.
