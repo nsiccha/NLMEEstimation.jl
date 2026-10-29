@@ -109,9 +109,10 @@ end
         approximation = ImportanceSampling(draws = 2000), rng = Xoshiro(4))
     @test is.R ≈ exact_R rtol = 0.05
 
-    # A ragged SAEM fit defaults to importance sampling. Its draws are fixed in
-    # the mu-referenced coordinates, so perturbing θ (mu-referenced) or ω
-    # reuses the conditional values: only σ and its pairs evaluate the model.
+    # Importance sampling on a ragged SAEM fit. Its draws are fixed in the
+    # mu-referenced coordinates, so perturbing θ (mu-referenced) or ω reuses the
+    # conditional values: only σ and its pairs evaluate the model. (Ragged fits
+    # default to Laplace or Louis's identity: test/ragged_covariance.jl.)
     occasions = occasions_model()
     saem_fit = saem(occasions, [1.9], [log(0.3)], [log(0.5), log(0.4)];
         rng = Xoshiro(5), options = SAEMOptions(iterations = 120, burnin = 60))
@@ -129,7 +130,6 @@ end
     # take well under one draw's worth of calls per subject.
     nsub = NE.nsubjects(occasions)
     @test occasions.calls[] < 3 * draws * nsub + 200 * nsub
-    @test covariance_step(occasions, saem_fit; method = :s).approximation isa ImportanceSampling
 end
 
 @testset "reference model: Bateman kernel for either rate ordering" begin

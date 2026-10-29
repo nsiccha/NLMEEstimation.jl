@@ -21,7 +21,8 @@ export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH,
     LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
     occasions_exact_nested, occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly,
-    SparseDeclared, occasions_pattern, occasions_sparse
+    SparseDeclared, occasions_pattern, occasions_sparse, PoissonOccasions, poisson_model,
+    poisson_sparse, poisson_exact
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -396,11 +397,136 @@ end
 
 # The occasions model's η Hessian pattern for subject i: the subject effect (η₁)
 # shares observations with every occasion effect, and occasion effects share none.
-function occasions_pattern(m::RaggedOccasions, i)
+function occasions_pattern(m, i)
     n = 1 + length(m.y[i])
     return sparse(vcat(1:n, fill(1, n - 1), 2:n), vcat(1:n, 2:n, fill(1, n - 1)), true, n, n)
 end
 occasions_sparse(m::RaggedOccasions) = SparseDeclared(m, i -> occasions_pattern(m, i))
+
+# Nested Poisson counts, log λ_ijk = θ + a_i + b_ij, with a_i ~ N(0, ωa²) and
+# b_ij ~ N(0, ωb²) from two covariance families and two to four counts per unit.
+# The unit posteriors are far from Gaussian when counts are small. θ is
+# mu-referenced through a_i and there is no σ, so the model provides only the
+# conditional log-density and its η gradient: no population gradient and no η
+# Hessian. `poisson_exact` integrates the effects out by nested quadrature.
+struct PoissonOccasions
+    y::Vector{Vector{Vector{Int}}}
+end
+
+NE.nsubjects(m::PoissonOccasions) = length(m.y)
+NE.nlme_layout(m::PoissonOccasions) = RaggedNLMELayout(1, 0, [1, 1],
+    [vcat(1, fill(2, length(units))) for units in m.y])
+NE.mu_referencing(m::PoissonOccasions) =
+    MuReferencing([1], [reshape(vcat(1.0, zeros(length(u))), :, 1) for u in m.y])
+
+logfactorial(k) = sum(log, 2:k; init = 0.0)
+
+function NE.conditional_loglikelihood_and_gradient(m::PoissonOccasions, i::Integer, θ, σ, η)
+    ℓ = zero(θ[1] + η[1])
+    g = zeros(typeof(ℓ), length(η))
+    for (j, counts) in enumerate(m.y[i])
+        c = θ[1] + η[1] + η[1+j]
+        for k in counts
+            ℓ += k * c - exp(c) - logfactorial(k)
+            g[1+j] += k - exp(c)
+        end
+    end
+    g[1] = sum(@view g[2:end])
+    return ℓ, g
+end
+NE.conditional_loglikelihood(m::PoissonOccasions, i::Integer, θ, σ, η) =
+    first(NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η))
+
+poisson_sparse(m::PoissonOccasions) = SparseDeclared(m, i -> occasions_pattern(m, i))
+
+# `units[i]` units for subject i; log λ = θ + a + b.
+function poisson_model(; seed = 7, units = [10, 20, 40, 80], θ = 0.0, ωa = 0.5, ωb = 0.5)
+    rng = Xoshiro(seed)
+    y = map(units) do n
+        a = ωa * randn(rng)
+        map(1:n) do _
+            λ = exp(θ + a + ωb * randn(rng))
+            map(1:rand(rng, 2:4)) do _
+                k, p = 0, rand(rng)  # Knuth's Poisson draw: λ is small here
+                while p > exp(-λ)
+                    k += 1
+                    p *= rand(rng)
+                end
+                k
+            end
+        end
+    end
+    return PoissonOccasions(y)
+end
+
+# The exact log marginal at x = [θ, log ωa, log ωb] by nested Gauss–Hermite
+# quadrature: over each unit effect b given a, and over the subject effect a, both
+# centred and scaled at their own posteriors. `poisson_exact(m, x0)` places the
+# nodes at x0; the returned function evaluates the marginal at any x on those
+# fixed nodes, so it is smooth in x and ForwardDiff differentiates it exactly.
+const GH_NODES = let n = 40
+    e = eigen(SymTridiagonal(zeros(n), sqrt.((1:n-1) ./ 2)))
+    e.values, sqrt(π) .* e.vectors[1, :] .^ 2
+end
+
+logsumexp(v) = (m = maximum(v); m + log(sum(x -> exp(x - m), v)))
+
+# log ∫ N(b; 0, ωb²) Π_k Pois(k; exp(c + b)) db on nodes centred at b₀, scale s.
+function poisson_unit(counts, c, ωb, (b0, s))
+    x, w = GH_NODES
+    return logsumexp(map(eachindex(x)) do q
+        b = b0 + sqrt(2) * s * x[q]
+        v = -b^2 / (2ωb^2) - log(ωb) - log(2π) / 2 + log(w[q]) + x[q]^2 + log(sqrt(2) * s)
+        for k in counts
+            v += k * (c + b) - exp(c + b) - logfactorial(k)
+        end
+        v
+    end)
+end
+
+# The unit posterior's mode and its Laplace scale, by Newton.
+function poisson_unit_center(counts, c, ωb)
+    b, n, total = 0.0, length(counts), sum(counts)
+    for _ in 1:50
+        b -= (total - n * exp(c + b) - b / ωb^2) / (-n * exp(c + b) - 1 / ωb^2)
+    end
+    return b, sqrt(1 / (n * exp(c + b) + 1 / ωb^2))
+end
+
+function poisson_subject(units, θ, a, ωa, ωb, centers)
+    v = -a^2 / (2ωa^2) - log(ωa) - log(2π) / 2
+    for (counts, center) in zip(units, centers)
+        v += poisson_unit(counts, θ + a, ωb, center)
+    end
+    return v
+end
+
+function poisson_exact(m::PoissonOccasions, x0)
+    θ0, ωa0, ωb0 = x0[1], exp(x0[2]), exp(x0[3])
+    x, w = GH_NODES
+    nodes = map(m.y) do units
+        f(a) = poisson_subject(units, θ0, a, ωa0, ωb0,
+            [poisson_unit_center(u, θ0 + a, ωb0) for u in units])
+        d2(a) = ForwardDiff.derivative(t -> ForwardDiff.derivative(f, t), a)
+        a = 0.0
+        for _ in 1:30
+            a -= ForwardDiff.derivative(f, a) / d2(a)
+        end
+        s = sqrt(-1 / d2(a))
+        a, s, [[poisson_unit_center(u, θ0 + a + sqrt(2) * s * x[q], ωb0) for u in units]
+            for q in eachindex(x)]
+    end
+    return function (y)
+        θ, ωa, ωb = y[1], exp(y[2]), exp(y[3])
+        return sum(zip(m.y, nodes)) do (units, (a0, s, centers))
+            logsumexp(map(eachindex(x)) do q
+                a = a0 + sqrt(2) * s * x[q]
+                poisson_subject(units, θ, a, ωa, ωb, centers[q]) + log(w[q]) + x[q]^2 +
+                    log(sqrt(2) * s)
+            end)
+        end
+    end
+end
 
 # `units[i]` occasions for subject i, when given; otherwise one to three.
 function occasions_model(; seed = 9, n = 8, gaussian = false, units = nothing)
