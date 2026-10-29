@@ -9,7 +9,7 @@ import Optim
 isdefined(@__MODULE__, :TestCommon) || include("common.jl")
 using .TestCommon: GROWTH_LAYOUT, LinearGrowth, growth_model, RaggedOccasions,
     occasions_model, occasions_exact, occasions_exact_nested, occasions_unit_posterior,
-    occasions_sparse
+    occasions_sparse, OccasionsBlocks
 
 # The growth model on a ragged layout with one block of its single family per
 # subject: the same model, with each subject's η as its own vector.
@@ -147,11 +147,26 @@ end
     @test metric ≈ inv.(exact_diagonal) rtol = 1e-8
     @test NE._saem_hessian_metric(inner, 2, x[1:1], x[2:2], prior, η; diagonal = true) ==
         NE._prior_variances(prior, 2)
+    # A model that also provides dense Hessians (BRM's adapter) gets the same sparse
+    # metric and forms none of them; without a declared pattern its metric is read
+    # off a dense one.
+    blocks, undeclared = OccasionsBlocks(inner), OccasionsBlocks(inner; declared = false)
+    @test NE._saem_hessian_metric(blocks, 2, x[1:1], x[2:2], prior, η; diagonal = true) == metric
+    @test NE._saem_hessian_metric(undeclared, 2, x[1:1], x[2:2], prior, η; diagonal = true) ≈
+        inv.(exact_diagonal) rtol = 1e-12
+    @test (blocks.dense_hessians[], undeclared.dense_hessians[]) == (0, 1)
+    nuts = WarmupHMCNUTS(warmup_draws = 8, warmup_evaluations = 50,
+        stepsize_adaptation_limit = 10, max_tree_depth = 6)
+    # Nor does SAEM with NUTS, whose fit equals the gradient-only declared model's.
+    short = SAEMOptions(iterations = 4, burnin = 2, mcmc_burnin = 2)
+    fit_blocks = saem(blocks, OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0; rng = Xoshiro(2),
+        kernel = nuts, options = short)
+    @test blocks.dense_hessians[] == 0
+    @test fit_blocks.eta == saem(model, OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0;
+        rng = Xoshiro(2), kernel = nuts, options = short).eta
     # NUTS on the declared model reaches the exact maximum, as on the undeclared one.
     exact(y) = occasions_exact_nested(inner, y)
     x̂, best = exact_maximum(exact, vcat(OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0))
-    nuts = WarmupHMCNUTS(warmup_draws = 8, warmup_evaluations = 50,
-        stepsize_adaptation_limit = 10, max_tree_depth = 6)
     fit = saem(model, OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0; rng = Xoshiro(1),
         kernel = nuts, options = SAEMOptions(iterations = 60, burnin = 30))
     @test best - exact(vcat(fit.theta, fit.sigma, fit.omega)) < 0.5
