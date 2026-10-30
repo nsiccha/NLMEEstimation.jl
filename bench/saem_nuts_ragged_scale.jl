@@ -1,7 +1,10 @@
 # SAEM with `WarmupHMCNUTS` on ragged subjects with tens of thousands of nested
 # random effects, for a model that provides dense η Hessian blocks and declares its
-# η Hessian pattern (BRM's adapter declares both): what each subject's warmup metric
-# costs, how many dense Hessians the fit forms, and its time and peak memory.
+# η Hessian pattern (BRM's adapter declares both): what the sparse η-curvature
+# diagonal costs per subject (MALA's `:hessian` metric; before NLMEEstimation 0.2.0
+# also the NUTS warmup metric), how many dense Hessians the NUTS fit forms (none
+# from 0.2.0: the kernel asks for no Hessian and no pattern), and its time and peak
+# memory.
 #
 # Run from the repository root with the test environment:
 #   julia --project=test bench/saem_nuts_ragged_scale.jl [output]
@@ -66,9 +69,11 @@ function metric_row(model, i, x, prior)
 end
 
 function main()
-    report("SAEM's NUTS warmup metric and fit on ragged subjects with many nested effects, for a ",
-        "model with dense Hessian blocks and a declared pattern: Julia $VERSION, NLMEEstimation ",
-        readchomp(`git -C $(joinpath(@__DIR__, "..")) rev-parse --short HEAD`))
+    report("The sparse η-curvature diagonal and SAEM's NUTS fit on ragged subjects with many ",
+        "nested effects, for a model with dense Hessian blocks and a declared pattern: Julia ",
+        "$VERSION, NLMEEstimation ",
+        readchomp(`git -C $(joinpath(@__DIR__, "..")) rev-parse --short HEAD`),
+        ", WarmupHMC ", pkgversion(NE.WarmupHMC))
     # Compile every path on a small model first, so the timings are warm.
     small = occasions_model(seed = 0, units = [5, 8])
     for declared in (true, false)
@@ -86,9 +91,9 @@ function main()
     declared, undeclared = OccasionsBlocks(inner), OccasionsBlocks(inner; declared = false)
     prior = re_prior(declared, x[3:4])
 
-    report("\nwarmup metric (diagonal) per subject at η = 0, declared pattern: seconds, MB ",
-        "allocated, dense Hessians formed, max |metric × exact curvature − 1|, and the seconds ",
-        "the pattern's star coloring takes on its own")
+    report("\nsparse η-curvature diagonal (MALA's :hessian metric) per subject at η = 0, declared ",
+        "pattern: seconds, MB allocated, dense Hessians formed, max |metric × exact curvature − 1|, ",
+        "and the seconds the pattern's star coloring takes on its own")
     for (i, n) in enumerate(UNITS)
         report(n, "\t", metric_row(declared, i, x, prior))
     end
@@ -108,8 +113,8 @@ function main()
         @sprintf("nested SD %.4f (maximum likelihood %.4f)", exp(xf[4]), exp(x[4])))
 
     # Last, so that its memory does not count in the peaks above.
-    report("\nthe same metric without a declared pattern (a dense Hessian per subject, as for ",
-        "every model with Hessian blocks before NLMEEstimation 0.1.4)")
+    report("\nthe same curvature diagonal without a declared pattern (a dense Hessian per ",
+        "subject, as for every model with Hessian blocks before NLMEEstimation 0.1.4)")
     for (i, n) in enumerate(UNITS)
         report(n, "\t", n <= 10_000 ? metric_row(undeclared, i, x, prior) :
             @sprintf("(skipped: one dense Hessian is %.1f GB)", (n + 1)^2 * 8 / 1e9))

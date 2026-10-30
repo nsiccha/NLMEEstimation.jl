@@ -413,7 +413,7 @@ end
     @test screens[] < 40
 end
 
-@testset "SAEM Hessian warmup metric" begin
+@testset "SAEM MALA Hessian metric" begin
     model = LinearSAEM([[1.0, 2.0]])
     prior = re_prior(model, [log(0.5)])
     scale = NE._saem_hessian_metric(model, 1, [0.0], [log(0.5)], prior, [0.0])
