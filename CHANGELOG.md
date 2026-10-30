@@ -14,6 +14,33 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.3
+
+- `covariance_step` takes the Laplace curvature from a model's own gradient. A
+  model that computes its Laplace approximation itself, such as a joint program
+  with an embedded Laplace, declares `provides_laplace_gradient(model) = true`
+  and implements `laplace_marginals_and_gradient(model, subjects, θ, σ, ω, H)`:
+  each listed subject's Laplace marginal log-likelihood, and the gradient of
+  their sum in θ, σ and ω, including the mode's dependence on them. With
+  `AdaptiveGaussHermite(nodes = 1)`, `R` is then the central difference of that
+  gradient and `S` comes from the per-subject values at the same points, as in
+  TMB's `sdreport`: `2p + 1` calls for `p` estimated coordinates and every
+  method, where differences of marginal values take `2p² + 1` for `:r` and
+  `:rs` (601 rather than 180,001 at 300 coordinates). The package makes no mode
+  search of its own on that path, adds a population prior's gradient
+  (`population_logprior_and_gradient`), and maps the ω gradient onto the
+  coordinates `fixed_omega` leaves free. Its `progress` counter is
+  `Laplace gradients`. Every other approximation, and every model without the
+  hook, is unchanged.
+- `check_protocol` checks a declared Laplace gradient: one value per subject
+  and gradients of the lengths of θ, σ and ω, values equal to
+  `marginal_loglikelihood` with `AdaptiveGaussHermite(nodes = 1)`, and the
+  gradient along a random direction equal to a central difference of the values.
+- **Changed default:** an SAEM fit on a `RaggedNLMELayout` whose model supplies
+  the Laplace gradient but reports no η Hessians now defaults to
+  `AdaptiveGaussHermite(nodes = 1)` in `covariance_step`, through that
+  gradient, instead of `LouisInformation`.
+
 ## 0.2.2
 
 - `QuasiNewtonEBE` checks the curvature of a model with gradients only and no

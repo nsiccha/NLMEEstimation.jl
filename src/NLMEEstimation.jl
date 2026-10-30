@@ -58,7 +58,8 @@ export nsubjects, nlme_layout, EvaluationStyle, PerSubjectEvaluation, BatchedEva
     conditional_loglikelihood_gradient_and_hessian, conditional_loglikelihood_hessian_blocks,
     conditional_loglikelihood_and_population_gradient,
     ad_backend, hessian_ad_backend, provides_eta_hessian, eta_hessian_sparsity, parameter_names,
-    population_logprior, population_logprior_and_gradient, population_prior_provenance
+    population_logprior, population_logprior_and_gradient, population_prior_provenance,
+    provides_laplace_gradient, laplace_marginals_and_gradient
 export mu_referencing, MuReferencing, observation_model, GaussianObservations,
     observations, observation_moments, observation_moments_and_jacobians
 export NormalREPrior, RaggedNormalREPrior, re_prior, re_logprior, re_logprior_gradient_and_hessian,
@@ -89,6 +90,7 @@ include("ragged.jl")
 include("covariance.jl")
 include("marginal.jl")
 include("louis.jl")
+include("laplace_gradient.jl")
 include("diagnostics.jl")
 include("ReferenceModels.jl")
 

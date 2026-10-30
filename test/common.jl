@@ -18,7 +18,7 @@ import Optim
 
 export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH, theoph_model,
     JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN,
-    LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject,
+    LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject, LaplaceHooked,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
     occasions_exact_nested, occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly,
     SparseDeclared, NestedWells, nested_wells, QuadraticEta, occasions_pattern, occasions_sparse, OccasionsBlocks, PoissonOccasions,
@@ -335,6 +335,50 @@ function growth_model(; seed = 5, n = 12, prior_sd = nothing)
         (1.0 + η[1]) .+ (0.5 + η[2]) .* ti .+ 0.3 .* randn(rng, length(ti))
     end
     return LinearGrowth(t, y, prior_sd)
+end
+
+# A model that supplies its own Laplace marginals and their summed gradient
+# (`provides_laplace_gradient`), the shape of a joint program with an embedded
+# Laplace (BRM): the values from a closed-form per-subject marginal
+# `marginal(inner, i, x)` at x = [θ; σ; ω], the gradient by ForwardDiff. Laplace is
+# exact for a Gaussian `inner`, so the closed form is the value the package's own
+# Laplace approximation computes. Everything else forwards to `inner`; `fixed` is
+# the model's `fixed_omega`, `hook = false` turns the hook off, and `shift` and
+# `scale` distort the values and the gradient for check_protocol's negative
+# controls. `starts` records the starting batch each call receives.
+struct LaplaceHooked{M, F}
+    inner::M
+    marginal::F
+    fixed::Any
+    hook::Bool
+    shift::Float64
+    scale::Float64
+    starts::Vector{Any}
+end
+LaplaceHooked(inner, marginal; fixed = nothing, hook = true, shift = 0.0, scale = 1.0) =
+    LaplaceHooked(inner, marginal, fixed, hook, shift, scale, Any[])
+NE.nsubjects(m::LaplaceHooked) = NE.nsubjects(m.inner)
+NE.nlme_layout(m::LaplaceHooked) = NE.nlme_layout(m.inner)
+NE.mu_referencing(m::LaplaceHooked) = NE.mu_referencing(m.inner)
+NE.fixed_omega(m::LaplaceHooked) = m.fixed
+NE.provides_eta_hessian(m::LaplaceHooked) = NE.provides_eta_hessian(m.inner)
+NE.conditional_loglikelihood(m::LaplaceHooked, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood(m.inner, i, θ, σ, η)
+NE.conditional_loglikelihood_and_gradient(m::LaplaceHooked, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood_and_gradient(m.inner, i, θ, σ, η)
+NE.conditional_loglikelihood_gradient_and_hessian(m::LaplaceHooked, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood_gradient_and_hessian(m.inner, i, θ, σ, η)
+NE.population_logprior(m::LaplaceHooked, θ, σ, ω) = NE.population_logprior(m.inner, θ, σ, ω)
+# For the population prior's gradient, which the hook leaves out.
+NE.ad_backend(::LaplaceHooked) = AutoForwardDiff()
+NE.provides_laplace_gradient(m::LaplaceHooked) = m.hook
+function NE.laplace_marginals_and_gradient(m::LaplaceHooked, subjects, θ, σ, ω, H)
+    push!(m.starts, H)
+    x = vcat(θ, σ, ω)
+    values = [m.marginal(m.inner, i, x) + m.shift for i in subjects]
+    g = m.scale .* ForwardDiff.gradient(y -> sum(i -> m.marginal(m.inner, i, y), subjects), x)
+    nθ, nσ = length(θ), length(σ)
+    return values, g[1:nθ], g[nθ+1:nθ+nσ], g[nθ+nσ+1:end]
 end
 
 # Nested intercepts with unequal subject sizes: one subject-level effect a_i and

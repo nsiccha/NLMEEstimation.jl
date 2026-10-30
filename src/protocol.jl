@@ -335,6 +335,45 @@ in SAEM and FOCE results when a prior is present; defaults to `nothing`.
 """
 population_prior_provenance(model) = nothing
 
+"""
+    provides_laplace_gradient(model) -> Bool
+
+**Optional.** Whether the model implements
+[`laplace_marginals_and_gradient`](@ref). Defaults to `false`.
+"""
+provides_laplace_gradient(model) = false
+
+"""
+    laplace_marginals_and_gradient(model, subjects, θ, σ, ω, H) -> (ℓ, ∇θ, ∇σ, ∇ω)
+
+**Optional.** The Laplace approximation of each listed subject's marginal
+log-likelihood, and the gradient of their sum. Entry `k` of `ℓ` is
+
+    log p(y_i, η̂_i | θ, σ, ω) + d_i/2 log 2π - 1/2 log det(-H_i)
+
+for `i = subjects[k]`, with `d_i` random effects, `η̂_i` the mode of the
+complete-data log-density at `(θ, σ, ω)` and `H_i` its η Hessian there, the
+value `AdaptiveGaussHermite(nodes = 1)` computes. `∇θ`, `∇σ` and `∇ω` are the
+gradients of `sum(ℓ)` in the full θ, σ and ω, with the mode's dependence on them
+included (the implicit-function theorem), so they are third-order quantities. A
+model with a [`population_logprior`](@ref) leaves it out here.
+
+`H` holds starting points for the mode search, in the batch shape of
+[`conditional_loglikelihoods`](@ref). It is the same batch at every call of a
+[`covariance_step`](@ref), so a warm-started search stays a smooth function of
+the coordinates. A summed gradient is asked for because a joint program gets it
+in one pass, where one gradient per subject would cost one pass per subject.
+
+With [`provides_laplace_gradient`](@ref), a `covariance_step` with
+`AdaptiveGaussHermite(nodes = 1)` calls only this method and the population
+prior: `2p + 1` calls for `p` coordinates, with no mode search and no conditional
+evaluation of its own. [`check_protocol`](@ref) compares its values with the
+package's Laplace approximation and its gradient with a central difference.
+"""
+laplace_marginals_and_gradient(model, subjects, θ, σ, ω, H) = throw(ArgumentError(
+    "$(typeof(model)) declares provides_laplace_gradient but implements no " *
+    "`NLMEEstimation.laplace_marginals_and_gradient(::$(typeof(model)), subjects, θ, σ, ω, H)`"))
+
 # Per-subject models: derivatives of the per-subject density.
 function _and_gradient(::PerSubjectEvaluation, model, i, θ, σ, η)
     backend = _checked_backend(model, ad_backend(model), :conditional_loglikelihood_and_gradient)

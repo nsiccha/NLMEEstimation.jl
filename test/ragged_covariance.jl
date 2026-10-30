@@ -7,7 +7,7 @@ import NLMEEstimation as NE
 import Optim
 isdefined(@__MODULE__, :TestCommon) || include("common.jl")
 using .TestCommon: occasions_model, occasions_sparse, poisson_model, poisson_sparse,
-    poisson_exact
+    poisson_exact, occasions_exact, occasions_exact_subject, LaplaceHooked
 
 # The exact maximum of a Poisson nested model's marginal, and minus its Hessian
 # there, through the fixed-node quadrature (re-centred at each outer step).
@@ -59,6 +59,13 @@ end
         LouisInformation
     @test covariance_step(occasions_sparse(occasions), fit; method = :s).approximation ==
         AdaptiveGaussHermite(nodes = 1)
+    # A model without η Hessians that supplies its Laplace gradient takes Laplace
+    # through it, starting each mode search from the fit's final chain states.
+    hooked = LaplaceHooked(occasions, occasions_exact_subject)
+    @test covariance_step(hooked, fit; method = :s).approximation ==
+        AdaptiveGaussHermite(nodes = 1)
+    @test length(hooked.starts) == 2 * 4 + 1
+    @test all(==(fit.eta), hooked.starts)
     # A model with only the η gradient, fitted end to end: its default needs no
     # population gradient.
     poisson = poisson_model()
@@ -67,6 +74,24 @@ end
     default = covariance_step(poisson, fit; rng = Xoshiro(3))
     @test default.approximation isa LouisInformation
     @test all(isfinite, default.standard_errors)
+end
+
+@testset "ragged covariance step: the model's own Laplace gradient" begin
+    # Gaussian nested intercepts, where Laplace is exact: the hook's closed-form
+    # marginals equal the package's Laplace, and R its exact curvature.
+    occasions = occasions_model()
+    model = LaplaceHooked(occasions, occasions_exact_subject)
+    x = [2.0, log(0.25), log(0.6), log(0.4)]
+    @test check_protocol(model, x[1:1], x[2:2], x[3:4])
+    @test_throws ProtocolViolation check_protocol(
+        LaplaceHooked(occasions, occasions_exact_subject; scale = 1.001), x[1:1], x[2:2], x[3:4])
+    empty!(model.starts)
+    result = covariance_step(model, x[1:1], x[2:2], x[3:4];
+        approximation = AdaptiveGaussHermite(nodes = 1), method = :r)
+    @test result.evaluations == 2 * 4 + 1
+    @test all(==([zeros(1 + length(o)) for o in occasions.y]), model.starts)
+    # The O(h²) error of differencing the gradient, measured 1.2e-6, is largest in σ.
+    @test result.R ≈ -ForwardDiff.hessian(y -> occasions_exact(occasions, y), x) rtol = 1e-5
 end
 
 @testset "ragged marginal likelihood: the default, and Laplace's bias" begin

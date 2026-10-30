@@ -445,6 +445,7 @@ function _check_ragged_protocol(model, layout::RaggedNLMELayout, θ, σ, ω;
     blocks = provides_eta_hessian(model) ?
         conditional_loglikelihood_hessian_blocks(model, ids, θ, σ, H) : nothing
     _check_eta_hessian_sparsity(violation, model, layout, ids, θ, σ, H, rtol)
+    _check_laplace_gradient(violation, model, ids, θ, σ, ω, H, rtol)
     if blocks !== nothing
         length(blocks) == length(ids) || violation("Hessian batch needs one block per subject")
         for (k, i) in enumerate(ids)

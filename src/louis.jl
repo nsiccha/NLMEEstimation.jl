@@ -57,11 +57,16 @@ end
 function _prepare_marginal(approximation::LouisInformation, model, θ, σ, ω, subjects, η0,
         rng, progress = nothing)
     _check_approximation(approximation)
+    return _PreparedLouis(model, approximation, nlme_layout(model),
+        _covariance_subjects(model, subjects), η0, rng)
+end
+
+function _covariance_subjects(model, subjects)
     n = nsubjects(model)
     ids = subjects === nothing ? collect(1:n) : collect(Int, subjects)
     !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= n, ids) ||
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
-    return _PreparedLouis(model, approximation, nlme_layout(model), ids, η0, rng)
+    return ids
 end
 
 _marginal_subjects(prepared::_PreparedLouis) = prepared.subjects
@@ -76,9 +81,9 @@ _covariance_progress(prepared::_PreparedLouis, method, p) =
     (prepared.approximation.burnin + prepared.approximation.draws, "Posterior draws")
 
 # The starting η: a fit's chain states or EBEs, or zeros.
-_louis_start(layout::NLMELayout, η0, subjects) =
+_starting_batch(layout::NLMELayout, η0, subjects) =
     Matrix{Float64}(_eta_start(η0, subjects, neta(layout)))
-_louis_start(layout::RaggedNLMELayout, η0, subjects) = _ragged_start(η0, layout, subjects)
+_starting_batch(layout::RaggedNLMELayout, η0, subjects) = _ragged_start(η0, layout, subjects)
 
 # Draw, accumulate, and assemble R and S in the full estimated coordinates
 # ŷ = [θ; σ; free ω], then keep the `free` ones.
@@ -95,7 +100,7 @@ function _covariance_matrices(prepared::_PreparedLouis, split, ŷ, free, step, m
     conditional = vcat(setdiff(1:nθ, indices), nθ .+ (1:nσ))
     gaussian = vcat(indices, (nθ + nσ + 1):p)
     h = step .* max.(1.0, abs.(ŷ))
-    H = _louis_start(layout, prepared.η0, ids)
+    H = _starting_batch(layout, prepared.η0, ids)
     prior = _re_prior(layout, ω)
     style = saem_population_gradient_style(model)
     sums, squares = zeros(p, n), zeros(p, p, n)
