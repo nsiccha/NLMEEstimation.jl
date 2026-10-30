@@ -44,7 +44,7 @@ Measured on six subjects of 250–8,000 nested units (15,750 unit effects; the m
 | Units integrated, NUTS on the region effects | ≤ 0.0001 | 19–22 | 6 |
 | Plain SAEM, NUTS on every effect | 0.004–0.009 | 46–49 | 15,756 |
 
-Each fit ran 300 iterations (150 at γ = 1) unless stated. The seconds are mostly the package's per-block statistics over 15,756 random-effect blocks, which every fit pays, and they vary with host load. On models where the Laplace approximation is not exact, the integrated families carry its error.
+Each fit ran 300 iterations (150 at γ = 1) unless stated. The seconds were not profiled and vary with host load. On models where the Laplace approximation is not exact, the integrated families carry its error.
 
 ## Minibatch SAEM
 
