@@ -38,7 +38,10 @@ failing or silently behaving differently at run time.
   take the same route. A `PerSubjectEvaluation` model's chains run one after
   another as before. Under `progress`, a batched model's Pathfinder start
   checks for an interrupt between batched evaluations rather than between
-  subjects.
+  subjects. Each batched call costs what the model's batch of that size costs, so
+  a model whose small batches cost much more than its one-subject calls pays
+  that for every step with two or more subjects left, most under a small
+  `minibatch_size`.
 
 ## 0.2.0
 
