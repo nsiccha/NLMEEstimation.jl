@@ -1,0 +1,18 @@
+# julia --project=test bench/ebe_gradient_only_scale.jl on gordito, one CPU (compute-token standard lane), 5959678 (its source and test fixtures), 2026-10-30
+1. The check at η = 0, information 0.1 to 10⁴
+units	saddle	finding	calls	seconds	GB allocated	dense calls	dense GB
+2000	true	upward	24	0.02	0.02	2001	0.0
+2000	false	none found	36	0.02	0.03	2001	0.0
+8000	true	upward	26	0.05	0.07	8001	0.5
+8000	false	none found	36	0.08	0.10	8001	0.5
+36000	true	upward	27	0.25	0.36	36001	10.4
+36000	false	none found	36	0.33	0.47	36001	10.4
+50000	true	upward	29	0.72	0.51	50001	20.0
+50000	false	none found	36	0.46	0.61	50001	20.0
+
+2. The whole pass from η = 0 with a well, information 0.1 to 1
+units	calls	iterations	seconds	GB allocated	converged	|u| error
+2000	216	72	0.51	0.18	true	2.3e-09
+8000	255	93	0.54	0.65	true	2.9e-10
+36000	288	108	2.87	3.60	true	1.4e-10
+50000	341	130	4.87	5.37	true	5.4e-10
