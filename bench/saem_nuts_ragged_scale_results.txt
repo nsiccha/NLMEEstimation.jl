@@ -1,31 +1,31 @@
-SAEM's NUTS warmup metric and fit on ragged subjects with many nested effects, for a model with dense Hessian blocks and a declared pattern: Julia 1.10.12, NLMEEstimation 7aa605a
-peak resident memory after compilation: 0.90 GB
+The sparse η-curvature diagonal and SAEM's NUTS fit on ragged subjects with many nested effects, for a model with dense Hessian blocks and a declared pattern: Julia 1.10.12, NLMEEstimation 86d6b27, WarmupHMC 0.2.8
+peak resident memory after compilation: 0.92 GB
 subjects: 3294, 5000, 7000, 8500, 10000, 11000, 12000, 13500, 15000, 17000, 19731, 35783 nested units (157808 in all); exact maximum-likelihood estimate 2.0522, -1.3858, -0.4838, -0.9167
 
-warmup metric (diagonal) per subject at η = 0, declared pattern: seconds, MB allocated, dense Hessians formed, max |metric × exact curvature − 1|, and the seconds the pattern's star coloring takes on its own
-3294	0.012	17.3	0	3.6e-11	0.011
-5000	0.027	20.8	0	2.5e-11	0.022
-7000	0.054	24.3	0	3.6e-11	0.042
-8500	0.073	26.9	0	7.0e-11	0.070
-10000	0.097	31.2	0	3.6e-11	0.086
-11000	0.117	33.0	0	3.6e-11	0.104
-12000	0.131	34.7	0	3.6e-11	0.129
-13500	0.165	37.4	0	6.5e-11	0.155
-15000	0.201	40.0	0	3.6e-11	0.192
-17000	0.262	43.5	0	3.6e-11	0.248
-19731	0.350	48.3	0	3.6e-11	0.342
-35783	1.176	80.3	0	3.6e-11	1.136
+sparse η-curvature diagonal (MALA's :hessian metric) per subject at η = 0, declared pattern: seconds, MB allocated, dense Hessians formed, max |metric × exact curvature − 1|, and the seconds the pattern's star coloring takes on its own
+3294	0.013	17.4	0	3.6e-11	0.010
+5000	0.030	21.0	0	2.5e-11	0.022
+7000	0.052	24.6	0	3.6e-11	0.042
+8500	0.071	27.2	0	7.0e-11	0.062
+10000	0.094	31.6	0	3.6e-11	0.085
+11000	0.109	33.4	0	3.6e-11	0.101
+12000	0.139	35.1	0	3.6e-11	0.122
+13500	0.160	37.8	0	6.5e-11	0.154
+15000	0.207	40.5	0	3.6e-11	0.190
+17000	0.266	44.1	0	3.6e-11	0.249
+19731	0.358	49.0	0	3.6e-11	0.370
+35783	1.125	81.6	0	3.6e-11	1.111
 peak resident memory after the metrics: 1.02 GB
 
-saem(…; kernel = WarmupHMCNUTS()) with default SAEMOptions on all twelve: 704 s, 2983.9 GB allocated, peak resident memory 1.79 GB, 0 dense Hessians formed, 0 divergent transitions
-exact maximum minus the fit's marginal log-likelihood: 0.004; nested SD 0.3999 (maximum likelihood 0.3998)
+saem(…; kernel = WarmupHMCNUTS()) with default SAEMOptions on all twelve: 563 s, 2742.1 GB allocated, peak resident memory 1.29 GB, 0 dense Hessians formed, 7 divergent transitions
+exact maximum minus the fit's marginal log-likelihood: 0.002; nested SD 0.3998 (maximum likelihood 0.3998)
 
-the same metric without a declared pattern (a dense Hessian per subject, as for every model with Hessian blocks before NLMEEstimation 0.1.4)
-3294	0.090	349.4	1	0.0e+00
-5000	0.290	803.5	1	1.1e-16
-7000	0.800	1572.6	1	0.0e+00
-8500	0.537	2317.5	1	0.0e+00
-10000	0.748	3207.6	1	0.0e+00
+the same curvature diagonal without a declared pattern (a dense Hessian per subject, as for every model with Hessian blocks before NLMEEstimation 0.1.4)
+3294	0.100	349.4	1	0.0e+00
+5000	0.501	803.5	1	1.1e-16
+7000	0.591	1572.6	1	0.0e+00
+8500	0.577	2317.5	1	0.0e+00
+10000	1.388	3207.6	1	0.0e+00
 11000	(skipped: one dense Hessian is 1.0 GB)
 12000	(skipped: one dense Hessian is 1.2 GB)
 13500	(skipped: one dense Hessian is 1.5 GB)
@@ -33,4 +33,4 @@ the same metric without a declared pattern (a dense Hessian per subject, as for 
 17000	(skipped: one dense Hessian is 2.3 GB)
 19731	(skipped: one dense Hessian is 3.1 GB)
 35783	(skipped: one dense Hessian is 10.2 GB)
-peak resident memory after them: 3.33 GB
+peak resident memory after them: 3.10 GB
