@@ -42,7 +42,12 @@ subject):
 - a declared Gaussian model's batched moments and first-order η Jacobians have
   the promised per-subject shape and agree with its plain moments;
 - a declared [`fixed_omega`](@ref) is valid for the layout, and `ω` holds its
-  fixed values.
+  fixed values;
+- with [`provides_laplace_gradient`](@ref): [`laplace_marginals_and_gradient`](@ref)
+  returns one value per subject and gradients of the lengths of θ, σ and ω, its
+  values equal `marginal_loglikelihood` with `AdaptiveGaussHermite(nodes = 1)`
+  (within `max(rtol, 1e-6)`), and its gradient along a random direction equals a
+  central difference of its values (within `max(rtol, 1e-5)`).
 
 With `reference_backend` (an AD backend), the model's η gradients are also compared
 against that backend, and its Hessian blocks (when provided) against
@@ -101,6 +106,7 @@ function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
     blocks = provides_eta_hessian(model) ? conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H) : nothing
     _check_block_shapes(violation, agrees, blocks, subjects, m)
     _check_eta_hessian_sparsity(violation, model, layout, subjects, θ, σ, H, rtol)
+    _check_laplace_gradient(violation, model, subjects, θ, σ, ω, H, rtol)
 
     for (k, i) in enumerate(subjects)
         ηi = H[:, k]
@@ -181,6 +187,37 @@ function _check_eta_hessian_sparsity(violation, model, layout, subjects, θ, σ,
             "Hessian-vector product by up to $(maximum(abs, recovered - products[k])) " *
             "(largest at η component $(argmax(abs.(recovered - products[k]))))")
     end
+    return nothing
+end
+
+function _check_laplace_gradient(violation, model, subjects, θ, σ, ω, H, rtol)
+    provides_laplace_gradient(model) || return nothing
+    ids = collect(Int, subjects)
+    terms, gθ, gσ, gω = laplace_marginals_and_gradient(model, ids, θ, σ, ω, H)
+    length(terms) == length(ids) || violation(
+        "laplace_marginals_and_gradient returned $(length(terms)) values for $(length(ids)) subjects")
+    map(length, (gθ, gσ, gω)) == map(length, (θ, σ, ω)) || violation(
+        "laplace_marginals_and_gradient returned gradients of lengths " *
+        "$(map(length, (gθ, gσ, gω))); expected $(map(length, (θ, σ, ω)))")
+    tol = max(rtol, 1.0e-6)
+    reference = marginal_loglikelihood(model, θ, σ, ω; subjects = ids, η0 = H,
+        approximation = AdaptiveGaussHermite(nodes = 1)).subject_loglikelihoods
+    for (k, i) in enumerate(ids)
+        isapprox(terms[k], reference[k]; rtol = tol, atol = tol) || violation(
+            "subject $i: laplace_marginals_and_gradient value $(terms[k]) differs from the " *
+            "package's Laplace approximation $(reference[k])")
+    end
+    rng = Xoshiro(0)
+    dθ, dσ, dω = randn(rng, length(θ)), randn(rng, length(σ)), randn(rng, length(ω))
+    h = 1.0e-4
+    summed(s) = sum(first(laplace_marginals_and_gradient(model, ids, θ .+ s * h .* dθ,
+        σ .+ s * h .* dσ, ω .+ s * h .* dω, H)))
+    difference = (summed(1) - summed(-1)) / 2h
+    directional = dot(gθ, dθ) + dot(gσ, dσ) + dot(gω, dω)
+    tol = max(rtol, 1.0e-5)
+    isapprox(directional, difference; rtol = tol, atol = tol) || violation(
+        "laplace_marginals_and_gradient's gradient along a random direction is " *
+        "$directional, but a central difference of its values gives $difference")
     return nothing
 end
 

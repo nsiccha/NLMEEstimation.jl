@@ -77,7 +77,8 @@ named in `names`:
 - `gradient`: the gradient of the fitted objective, close to zero at a converged
   estimate.
 - `step`: the central-difference step per coordinate; `evaluations` counts the
-  marginal-approximation evaluations.
+  marginal-approximation evaluations, or the calls of
+  [`laplace_marginals_and_gradient`](@ref) where the model supplies it.
 
 Use [`delta_method`](@ref) for natural-unit quantities.
 """
@@ -159,7 +160,12 @@ coordinates; `:r` and `:rs` take `2p² + 1`. Every evaluation warm-starts the
 subject modes from the same solution at the estimate. With
 [`LouisInformation`](@ref) both matrices come instead from posterior draws of
 the random effects at the point (Louis's identity), and `step` only differences
-the population gradient for the curvature in θ and σ.
+the population gradient for the curvature in θ and σ. A model with
+[`provides_laplace_gradient`](@ref) takes `AdaptiveGaussHermite(nodes = 1)` from
+its own [`laplace_marginals_and_gradient`](@ref): `R` is then the central
+difference of that gradient and `S` comes from the per-subject values at the same
+points, `2p + 1` calls for every `method`. TMB's `sdreport` takes `R` the same
+way.
 
 For a FOCE(I) fit, the defaults reuse its subjects, its fitted coordinates
 (`fit.free`) and its interaction setting, so the step differentiates the fitted
@@ -169,7 +175,8 @@ linearization at the SAEM estimate. A model with a [`RaggedNLMELayout`](@ref)
 defaults to the Laplace approximation, `AdaptiveGaussHermite(nodes = 1)`, when
 it reports η Hessians (its own blocks, or a declared
 [`eta_hessian_sparsity`](@ref): the rule [`default_ebe_method`](@ref) uses for
-Newton), and to [`LouisInformation`](@ref) otherwise. Any other model defaults to
+Newton) or supplies its Laplace gradient, and to [`LouisInformation`](@ref)
+otherwise. Any other model defaults to
 [`ImportanceSampling`](@ref). Its draws,
 from `rng`, are held fixed across the difference points, so the estimated
 marginal is a smooth function of the coordinates, and perturbations of ω and of
@@ -186,7 +193,9 @@ never differentiated; `ω` must hold their values. Throws
 
 `progress` (a Treebars node or backend symbol) gets a `Covariance step` node: the
 subject modes at the point, then a `Marginal likelihoods` counter over the `2p² + 1`
-(or `2p + 1`) evaluations. An interrupt raises `Treebars.ProgressInterrupted`.
+(or `2p + 1`) evaluations, or, with the model's Laplace gradient, a `Laplace
+gradients` counter over its `2p + 1` calls. An interrupt raises
+`Treebars.ProgressInterrupted`.
 """
 function covariance_step(model, fit::FOCEResult; approximation = FOCEApproximation(
             interaction = fit.options.interaction), kwargs...)
@@ -206,9 +215,10 @@ _default_saem_approximation(model, ::NLMELayout, ::GaussianObservations) = FOCEA
 # A ragged subject can carry thousands of nested effects. Importance sampling
 # loses effective draws as it grows, and Louis's identity loses accuracy for
 # weakly informed nested effects, so Laplace takes it wherever the η Hessians
-# are cheap (decision 0hwegve).
+# are cheap (decision 0hwegve), or the model supplies its gradient (0.2.3).
 _default_saem_approximation(model, ::RaggedNLMELayout, observation_model) =
-    _reports_eta_hessians(model) ? AdaptiveGaussHermite(nodes = 1) : LouisInformation()
+    _reports_eta_hessians(model) || provides_laplace_gradient(model) ?
+    AdaptiveGaussHermite(nodes = 1) : LouisInformation()
 _default_saem_approximation(model, layout, observation_model) = ImportanceSampling()
 
 function covariance_step(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
@@ -239,7 +249,7 @@ end
 function _covariance_step(model, θ, σ, ω, subjects, η0, method, step, approximation, rng,
         layout, constraints, x̂, ŷ, free, names, progress)
     nθ, nσ = layout.ntheta, layout.nsigma
-    prepared = _prepare_marginal(approximation, model, θ, σ, ω, subjects, η0, rng, progress)
+    prepared = _prepare_covariance(approximation, model, θ, σ, ω, subjects, η0, rng, progress)
     subject_ids = collect(Int, _marginal_subjects(prepared))
     point_of(y) = _point_from_coordinates(constraints, y, nθ + nσ)
     split(y) = (x = point_of(y); (x[1:nθ], x[nθ+1:nθ+nσ], x[nθ+nσ+1:end]))
@@ -259,28 +269,42 @@ function _covariance_step(model, θ, σ, ω, subjects, η0, method, step, approx
         gradient, G, h, evaluations, constraints)
 end
 
+# What a covariance step evaluates, which is the marginal unless the model supplies
+# the Laplace gradient (src/laplace_gradient.jl).
+_prepare_covariance(approximation, model, θ, σ, ω, subjects, η0, rng, progress) =
+    _prepare_marginal(approximation, model, θ, σ, ω, subjects, η0, rng, progress)
+
+# One point's per-subject marginal terms, population log prior (zero under ML) and
+# the objective's gradient in [θ; σ; free ω], `nothing` for an approximation that
+# has none.
+function _covariance_point(prepared, model, θ, σ, ω, lp0, progress)
+    terms = _subject_marginals(prepared, θ, σ, ω, progress)
+    return terms, lp0 === nothing ? 0.0 : population_logprior(model, θ, σ, ω), nothing
+end
+
 # R and S from central differences of the per-subject marginals, with their
-# gradient, steps and evaluation count; each evaluation advances `counter`.
+# gradient, steps and evaluation count; each evaluation advances `counter`. R comes
+# from differences of the objective's gradient where the point carries one, else
+# from second differences of its value.
 function _covariance_matrices(prepared, split, ŷ, free, step, method, lp0, subject_ids,
         model, counter)
     p = length(free)
     evaluations = Ref(0)
-    # Per-subject marginal terms and the population log prior (zero under ML).
     function evaluate(x)
         throw_if_interrupted(counter)
         evaluations[] += 1
-        terms = _subject_marginals(prepared, split(x)..., counter)
+        terms, lp, g = _covariance_point(prepared, model, split(x)..., lp0, counter)
         length(terms) == length(subject_ids) && all(isfinite, terms) ||
             throw(DomainError(terms, "covariance step: the marginal log-likelihood is " *
                 "not finite at population coordinates $x; try a smaller step"))
-        lp = lp0 === nothing ? 0.0 : population_logprior(model, split(x)...)
         isfinite(lp) || throw(DomainError(lp,
             "covariance step: the population log prior is not finite at $x"))
+        g === nothing || all(isfinite, g) || throw(DomainError(g,
+            "covariance step: the marginal gradient is not finite at population coordinates $x"))
         counter === nothing || update_progress!(counter, evaluations[])
-        return Vector{Float64}(terms), Float64(lp)
+        return Vector{Float64}(terms), Float64(lp), g === nothing ? nothing : Vector{Float64}(g[free])
     end
     h = step .* max.(1.0, abs.(ŷ[free]))
-    total((terms, lp)) = sum(terms) + lp
     function shifted(signs)
         y = copy(ŷ)
         for (j, s) in signs
@@ -292,22 +316,33 @@ function _covariance_matrices(prepared, split, ŷ, free, step, method, lp0, subj
     plus = [evaluate(shifted(((j, 1),))) for j in 1:p]
     minus = [evaluate(shifted(((j, -1),))) for j in 1:p]
     G = Matrix{Float64}(reduce(hcat, [(plus[j][1] - minus[j][1]) / (2h[j]) for j in 1:p])')
-    gradient = vec(sum(G; dims = 2)) .+ [(plus[j][2] - minus[j][2]) / (2h[j]) for j in 1:p]
+    gradient = something(center[3],
+        vec(sum(G; dims = 2)) .+ [(plus[j][2] - minus[j][2]) / (2h[j]) for j in 1:p])
     S = G * G'
-    R = nothing
-    if method != :s
-        R = zeros(p, p)
-        for j in 1:p
-            R[j, j] = -(total(plus[j]) - 2total(center) + total(minus[j])) / h[j]^2
-            for k in 1:j-1
-                corners = [total(evaluate(shifted(((j, a), (k, b))))) for (a, b) in
-                    ((1, 1), (1, -1), (-1, 1), (-1, -1))]
-                R[j, k] = R[k, j] = -(corners[1] - corners[2] - corners[3] + corners[4]) /
-                    (4h[j] * h[k])
-            end
+    R = method == :s ? nothing : _objective_curvature(center[3], evaluate, shifted, center,
+        plus, minus, h)
+    return R, S, G, gradient, h, evaluations[]
+end
+
+function _objective_curvature(::AbstractVector, evaluate, shifted, center, plus, minus, h)
+    R = reduce(hcat, [-(plus[j][3] - minus[j][3]) / (2h[j]) for j in eachindex(h)])
+    return (R + R') / 2
+end
+
+function _objective_curvature(::Nothing, evaluate, shifted, center, plus, minus, h)
+    p = length(h)
+    total((terms, lp)) = sum(terms) + lp
+    R = zeros(p, p)
+    for j in 1:p
+        R[j, j] = -(total(plus[j]) - 2total(center) + total(minus[j])) / h[j]^2
+        for k in 1:j-1
+            corners = [total(evaluate(shifted(((j, a), (k, b))))) for (a, b) in
+                ((1, 1), (1, -1), (-1, 1), (-1, -1))]
+            R[j, k] = R[k, j] = -(corners[1] - corners[2] - corners[3] + corners[4]) /
+                (4h[j] * h[k])
         end
     end
-    return R, S, G, gradient, h, evaluations[]
+    return R
 end
 
 _point_from_coordinates(::Nothing, y, nθσ) = y
