@@ -14,6 +14,31 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.0
+
+- **Breaking:** `WarmupHMCNUTS` is a continuously adapting kernel. Each
+  subject's chain starts with Pathfinder from its starting η (no warmup phase,
+  no η Hessian), and every transition adapts the diagonal metric and the step
+  size from its leapfrog leaves for the whole fit, as θ, σ and Ω move
+  (WarmupHMC's `ContinuousNUTSState`, `continuous_nuts_step` and `reposition!`;
+  the floor is 0.2.8, whose Pathfinder start works from a fit's modes, stays
+  inside a bounded support, and allocates no d × d buffer). The
+  keywords `warmup_draws`, `warmup_evaluations`, `stepsize_adaptation_limit`,
+  `curvature_floor` and `metric` are gone: remove them from
+  `WarmupHMCNUTS(…)` calls. `max_tree_depth` defaults to 10 (was 8).
+  `LouisInformation` adapts through its `burnin` and freezes the kernel for its
+  `draws`. The `saem` progress phase `NUTS warmup` is now `Pathfinder start`.
+  Seeded NUTS fits change. SAEM with NUTS no longer asks the model for an η
+  Hessian or its sparsity pattern.
+  - On five exact nested subjects of 250–4,000 units, fits end 0.002–0.031
+    log-likelihood units below the maximum whether the start's scales are
+    right, 4× too wide or 4× too narrow, where 0.1.7 ended 0.79–3.65 below
+    from the wide start and cost about 5× the gradient evaluations from the
+    narrow one (`bench/saem_nuts_continuous.jl`).
+  - On twelve subjects of 3,294–35,783 units (157,808 effects): 563 s and
+    1.29 GB peak resident memory, against 704 s and 1.79 GB on 0.1.7
+    (`bench/saem_nuts_ragged_scale.jl`).
+
 ## 0.1.7
 
 - The star coloring of a declared `eta_hessian_sparsity` pattern is computed

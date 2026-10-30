@@ -27,8 +27,7 @@ for f in (:conditional_loglikelihood, :conditional_loglikelihood_and_gradient,
     @eval NE.$f(m::RaggedGrowth, i::Integer, θ, σ, η) = NE.$f(m.inner, i, θ, σ, η)
 end
 
-const SMALL_NUTS = WarmupHMCNUTS(warmup_draws = 6, warmup_evaluations = 30,
-    stepsize_adaptation_limit = 6, max_tree_depth = 5)
+const SMALL_NUTS = WarmupHMCNUTS(max_tree_depth = 5)
 const OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0 = [2.0], [log(0.25)], [log(0.6), log(0.4)]
 
 function exact_maximum(f, x0)
@@ -90,8 +89,7 @@ end
     occasions = occasions_model(n = 40)
     exact(x) = occasions_exact(occasions, x)
     _, best = exact_maximum(exact, vcat(OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0))
-    nuts = WarmupHMCNUTS(warmup_draws = 8, warmup_evaluations = 50,
-        stepsize_adaptation_limit = 10, max_tree_depth = 6)
+    nuts = WarmupHMCNUTS(max_tree_depth = 6)
     for (kernel, bound) in ((DualAveragingMALA(), 1.0), (nuts, 0.5))
         for seed in 1:3
             fit = saem(occasions, OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0;
@@ -114,8 +112,7 @@ end
     model = occasions_model(seed = 3, units = [150, 300, 600])
     exact(x) = occasions_exact_nested(model, x)
     x̂, best = exact_maximum(exact, vcat(OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0))
-    nuts = WarmupHMCNUTS(warmup_draws = 8, warmup_evaluations = 50,
-        stepsize_adaptation_limit = 10, max_tree_depth = 6)
+    nuts = WarmupHMCNUTS(max_tree_depth = 6)
     for seed in 1:2
         fit = saem(model, OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0; rng = Xoshiro(seed),
             kernel = nuts, options = SAEMOptions(iterations = 60, burnin = 30))
@@ -129,10 +126,10 @@ end
     end
 end
 
-@testset "NUTS warmup metric from a declared η Hessian pattern" begin
-    # A model that declares `eta_hessian_sparsity` seeds each subject's NUTS
-    # metric from its sparse Hessian (the diagonal of the inverse curvature) rather
-    # than from dense Hessian blocks, which for a subject with thousands of nested
+@testset "MALA's Hessian metric from a declared η Hessian pattern; NUTS asks for none" begin
+    # A model that declares `eta_hessian_sparsity` gives MALA's `:hessian` metric
+    # from its sparse Hessian (the diagonal of the inverse curvature) rather than
+    # from dense Hessian blocks, which for a subject with thousands of nested
     # effects would be an n × n matrix. A model that declares nothing and has no
     # Hessian blocks keeps the prior variances.
     inner = occasions_model(seed = 3, units = [150, 300, 600])
@@ -155,15 +152,20 @@ end
     @test NE._saem_hessian_metric(undeclared, 2, x[1:1], x[2:2], prior, η; diagonal = true) ≈
         inv.(exact_diagonal) rtol = 1e-12
     @test (blocks.dense_hessians[], undeclared.dense_hessians[]) == (0, 1)
-    nuts = WarmupHMCNUTS(warmup_draws = 8, warmup_evaluations = 50,
-        stepsize_adaptation_limit = 10, max_tree_depth = 6)
-    # Nor does SAEM with NUTS, whose fit equals the gradient-only declared model's.
+    nuts = WarmupHMCNUTS(max_tree_depth = 6)
+    # SAEM with NUTS asks for no η Hessian at all, pattern or not: the fits of the
+    # block-providing models equal the gradient-only declared model's, and the
+    # undeclared one forms no dense Hessian either.
     short = SAEMOptions(iterations = 4, burnin = 2, mcmc_burnin = 2)
+    blocks.dense_hessians[] = undeclared.dense_hessians[] = 0
     fit_blocks = saem(blocks, OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0; rng = Xoshiro(2),
         kernel = nuts, options = short)
-    @test blocks.dense_hessians[] == 0
-    @test fit_blocks.eta == saem(model, OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0;
-        rng = Xoshiro(2), kernel = nuts, options = short).eta
+    fit_undeclared = saem(undeclared, OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0;
+        rng = Xoshiro(2), kernel = nuts, options = short)
+    @test (blocks.dense_hessians[], undeclared.dense_hessians[]) == (0, 0)
+    reference = saem(model, OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0; rng = Xoshiro(2),
+        kernel = nuts, options = short).eta
+    @test fit_blocks.eta == reference && fit_undeclared.eta == reference
     # NUTS on the declared model reaches the exact maximum, as on the undeclared one.
     exact(y) = occasions_exact_nested(inner, y)
     x̂, best = exact_maximum(exact, vcat(OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0))

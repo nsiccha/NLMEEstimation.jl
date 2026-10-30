@@ -413,7 +413,7 @@ end
     @test screens[] < 40
 end
 
-@testset "SAEM Hessian warmup metric" begin
+@testset "SAEM MALA Hessian metric" begin
     model = LinearSAEM([[1.0, 2.0]])
     prior = re_prior(model, [log(0.5)])
     scale = NE._saem_hessian_metric(model, 1, [0.0], [log(0.5)], prior, [0.0])
@@ -466,15 +466,14 @@ end
     # From a far start with an M-step every iteration, holding η fixed let θ
     # drift by about mean(η) per update while MALA's small steps barely moved the
     # chains: none of 18 such simulated fits converged (brief `dqtdys`; this
-    # seed went to log ka ≈ -2.6). Keeping φ, MALA converges, and NUTS restarts
-    # its fixed kernels at the shifted positions.
+    # seed went to log ka ≈ -2.6). Keeping φ, MALA converges, and NUTS moves its
+    # chains to the shifted positions.
     model, _ = simulated_model(seed = 21, nsubjects = 24)
     θ0 = θ_SIM .+ [1.2, 0.7, 0.7, 0.0]
     ω0 = omega_parameters(nlme_layout(model), Ω_SIM)
     options = SAEMOptions(iterations = 120, burnin = 40, mcmc_burnin = 20,
         mh_rounds = 2, adapt_iterations = 80, numeric_maxiter = 4)
-    for kernel in (DualAveragingMALA(), WarmupHMCNUTS(warmup_draws = 8,
-            warmup_evaluations = 50, stepsize_adaptation_limit = 10, max_tree_depth = 6))
+    for kernel in (DualAveragingMALA(), WarmupHMCNUTS(max_tree_depth = 6))
         fit = saem(model, θ0, σ_SIM, ω0; rng = MersenneTwister(21001), options, kernel)
         @test maximum(abs.(fit.theta[1:3] - θ_SIM[1:3])) < 0.3
     end

@@ -12,8 +12,7 @@ using .TestCommon
         rng=MersenneTwister(73), subjects=collect(1:6),
         options=SAEMOptions(iterations=6, burnin=2, mcmc_burnin=1,
             mh_rounds=1, numeric_maxiter=2, mstep_interval=3),
-        kernel=WarmupHMCNUTS(warmup_draws=8, warmup_evaluations=50,
-            stepsize_adaptation_limit=10, max_tree_depth=6))
+        kernel=WarmupHMCNUTS(max_tree_depth=6))
     @test fit.kernel == :warmuphmc_nuts
     @test size(fit.eta) == (3, 6)
     @test all(isfinite, (fit.theta..., fit.sigma..., fit.omega...))

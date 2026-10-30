@@ -30,10 +30,10 @@ Some estimators need more structure:
 | `focei` (FOCE and FOCEI) | ✓ | ✓ | ✓ | — | Never used |
 | `saem` with `StandardSAEMMH()` | ✓ | — | — | ✓ | Never used |
 | `saem` with `DualAveragingMALA()` | ✓ | ✓ | — | ✓ | Optional: initial metric with `metric=:hessian` |
-| `saem` with `WarmupHMCNUTS()` | ✓ | ✓ | — | ✓ | Optional: initial NUTS metric |
+| `saem` with `WarmupHMCNUTS()` | ✓ | ✓ | — | ✓ | Never used |
 | `covariance_step` with `FOCEApproximation()` | ✓ | ✓ | ✓ | — | Optional: Newton subject modes |
 | `marginal_loglikelihood` / `covariance_step` with `ImportanceSampling()` or `AdaptiveGaussHermite()` | ✓ | ✓ | — | — | Optional: proposal curvature |
-| `covariance_step` with `LouisInformation()` | ✓ | ✓ | — | ✓ | Optional: initial NUTS metric |
+| `covariance_step` with `LouisInformation()` | ✓ | ✓ | — | ✓ | Never used |
 | `residual_diagnostics` (PRED, IPRED, IWRES, CWRES, NPDE) | ✓ | ✓ | ✓ | — | Optional: Newton subject modes |
 
 All of these are first-order quantities, except the Hessian blocks:

@@ -25,9 +25,13 @@ end
     # near 1.6 (28% zeros) and 0.4. The Laplace marginal is not exact here, but
     # its curvature is close to the exact one: SEs measured within 1.5% and
     # 2.6%. Louis's identity needs no curvature and no population gradient (θ is
-    # mu-referenced and there is no σ), but at 1,000 draws its unit-variance SE
-    # was off by 7% and 50%: the curvature and score variance of each weakly
-    # informed unit nearly cancel, and their Monte Carlo errors add up.
+    # mu-referenced and there is no σ), but its unit-variance element nearly
+    # cancels: the curvature and score variance of each weakly informed unit are
+    # close, and their Monte Carlo errors add up. At θ = -1.5 that element of R
+    # was off by up to a factor 4 and indefinite for 2 of 4 seeds at 1,000 draws,
+    # with the 0.1.x and the 0.2.0 NUTS kernel alike; at 3,000 draws it stayed
+    # positive definite for every seed tried with the 0.2.0 kernel, and θ's SE,
+    # the one checked here, was within 3%.
     for θ in (0.0, -1.5)
         m = poisson_model(; θ)
         x, exact_R = poisson_maximum(m, [θ, log(0.5), log(0.5)])
@@ -38,7 +42,7 @@ end
             @test laplace.standard_errors ≈ exact_se rtol = 0.04
         end
         louis = covariance_step(m, x[1:1], Float64[], x[2:3]; method = :r,
-            approximation = LouisInformation(), rng = Xoshiro(1))
+            approximation = LouisInformation(draws = 3000), rng = Xoshiro(1))
         @test louis.standard_errors[1] ≈ exact_se[1] rtol = 0.05
     end
 end

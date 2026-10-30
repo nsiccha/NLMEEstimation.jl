@@ -63,16 +63,18 @@ end
 @testset "Louis's identity: linear growth and a population prior" begin
     # Linear growth at its FOCE(I) estimate (FOCE is exact for it). Twelve subjects
     # leave the slope variance weakly informed, where the expected curvature and
-    # the score variance nearly cancel, so its standard error converges slowest:
-    # at 10,000 draws the θ and σ errors were within 1.2% and the Ω ones within
-    # 13% over two seeds (40,000 draws: 0.5% and 7%).
+    # the score variance nearly cancel, so its standard error converges slowest.
+    # Over 40 seeds at 40,000 draws the θ and σ errors stayed within 2.8% and the
+    # Ω ones within 17% (RMS 1.0% and 5.1% on the worst element of each). At
+    # 10,000 draws they reached 11% and 53%, and 2 of the 40 seeds failed these
+    # tolerances (3 of 40 on 0.1.x's warmed-up kernel).
     model = growth_model()
     fit = focei(model, [0.8, 0.4], [log(0.4)], [log(0.6), 0.0, log(0.5)];
         options = FOCEOptions(maxeval = 2000, rhoend = 1e-9,
             ebe_options = EBEOptions(gtol = 1e-11)))
     x̂ = vcat(fit.theta, fit.sigma, fit.omega)
     exact_se = sqrt.(diag(inv(-ForwardDiff.hessian(z -> growth_exact(model, z), x̂))))
-    louis = LouisInformation(draws = 10_000, burnin = 200)
+    louis = LouisInformation(draws = 40_000, burnin = 200)
     r = covariance_step(model, fit; method = :r, approximation = louis, rng = Xoshiro(1))
     ratio = r.standard_errors ./ exact_se
     @test all(abs.(ratio[1:3] .- 1) .< 0.05)

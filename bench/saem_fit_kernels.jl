@@ -15,8 +15,7 @@ const FIT_OPTIONS = SAEMOptions(iterations=40, burnin=15, mcmc_burnin=5,
 const COMPILE_OPTIONS = SAEMOptions(iterations=3, burnin=1, mcmc_burnin=1,
     mh_rounds=1, adapt_iterations=2, numeric_maxiter=1, mstep_interval=3,
     numeric_mstep=:mixture)
-const NUTS = WarmupHMCNUTS(warmup_draws=8, warmup_evaluations=50,
-    stepsize_adaptation_limit=10, max_tree_depth=6)
+const NUTS = WarmupHMCNUTS(max_tree_depth=6)
 
 function fit_once(seed, model, ω, options, kernel)
     return saem(model, θ_THEOPH, σ_THEOPH, ω;
