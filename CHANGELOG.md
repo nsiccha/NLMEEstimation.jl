@@ -36,7 +36,11 @@ failing or silently behaving differently at run time.
   spreads over five orders of magnitude, the check found a saddle hidden from
   the diagonal in 24–29 calls at 2,000–50,000 effects and took 36 calls where
   there was none. From that saddle, with information from 0.1 to 1, the whole
-  pass converged at every size, in 216–341 calls.
+  pass converged at every size, in 216–341 calls. On the nested subjects of
+  `bench/ebe_ragged_scale.jl`, BFGS without a declared pattern now reaches the
+  modes it reaches with one, in the same iterations: 119–167 model calls for
+  subjects of 250–8,000 units (the dense check took 334–2,083 up to 2,000 and
+  could not run above), and 181 calls in 1.4 s for one of 25,871 units.
   Models that provide η Hessian blocks or declare their pattern are unchanged,
   and so are `marginal_loglikelihood` and `covariance_step`.
 
