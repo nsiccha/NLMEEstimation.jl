@@ -1,0 +1,17 @@
+SAEM's NUTS kernel on a whole-model-sweep batched model, per subject against lockstep: Julia 1.10.12, NLMEEstimation 2c543b6, WarmupHMC 0.2.8, threads 1
+Twelve subjects of 3294–35783 nested units (157808 effects); one sweep evaluates all twelve subjects. Fit: 2 burn-in sweeps and 10 SA iterations, seed 1.
+One whole-model value-and-gradient sweep: 0.041 s
+
+per subject (0.2.0)
+  Pathfinder start: 35.9 s, 711 gradient and 1132 value sweeps
+  one NUTS round (one transition per subject): 2.67 s, 119 gradient sweeps; gradient evaluations per subject over start and round: [7, 15, 7, 6, 15, 5, 3, 7, 15, 7, 5, 15]
+  fit (start included): 100.9 s, 2987 gradient and 1179 value sweeps; 189.7 gradient sweeps per SA iteration after the start
+
+lockstep (0.2.1)
+  Pathfinder start: 10.7 s, 173 gradient and 204 value sweeps
+  one NUTS round (one transition per subject): 0.50 s, 16 gradient sweeps; gradient evaluations per subject over start and round: [7, 15, 7, 6, 15, 5, 3, 7, 15, 7, 5, 15]
+  fit (start included): 31.8 s, 493 gradient and 251 value sweeps; 26.7 gradient sweeps per SA iteration after the start
+
+Fits identical (θ, σ, ω, every η, divergences): true
+Gradient sweeps, per subject / lockstep: start 4.1×, NUTS round 7.4×, fit 6.1×
+Wall time, per subject / lockstep: start 3.3×, NUTS round 5.4×, fit 3.2×

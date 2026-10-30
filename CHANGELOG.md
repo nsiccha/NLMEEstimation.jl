@@ -14,6 +14,35 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.1
+
+- `WarmupHMCNUTS` evaluates a `BatchedEvaluation` model's chains in lockstep.
+  Each subject's chain still takes its own transitions (and its own Pathfinder
+  start), but every leapfrog step of the subjects whose trajectories are still
+  growing reaches the model as one `conditional_loglikelihoods_and_gradients`
+  call over those subjects, and Pathfinder's density-only evaluations as one
+  `conditional_loglikelihoods` call, instead of one call per subject. A round of
+  transitions therefore makes as many batched calls as its longest trajectory
+  needs, not the sum over subjects. Before, a batched model received one-subject
+  batches, one per subject and leapfrog step. On twelve subjects of
+  3,294–35,783 nested units behind a model whose every call evaluates the whole
+  model (as BRM evaluates a nested model without subject cells), one round costs
+  16 whole-model sweeps instead of 119, an SA iteration 26.7 instead of 189.7,
+  and the Pathfinder start 173 gradient and 204 density sweeps instead of 711
+  and 1,132 (`bench/saem_nuts_lockstep.jl`). The fits were identical. Each
+  chain receives the values its own model calls give, so seeded fits are
+  unchanged wherever a model's batched values and gradients equal its
+  single-subject ones bit for bit. A batch that throws a domain error is
+  re-evaluated one subject at a time. The chains are tasks on the calling
+  thread: the model is only ever called from it. `LouisInformation`'s draws
+  take the same route. A `PerSubjectEvaluation` model's chains run one after
+  another as before. Under `progress`, a batched model's Pathfinder start
+  checks for an interrupt between batched evaluations rather than between
+  subjects. Each batched call costs what the model's batch of that size costs, so
+  a model whose small batches cost much more than its one-subject calls pays
+  that for every step with two or more subjects left, most under a small
+  `minibatch_size`.
+
 ## 0.2.0
 
 - **Breaking:** `WarmupHMCNUTS` is a continuously adapting kernel. Each
