@@ -89,15 +89,16 @@ function main()
         join((@sprintf("%.4f", v) for v in x), ", "))
     report("\nempirical_bayes per subject (seconds, MB allocated, model calls, iterations, ",
         "max |mode − exact|)")
-    report("units\tdeclared, Newton\tdeclared, BFGS\tundeclared BFGS (dense curvature check)")
+    report("units\tdeclared, Newton\tdeclared, BFGS\tundeclared BFGS (Lanczos curvature check)")
     for n in UNITS
         one = RaggedOccasions([model.y[findfirst(==(n), UNITS)]])
-        dense = n <= 2000 ? ebes(one, one, x, QuasiNewtonEBE()) : "(skipped: n² memory)"
         report(n, "\t", ebes(one, occasions_sparse(one), x, NewtonEBE()), "\t",
-            ebes(one, occasions_sparse(one), x, QuasiNewtonEBE()), "\t", dense)
+            ebes(one, occasions_sparse(one), x, QuasiNewtonEBE()), "\t",
+            ebes(one, one, x, QuasiNewtonEBE()))
     end
     report("all six\t", ebes(model, occasions_sparse(model), x, NewtonEBE()), "\t",
-        ebes(model, occasions_sparse(model), x, QuasiNewtonEBE()))
+        ebes(model, occasions_sparse(model), x, QuasiNewtonEBE()), "\t",
+        ebes(model, model, x, QuasiNewtonEBE()))
 
     declared = occasions_sparse(model)
     stats = @timed marginal_loglikelihood(declared, x[1:1], x[2:2], x[3:4];
@@ -133,6 +134,7 @@ function main()
     report("\none subject of $LARGEST nested units ($(LARGEST + 1) random effects), at the estimate above")
     report("declared, Newton\t", ebes(largest, occasions_sparse(largest), x, NewtonEBE()))
     report("declared, BFGS\t", ebes(largest, occasions_sparse(largest), x, QuasiNewtonEBE()))
+    report("undeclared, BFGS\t", ebes(largest, largest, x, QuasiNewtonEBE()))
     # The first call colors the subject's pattern (time quadratic in its effects);
     # later calls reuse the coloring.
     for label in ("Laplace marginal", "Laplace marginal again")

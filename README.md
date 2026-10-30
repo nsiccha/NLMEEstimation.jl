@@ -160,9 +160,13 @@ gradient call, plus batched value calls for its trial steps.
   when the model provides Hessian blocks.
 - **`QuasiNewtonEBE()`**: limited-memory BFGS on gradients (`memory = 20`
   curvature pairs per subject). This is the default for gradient-only
-  models. It checks each subject's curvature and leaves saddle points with
-  Newton's trust-region step. The check uses the Hessian blocks when the model
-  provides them, and forward differences of batched gradients otherwise.
+  models. It checks each subject's curvature and leaves saddle points. The
+  check uses sparse Hessians when the model declares `eta_hessian_sparsity`,
+  the Hessian blocks when the model provides them, and otherwise Lanczos on
+  Hessian-vector products from batched gradients: at most
+  `curvature_steps + 16` batched gradient calls per check (`curvature_steps =
+  20`) and memory linear in a subject's effects. It is exact for a subject of
+  at most that many effects; in a larger one it can miss upward curvature.
 
 It throws an `EBEConvergenceError` naming any subject without a mode, unless
 `require_convergence = false`.
