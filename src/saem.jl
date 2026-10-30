@@ -441,33 +441,160 @@ struct RaggedSAEMResult{T, A, R, P}
     interrupted::Bool
 end
 
-struct _SAEMSubjectTarget{M, P}
+# A subject's NUTS target: its conditional density at θ and σ (`conditional`) plus
+# its own η prior (`_subject_prior`).
+struct _SAEMSubjectTarget{C, P}
+    conditional::C
+    prior::P
+end
+
+LDP.dimension(target::_SAEMSubjectTarget) = neta(target.prior)
+LDP.capabilities(::Type{<:_SAEMSubjectTarget}) = LDP.LogDensityOrder{1}()
+LDP.logdensity(target::_SAEMSubjectTarget, η) =
+    _conditional_value(target.conditional, η) + re_logprior(target.prior, η)
+function LDP.logdensity_and_gradient(target::_SAEMSubjectTarget, η)
+    ℓ, g = _conditional_value_and_gradient(target.conditional, η)
+    return ℓ + re_logprior(target.prior, η), g - _precision_times(target.prior, η)
+end
+
+# Subject `subject`'s conditional density, from its own model call. A position
+# outside the model's domain (its evaluation throws `_InfeasibleEvaluation`) has
+# conditional log-density -Inf and a zero conditional gradient, as if the model had
+# returned -Inf there.
+struct _DirectConditional{M}
     model::M
     subject::Int
     θ::Vector{Float64}
     σ::Vector{Float64}
-    prior::P
+end
+_conditional_value(c::_DirectConditional, η) = something(_feasible(η ->
+    conditional_loglikelihood(c.model, c.subject, c.θ, c.σ, η), η), -Inf)
+_conditional_value_and_gradient(c::_DirectConditional, η) = something(_feasible(η ->
+    conditional_loglikelihood_and_gradient(c.model, c.subject, c.θ, c.σ, η), η),
+    (-Inf, zero(η)))
+
+_saem_target(model, subject, θ, σ, prior) = _SAEMSubjectTarget(
+    _DirectConditional(model, subject, copy(θ), copy(σ)), _subject_prior(prior, subject))
+
+# Chain `chain`'s conditional density, evaluated by `_saem_chains` in a batch with
+# the other chains': the request goes to `requests`, the answer comes from `reply`.
+struct _LockstepConditional
+    chain::Int
+    requests::Channel{Tuple{Int, Symbol, Any}}
+    reply::Channel{Any}
+end
+function _conditional_value(c::_LockstepConditional, η)
+    put!(c.requests, (c.chain, :value, η))
+    return take!(c.reply)
+end
+function _conditional_value_and_gradient(c::_LockstepConditional, η)
+    put!(c.requests, (c.chain, :gradient, η))
+    return take!(c.reply)
 end
 
-# A position outside the model's domain (its evaluation throws
-# `_InfeasibleEvaluation`) has conditional log-density -Inf and a zero conditional
-# gradient, as if the model had returned -Inf there. `prior` is the subject's own
-# η prior (`_subject_prior`).
-LDP.dimension(target::_SAEMSubjectTarget) = neta(target.prior)
-LDP.capabilities(::Type{<:_SAEMSubjectTarget}) = LDP.LogDensityOrder{1}()
-function LDP.logdensity(target::_SAEMSubjectTarget, η)
-    ℓ = something(_feasible(η -> conditional_loglikelihood(target.model, target.subject,
-        target.θ, target.σ, η), η), -Inf)
-    return ℓ + re_logprior(target.prior, η)
-end
-function LDP.logdensity_and_gradient(target::_SAEMSubjectTarget, η)
-    ℓ, g = something(_feasible(η -> conditional_loglikelihood_and_gradient(target.model,
-        target.subject, target.θ, target.σ, η), η), (-Inf, zero(η)))
-    return ℓ + re_logprior(target.prior, η), g - _precision_times(target.prior, η)
+# Run `chain(k, target)` for each chain position `k` in `positions`, with `target`
+# subject `ids[k]`'s `_SAEMSubjectTarget` at θ and σ, and return the results in the
+# order of `positions`, or `nothing` once `stop()` holds before an evaluation.
+# `finished()` is called each time a chain returns.
+_saem_chains(chain, model, ids, θ, σ, prior, positions;
+        stop = () -> false, finished = () -> nothing) =
+    _saem_chains(evaluation_style(model), chain, model, ids, θ, σ, prior, positions;
+        stop, finished)
+
+# A per-subject model gains nothing from a batch: the chains run one after another,
+# each with its own model calls, and `stop` is checked between them.
+function _saem_chains(::PerSubjectEvaluation, chain, model, ids, θ, σ, prior, positions;
+        stop, finished)
+    results = []
+    for k in positions
+        stop() && return nothing
+        push!(results, chain(k, _saem_target(model, ids[k], θ, σ, prior)))
+        finished()
+    end
+    return results
 end
 
-_saem_target(model, subject, θ, σ, prior) =
-    _SAEMSubjectTarget(model, subject, copy(θ), copy(σ), _subject_prior(prior, subject))
+# A batched model evaluates the chains in lockstep. Each chain's WarmupHMC call runs
+# in its own task on this thread, and its target hands every evaluation to this task
+# and waits. Once every unfinished chain waits, one batched call answers all their
+# η-gradient requests (and one more any density-only ones), so a leapfrog step costs
+# one `conditional_loglikelihoods_and_gradients` call over the subjects whose trees
+# are still growing, not one call per subject. Model code runs only in this task,
+# and each chain's draws are those its own model calls would give.
+function _saem_chains(::BatchedEvaluation, chain, model, ids, θ, σ, prior, positions;
+        stop, finished)
+    positions = collect(positions)
+    θ, σ = Vector{Float64}(θ), Vector{Float64}(σ)
+    requests = Channel{Tuple{Int, Symbol, Any}}(Inf)
+    replies = [Channel{Any}(1) for _ in positions]
+    results = Vector{Any}(undef, length(positions))
+    try
+        for (j, k) in enumerate(positions)
+            target = _SAEMSubjectTarget(_LockstepConditional(j, requests, replies[j]),
+                _subject_prior(prior, ids[k]))
+            @async try
+                put!(requests, (j, :returned, chain(k, target)))
+            catch err
+                put!(requests, (j, :threw, err))
+            end
+        end
+        unfinished = length(positions)
+        waiting = Vector{Any}(nothing, length(positions))
+        while unfinished > 0
+            nwaiting = 0
+            while nwaiting < unfinished
+                j, kind, value = take!(requests)
+                if kind === :returned
+                    results[j] = value
+                    unfinished -= 1
+                    finished()
+                elseif kind === :threw
+                    throw(value)
+                else
+                    waiting[j] === nothing || error("chain $j made a second density ",
+                        "request before the first was answered")
+                    waiting[j] = (kind, value)
+                    nwaiting += 1
+                end
+            end
+            unfinished == 0 && break
+            stop() && return nothing
+            for kind in (:gradient, :value)
+                chains = [j for j in eachindex(waiting)
+                    if waiting[j] !== nothing && first(waiting[j]) === kind]
+                isempty(chains) && continue
+                answers = _saem_batch_conditionals(Val(kind), model,
+                    ids[positions[chains]], θ, σ, [last(waiting[j]) for j in chains])
+                for (j, answer) in zip(chains, answers)
+                    put!(replies[j], answer)
+                end
+            end
+            fill!(waiting, nothing)
+        end
+        return results
+    finally
+        foreach(close, replies)
+    end
+end
+
+# The conditional densities (with their η gradients) of `subjects` at `ηs`, from one
+# batched call; a batch that throws `_InfeasibleEvaluation` is evaluated subject by
+# subject, so that only the positions outside the domain get -Inf.
+function _saem_batch_conditionals(::Val{:gradient}, model, subjects, θ, σ, ηs)
+    batch = _feasible(H -> conditional_loglikelihoods_and_gradients(model, subjects,
+        θ, σ, H), _eta_batch(nlme_layout(model), ηs))
+    batch === nothing && return [_conditional_value_and_gradient(
+        _DirectConditional(model, i, θ, σ), η) for (i, η) in zip(subjects, ηs)]
+    ℓ, G = batch
+    return [(ℓ[k], _eta_column(G, k)) for k in eachindex(subjects)]
+end
+function _saem_batch_conditionals(::Val{:value}, model, subjects, θ, σ, ηs)
+    batch = _feasible(H -> conditional_loglikelihoods(model, subjects, θ, σ, H),
+        _eta_batch(nlme_layout(model), ηs))
+    batch === nothing && return [_conditional_value(_DirectConditional(model, i, θ, σ), η)
+        for (i, η) in zip(subjects, ηs)]
+    return batch
+end
 
 function _saem_check_nuts(o::WarmupHMCNUTS)
     o.max_tree_depth > 0 || throw(ArgumentError("max_tree_depth must be positive"))
@@ -478,21 +605,23 @@ end
 
 # Each subject's chain starts with a Pathfinder run from its η at the starting
 # population parameters (WarmupHMC's `ContinuousNUTSState`), counted on `progress`,
-# the start phase. An interrupt request between subjects ends the start early and
-# returns `nothing`.
+# the start phase, as each subject's start completes. An interrupt request ends the
+# start early and returns `nothing`: checked between subjects, or for a batched
+# model, whose starts run in lockstep (`_saem_chains`), between batched evaluations.
 function _saem_nuts_start!(rng, kernel::WarmupHMCNUTS, model, ids, θ, σ, prior, H,
         progress = nothing)
     start_progress!(progress)
-    states = []
-    for (k, i) in enumerate(ids)
-        interrupt_requested(progress) && (finalize_progress!(progress); return nothing)
-        target = _saem_target(model, i, θ, σ, prior)
-        push!(states, WarmupHMC.ContinuousNUTSState(Xoshiro(rand(rng, UInt64)), target;
-            init = copy(_column(H, k)), kernel.target_acceptance_rate, kernel.max_tree_depth))
-        progress === nothing || update_progress!(progress, k)
+    seeds = [rand(rng, UInt64) for _ in ids]
+    started = Ref(0)
+    states = _saem_chains(model, ids, θ, σ, prior, eachindex(ids);
+            stop = () -> interrupt_requested(progress),
+            finished = () -> progress === nothing ||
+                update_progress!(progress, started[] += 1)) do k, target
+        WarmupHMC.ContinuousNUTSState(Xoshiro(seeds[k]), target; init = copy(_column(H, k)),
+            kernel.target_acceptance_rate, kernel.max_tree_depth)
     end
     finalize_progress!(progress)
-    return identity.(states)
+    return states === nothing ? nothing : identity.(states)
 end
 
 # Move each listed subject's chain to its re-centred or replaced η. The kernel is
@@ -506,13 +635,15 @@ end
 
 # One NUTS transition for each subject at positions `active`, adapting the kernel
 # from its leapfrog leaves; `adapt = false` takes the transition under the current
-# kernel (posterior draws at a fixed point).
+# kernel (posterior draws at a fixed point). A batched model takes the transitions in
+# lockstep (`_saem_chains`).
 function _saem_nuts_round!(states, model, ids, θ, σ, prior, H, active = eachindex(ids);
         adapt::Bool = true)
+    steps = _saem_chains(model, ids, θ, σ, prior, active) do k, target
+        WarmupHMC.continuous_nuts_step(states[k], target; adapt)
+    end
     divergences = 0
-    for k in active
-        target = _saem_target(model, ids[k], θ, σ, prior)
-        step = WarmupHMC.continuous_nuts_step(states[k], target; adapt)
+    for (k, step) in zip(active, steps)
         _set_column!(H, k, copy(step.state.position))
         divergences += step.divergent
     end

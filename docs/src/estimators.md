@@ -7,7 +7,7 @@
 | `focei` with `interaction = true` (default) | Fitted by a derivative-free outer search | EBEs at the fit | Same fields, with the variance-Jacobian interaction term |
 | `saem` with `StandardSAEMMH()` (default) | Fitted by stochastic approximation | One evolving η chain per subject | `SAEMResult.theta`, `.sigma`, `.omega_matrix`, `.acceptance` |
 | `saem` with `DualAveragingMALA()` (experimental) | Fitted by stochastic approximation | Batched proposals with a separate continuously adapted step size per subject | `SAEMResult.theta`, `.sigma`, `.omega_matrix`, `.mala_stepsizes`, `.mala_acceptance` |
-| `saem` with `WarmupHMCNUTS()` | Fitted by stochastic approximation | Per-subject NUTS transitions whose metric and step size adapt on every transition (Pathfinder start, no η Hessian) | `SAEMResult.theta`, `.sigma`, `.omega_matrix`, `.nuts_divergences` |
+| `saem` with `WarmupHMCNUTS()` | Fitted by stochastic approximation | Per-subject NUTS transitions whose metric and step size adapt on every transition (Pathfinder start, no η Hessian); a batched model's chains take their leapfrog steps in lockstep, one batched call per step | `SAEMResult.theta`, `.sigma`, `.omega_matrix`, `.nuts_divergences` |
 
 On a ragged layout (`RaggedNLMELayout`) every SAEM kernel returns a `RaggedSAEMResult` with the same fields, `eta` and `omega_matrix` holding one vector per subject and one matrix per random-effect family.
 

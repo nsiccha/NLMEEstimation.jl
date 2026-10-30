@@ -102,16 +102,17 @@ end
     cases = (
         (growth_model(n = n), GROWTH_θ0, GROWTH_σ0, GROWTH_ω0, StandardSAEMMH()),
         (growth_model(n = n), GROWTH_θ0, GROWTH_σ0, GROWTH_ω0, DualAveragingMALA()),
-        (growth_model(n = n), GROWTH_θ0, GROWTH_σ0, GROWTH_ω0, SMALL_NUTS),
         (occasions_model(n = n), OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0, StandardSAEMMH()))
+    # NUTS evaluates a batched model's chains in lockstep, in batches of every
+    # subject whose tree is still growing; `test/saem_nuts_lockstep.jl` checks that
+    # its minibatch fits evaluate within the batch.
     for (inner, θ0, σ0, ω0, kernel) in cases
         model = BatchRecorder(inner)
         saem(model, θ0, σ0, ω0; rng = Xoshiro(1), kernel, options = SAEMOptions(;
             iterations, burnin = 15, mcmc_burnin = 2, minibatch_size = b))
         batches = model.batches
         # The start is checked on every subject once, and the MCMC burn-in
-        # sweeps every chain (NUTS's Pathfinder start and transitions evaluate
-        # one subject at a time). Each SA iteration then opens with the domain check of
+        # sweeps every chain. Each SA iteration then opens with the domain check of
         # exactly its batch, and every later evaluation of the iteration (kernel
         # proposals or transitions, the numerical step's values and gradients)
         # lies within it. The only exceptions are the numerical step's metric

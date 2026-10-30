@@ -235,7 +235,13 @@ population parameters change (WarmupHMC's continuously adapting kernel). There i
 no warmup phase and no η Hessian; `WarmupHMCNUTS(; target_acceptance_rate = 0.8,
 max_tree_depth = 10)` are its only settings. NUTS uses `Xoshiro` streams
 internally, seeded from the supplied RNG; its MH-only `acceptance` and `rw_scale`
-fields are `missing`. See
+fields are `missing`. A `BatchedEvaluation` model's chains run in lockstep: each
+leapfrog step of every subject whose trajectory is still growing reaches the model
+as one `conditional_loglikelihoods_and_gradients` call over those subjects, so a
+round of transitions costs as many batched calls as its longest trajectory, not
+the sum over subjects (NLMEEstimation 0.2.1). A per-subject model's chains run one
+after another, one call per subject and leapfrog step. The chains are tasks on the
+calling thread: the model is never called from another thread. See
 [`bench/RESULTS.md`](bench/RESULTS.md) for MH/NUTS sampling and fit benchmarks.
 
 SAEM keeps one η chain per subject. Each MH round evaluates prior-independence
