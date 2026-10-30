@@ -20,7 +20,9 @@ failing or silently behaving differently at run time.
   subject's chain starts with Pathfinder from its starting η (no warmup phase,
   no η Hessian), and every transition adapts the diagonal metric and the step
   size from its leapfrog leaves for the whole fit, as θ, σ and Ω move
-  (WarmupHMC 0.2.5's `ContinuousNUTSState`, `continuous_nuts_step` and `reposition!`). The
+  (WarmupHMC's `ContinuousNUTSState`, `continuous_nuts_step` and `reposition!`;
+  the floor is 0.2.8, whose Pathfinder start works from a fit's modes, stays
+  inside a bounded support, and allocates no d × d buffer). The
   keywords `warmup_draws`, `warmup_evaluations`, `stepsize_adaptation_limit`,
   `curvature_floor` and `metric` are gone: remove them from
   `WarmupHMCNUTS(…)` calls. `max_tree_depth` defaults to 10 (was 8).
