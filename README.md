@@ -243,7 +243,11 @@ fields are `missing`. A `BatchedEvaluation` model's chains run in lockstep: each
 leapfrog step of every subject whose trajectory is still growing reaches the model
 as one `conditional_loglikelihoods_and_gradients` call over those subjects, so a
 round of transitions costs as many batched calls as its longest trajectory, not
-the sum over subjects (NLMEEstimation 0.2.1). A per-subject model's chains run one
+the sum over subjects (NLMEEstimation 0.2.1). Those calls list, subject for
+subject, the evaluations the per-subject route would make, with the same draws, so
+lockstep never asks a model for more subject evaluations; a model whose small
+batches cost more than their subjects' own calls pays the difference, which is
+its batched call's to remove. A per-subject model's chains run one
 after another, one call per subject and leapfrog step. The chains are tasks on the
 calling thread: the model is never called from another thread. See
 [`bench/RESULTS.md`](bench/RESULTS.md) for MH/NUTS sampling and fit benchmarks.
