@@ -369,10 +369,110 @@ With [`provides_laplace_gradient`](@ref), a `covariance_step` with
 prior: `2p + 1` calls for `p` coordinates, with no mode search and no conditional
 evaluation of its own. [`check_protocol`](@ref) compares its values with the
 package's Laplace approximation and its gradient with a central difference.
+
+It is [`laplace_conditionals_and_population_gradient`](@ref) with every family
+integrated, which is the default: a model that implements that method only
+needs to declare [`provides_laplace_gradient`](@ref).
 """
-laplace_marginals_and_gradient(model, subjects, θ, σ, ω, H) = throw(ArgumentError(
-    "$(typeof(model)) declares provides_laplace_gradient but implements no " *
-    "`NLMEEstimation.laplace_marginals_and_gradient(::$(typeof(model)), subjects, θ, σ, ω, H)`"))
+laplace_marginals_and_gradient(model, subjects, θ, σ, ω, H) =
+    laplace_conditionals_and_population_gradient(model, _families(nlme_layout(model)),
+        subjects, θ, σ, ω, H)
+
+_families(layout::NLMELayout) = collect(eachindex(layout.eta_blocks))
+_families(layout::RaggedNLMELayout) = collect(eachindex(layout.family_sizes))
+
+"""
+    integrated_families(model) -> Vector{Int}
+
+**Optional.** The covariance families whose random effects the model integrates
+out by its own Laplace approximation when [`saem`](@ref) fits it: the families
+of a [`RaggedNLMELayout`](@ref), or the `eta_blocks` of an
+[`NLMELayout`](@ref), by index. Defaults to none. `saem(...; integrated = …)`
+chooses another set for one fit, so a staged fit can integrate different
+families in successive calls.
+
+A model that integrates families implements
+[`laplace_conditionals_and_gradients`](@ref),
+[`laplace_conditional_moments`](@ref) and
+[`laplace_conditionals_and_population_gradient`](@ref) for every set it is
+asked to integrate. Each takes the set as its second argument, a sorted vector
+of family indices, and a batch `H` in the shape of
+[`conditional_loglikelihoods`](@ref): in each subject's column the entries of
+the integrated families' instances are starting points for the mode search,
+and the other entries, the *sampled* ones, are given.
+"""
+integrated_families(model) = Int[]
+
+"""
+    laplace_conditionals_and_gradients(model, integrated, subjects, θ, σ, ω, H) -> (ℓ, G)
+
+**Required to sample with [`integrated_families`](@ref).** Entry `k` of `ℓ` is
+the Laplace approximation of subject `i = subjects[k]`'s conditional
+log-likelihood given its sampled random effects `s`, with the instances `u` of
+the families in `integrated` integrated out:
+
+    log p(y_i | s, û) + log p(û | Ω) + d/2 log 2π - 1/2 log det(-H_uu)
+
+with `d` integrated effects, `û` the mode of `log p(y_i | s, u) + log p(u | Ω)`
+in `u` and `H_uu` its Hessian there. `p(u | Ω)` is the package's Gaussian prior
+of those instances at ω, so the value depends on ω; the sampled effects' prior
+is left out, as in [`conditional_loglikelihoods`](@ref). With nothing
+integrated it is the conditional log-likelihood. `G` has the shape of `H`:
+the gradient of `ℓ[k]` in the sampled entries of column `k`, with the mode's
+dependence on them included, and zero in the integrated entries, which only
+start the mode search.
+
+SAEM's chains sample the sampled entries against `ℓ` plus their prior, so a
+mode search warm-started from `H` must make `ℓ` a smooth function of them.
+"""
+laplace_conditionals_and_gradients(model, integrated, subjects, θ, σ, ω, H) =
+    throw(ArgumentError("$(typeof(model)) integrates families $integrated but implements no " *
+        "`NLMEEstimation.laplace_conditionals_and_gradients(::$(typeof(model)), integrated, " *
+        "subjects, θ, σ, ω, H)`"))
+
+"""
+    laplace_conditionals(model, integrated, subjects, θ, σ, ω, H) -> ℓ
+
+**Optional.** The values of [`laplace_conditionals_and_gradients`](@ref) alone,
+for proposals that need no gradient. Defaults to computing both; implement it
+where a value costs less than a gradient.
+"""
+laplace_conditionals(model, integrated, subjects, θ, σ, ω, H) =
+    first(laplace_conditionals_and_gradients(model, integrated, subjects, θ, σ, ω, H))
+
+"""
+    laplace_conditional_moments(model, integrated, subjects, θ, σ, ω, H) -> (ℓ, M, C)
+
+**Required with [`integrated_families`](@ref).** The values `ℓ` of
+[`laplace_conditionals`](@ref) and the Gaussian (Laplace) approximation of
+each subject's integrated effects given its sampled ones. `M` has the shape of
+`H`, its integrated entries at the mode `û` and its sampled entries those of
+`H`. `C[k]` lists one covariance matrix per integrated family instance of
+subject `subjects[k]`, in η order: the instance's diagonal block of
+`(-H_uu)⁻¹`, the covariance of the approximation. SAEM's M-step takes each
+integrated family's covariance from these moments, `E[u uᵀ] ≈ û ûᵀ + C`, so
+only the diagonal blocks are needed, never the whole inverse.
+"""
+laplace_conditional_moments(model, integrated, subjects, θ, σ, ω, H) =
+    throw(ArgumentError("$(typeof(model)) integrates families $integrated but implements no " *
+        "`NLMEEstimation.laplace_conditional_moments(::$(typeof(model)), integrated, " *
+        "subjects, θ, σ, ω, H)`"))
+
+"""
+    laplace_conditionals_and_population_gradient(model, integrated, subjects, θ, σ, ω, H) -> (ℓ, ∇θ, ∇σ, ∇ω)
+
+**Required with [`integrated_families`](@ref) when SAEM's numerical M-step
+runs** (the model has σ coordinates or θ coordinates without a closed-form
+[`MuReferencing`](@ref) update). The values `ℓ` of
+[`laplace_conditionals`](@ref) and the gradients of `sum(ℓ)` in θ, σ and ω at
+fixed sampled effects, with the mode's dependence on them included. With every
+family integrated it is [`laplace_marginals_and_gradient`](@ref).
+"""
+laplace_conditionals_and_population_gradient(model, integrated, subjects, θ, σ, ω, H) =
+    throw(ArgumentError("$(typeof(model)) implements no " *
+        "`NLMEEstimation.laplace_conditionals_and_population_gradient(::$(typeof(model)), " *
+        "integrated, subjects, θ, σ, ω, H)` (or, for every family integrated, " *
+        "`laplace_marginals_and_gradient`)"))
 
 # Per-subject models: derivatives of the per-subject density.
 function _and_gradient(::PerSubjectEvaluation, model, i, θ, σ, η)

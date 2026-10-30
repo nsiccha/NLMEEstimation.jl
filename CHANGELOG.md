@@ -14,6 +14,43 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.4
+
+- SAEM samples only the random effects a model does not integrate out by its own
+  Laplace approximation. A model lists the covariance families it integrates in
+  `integrated_families(model)` (by default none), and `saem(...; integrated = …)`
+  chooses another set for one fit, so a staged fit can integrate different
+  families in successive calls. The model implements
+  `laplace_conditionals_and_gradients` (each subject's Laplace conditional
+  log-likelihood given its sampled effects, and its gradient in them),
+  `laplace_conditional_moments` (the integrated modes and each integrated
+  instance's covariance block) and `laplace_conditionals_and_population_gradient`
+  (for the numerical M-step), each taking the integrated families as its second
+  argument; `laplace_conditionals` returns values alone. The chains sample each
+  subject's other effects against the Laplace conditional, a subject with none
+  keeps no chain, and every kernel works unchanged. The M-step takes each
+  integrated family's covariance and mu-referenced θ in closed form from the
+  Laplace moments, `E[u uᵀ] ≈ û ûᵀ + C`, averaged like the chains' statistics,
+  and moves θ and σ on the Laplace conditionals at fixed sampled effects.
+- With every family integrated, `saem` runs Laplace-EM: nothing is sampled,
+  every iteration takes the whole step without burn-in or Ω annealing (so
+  `burnin` need not be below `iterations`), and the result's `kernel` is
+  `:laplace_em`. Where the model is Gaussian in its effects
+  it converges to the maximum-likelihood estimate.
+- `SAEMResult` and `RaggedSAEMResult` gain the field `integrated`, the families
+  the fit integrated; their entries of `eta` are the final Laplace modes.
+- `laplace_marginals_and_gradient` defaults to
+  `laplace_conditionals_and_population_gradient` with every family integrated,
+  so a model implementing the latter needs only `provides_laplace_gradient` for
+  the Laplace covariance step.
+- `check_protocol(...; integrated = integrated_families(model))` checks those
+  methods: agreeing values and shapes, values, modes and covariance blocks equal
+  to the package's own Laplace approximation of the integrated effects given the
+  others (a dense check for small subjects), gradients zero in the integrated
+  entries and equal to central differences in the sampled entries and the
+  population coordinates.
+- Fits that integrate nothing are unchanged.
+
 ## 0.2.3
 
 - `covariance_step` takes the Laplace curvature from a model's own gradient. A
