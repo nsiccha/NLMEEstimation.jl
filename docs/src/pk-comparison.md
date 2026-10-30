@@ -102,8 +102,7 @@ saem_mh = saem(m, θ0, σ0, ω0; rng=Xoshiro(5),
 saem_nuts = saem(m, θ0, σ0, ω0; rng=Xoshiro(6),
     options=SAEMOptions(iterations=40, burnin=20, mcmc_burnin=0,
         numeric_maxiter=8, mstep_interval=3, numeric_mstep=:mixture),
-    kernel=WarmupHMCNUTS(warmup_draws=12, warmup_evaluations=50,
-        stepsize_adaptation_limit=10, max_tree_depth=5))
+    kernel=WarmupHMCNUTS(max_tree_depth=5))
 
 problem = rk_logdensity_problem(backend; ad_backend=AD)
 chains = [WarmupHMC.adaptive_warmup_mcmc(Xoshiro(seed), problem;
@@ -148,6 +147,6 @@ The next table compares subject 1 effects on the log-clearance and log-volume sc
 
 FOCE used `maxeval=400` and converged after 148 evaluations, with objective value 136.8283. FOCEI enabled `interaction=true`, converged after 144 evaluations, and had objective value 136.8548. Their displayed estimates round to the same three decimals; the objective values retain their respective interaction definitions.
 
-SAEM MH ran 100 iterations with 50 burn-in iterations, 15 MCMC burn-in transitions, 50 proposal-adaptation iterations, and an M-step every three iterations. Its prior-proposal acceptance was 0.0837 and random-walk acceptance was 0.2391. SAEM NUTS ran 40 iterations with 20 burn-in iterations and an M-step every three iterations; each subject kernel used 12 warmup draws, 50 warmup evaluations, step-size adaptation limit 10, and maximum tree depth 5. It recorded zero fixed-kernel divergences.
+SAEM MH ran 100 iterations with 50 burn-in iterations, 15 MCMC burn-in transitions, 50 proposal-adaptation iterations, and an M-step every three iterations. Its prior-proposal acceptance was 0.0837 and random-walk acceptance was 0.2391. SAEM NUTS ran 40 iterations with 20 burn-in iterations and an M-step every three iterations; each subject kernel used 12 warmup draws, 50 warmup evaluations, step-size adaptation limit 10, and maximum tree depth 5 (the one-time-warmup kernel of NLMEEstimation 0.1.x; from 0.2.0 the kernel adapts on every transition and the code above passes only `max_tree_depth`). It recorded zero fixed-kernel divergences.
 
 Full joint WarmupHMC used two chains with 500 posterior draws each and no divergences. The rank-normalized R̂ values for the log-volume intercept, log-clearance intercept, and clearance weight slope were 1.0061, 1.0000, and 1.0109; their bulk effective sample sizes were 564.9, 490.0, and 438.6. The script constrains each joint draw before averaging clearance, volume, residual SD, random-effect SDs, or subject effects. These finite-run point estimates and Bayesian posterior means are different estimands. Eight subjects keep the example runnable; this table is a workflow comparison, not an accuracy ranking.

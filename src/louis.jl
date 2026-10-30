@@ -20,14 +20,13 @@ per subject and draw), and their curvature from central differences of the
 summed population gradient (two batched calls per coordinate and draw, with
 [`covariance_step`](@ref)'s `step`).
 
-`kernel`, a [`WarmupHMCNUTS`](@ref), draws each subject's η: a warmup from the
-starting η (a fit's chain states or modes), `burnin` discarded transitions, then
-`draws` kept ones. `R` and `S` carry Monte Carlo error that falls as
-`1/√draws`. It applies to any likelihood and to both layouts, and keeps no
-`n × n` matrix per subject; for a subject with thousands of nested random
-effects, declare [`eta_hessian_sparsity`](@ref) so NUTS's warmup metric is
-sparse too. It is not a marginal likelihood: [`marginal_loglikelihood`](@ref)
-refuses it.
+`kernel`, a [`WarmupHMCNUTS`](@ref), draws each subject's η: Pathfinder from the
+starting η (a fit's chain states or modes), `burnin` discarded transitions that
+adapt the kernel, then `draws` kept ones under the kernel frozen. `R` and `S`
+carry Monte Carlo error that falls as `1/√draws`. It applies to any likelihood
+and to both layouts, asks the model for no η Hessian, and keeps no `n × n`
+matrix per subject. It is not a marginal likelihood:
+[`marginal_loglikelihood`](@ref) refuses it.
 """
 Base.@kwdef struct LouisInformation{K <: WarmupHMCNUTS}
     draws::Int = 1000
@@ -102,31 +101,26 @@ function _covariance_matrices(prepared::_PreparedLouis, split, ŷ, free, step, m
     sums, squares = zeros(p, n), zeros(p, p, n)
     curvature = zeros(p, p)
     mean_phi, second_phi = _saem_statistics(layout, ids, H)
-    root = mktempdir()
-    try
-        nuts = _saem_nuts_warmup!(prepared.rng, a.kernel, root, model, ids, θ, σ, prior, H)
-        for round in 1:(a.burnin + a.draws)
-            throw_if_interrupted(counter)
-            _saem_nuts_round!(nuts.states, model, ids, θ, σ, prior, H)
-            counter === nothing || update_progress!(counter, round)
-            round <= a.burnin && continue
-            _louis_add_moments!(mean_phi, second_phi, _saem_phi(H, θ, indices, design))
-            for (k, i) in enumerate(ids)
-                s = _louis_score(model, layout, i, θ, σ, ω, prior, constraints, indices,
-                    design[k], _column(H, k))
-                sums[:, k] .+= s
-                squares[:, :, k] .+= s * s'
-            end
-            method == :s && continue
-            for j in conditional
-                gradient(sign) = last(_saem_population_value_gradient(style, model, ids,
-                    split(_louis_shift(ŷ, j, sign * h[j]))[1:2]..., H))
-                column = (gradient(1) - gradient(-1)) / (2h[j])
-                curvature[conditional, j] .-= column[conditional]
-            end
+    states = _saem_nuts_start!(prepared.rng, a.kernel, model, ids, θ, σ, prior, H)
+    for round in 1:(a.burnin + a.draws)
+        throw_if_interrupted(counter)
+        _saem_nuts_round!(states, model, ids, θ, σ, prior, H; adapt = round <= a.burnin)
+        counter === nothing || update_progress!(counter, round)
+        round <= a.burnin && continue
+        _louis_add_moments!(mean_phi, second_phi, _saem_phi(H, θ, indices, design))
+        for (k, i) in enumerate(ids)
+            s = _louis_score(model, layout, i, θ, σ, ω, prior, constraints, indices,
+                design[k], _column(H, k))
+            sums[:, k] .+= s
+            squares[:, :, k] .+= s * s'
         end
-    finally
-        _saem_remove_nuts_tempdir(root)
+        method == :s && continue
+        for j in conditional
+            gradient(sign) = last(_saem_population_value_gradient(style, model, ids,
+                split(_louis_shift(ŷ, j, sign * h[j]))[1:2]..., H))
+            column = (gradient(1) - gradient(-1)) / (2h[j])
+            curvature[conditional, j] .-= column[conditional]
+        end
     end
     K = a.draws
     curvature ./= K

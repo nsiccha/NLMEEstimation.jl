@@ -9,13 +9,11 @@ const SELECTION_SEEDS = 2060:2069
 const QUALIFY_SEEDS = 2080:2099
 const FINAL_SEEDS = 2110:2119
 
+# The warmup settings of these recorded configurations belonged to the one-time-warmup
+# kernel of NLMEEstimation 0.1.x; the 0.2.0 kernel adapts on every transition and takes
+# only the tree depth and the acceptance target.
 function nuts_kernel(cfg)
-    return WarmupHMCNUTS(metric=cfg.metric == :hessian ? :diagonal : cfg.metric,
-        warmup_draws=cfg.draws,
-        warmup_evaluations=cfg.evaluations,
-        stepsize_adaptation_limit=cfg.draws,
-        max_tree_depth=cfg.depth,
-        target_acceptance_rate=cfg.acceptance)
+    return WarmupHMCNUTS(max_tree_depth=cfg.depth, target_acceptance_rate=cfg.acceptance)
 end
 
 function nuts_fit_check(model, ω, cfg, seeds)

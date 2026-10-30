@@ -1,7 +1,7 @@
 name = "NLMEEstimation"
 uuid = "93620da2-aa34-4028-9135-3a6a776ddbc2"
 authors = ["Nikolas Siccha and contributors"]
-version = "0.1.7"
+version = "0.2.0"
 
 [deps]
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
@@ -10,7 +10,6 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
 NLopt = "76087f3c-5699-56af-9a33-bf431cd00edd"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
-Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 SparseMatrixColorings = "0a514795-09f3-496d-8182-132a7b665d35"
 Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
@@ -24,5 +23,5 @@ NLopt = "1.2"
 SparseArrays = "1.10"
 SparseMatrixColorings = "0.4.25"
 Treebars = "0.1"
-WarmupHMC = "0.2.1"
+WarmupHMC = "0.2.4"
 julia = "1.10"

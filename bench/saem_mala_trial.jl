@@ -114,9 +114,7 @@ function theoph_fit(method, cfg, seed, model, ω;
     kernel = method == :MALA ? DualAveragingMALA(metric=cfg.metric,
         initial_stepsize=cfg.eps,
         target_acceptance_rate=cfg.target) : method == :MH ?
-        StandardSAEMMH() : WarmupHMCNUTS(metric=:dense, warmup_draws=20,
-        warmup_evaluations=50, stepsize_adaptation_limit=20,
-        max_tree_depth=8, target_acceptance_rate=0.8)
+        StandardSAEMMH() : WarmupHMCNUTS(max_tree_depth=8, target_acceptance_rate=0.8)
     timed = @timed saem(model, θ_THEOPH, σ_THEOPH, ω;
         rng=MersenneTwister(seed), subjects=collect(ids), options, kernel)
     fit = timed.value

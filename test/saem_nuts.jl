@@ -38,8 +38,7 @@ end
     fit = saem(model, Float64[], Float64[], [log(0.7)]; rng=MersenneTwister(42),
         options=SAEMOptions(iterations=3, burnin=1, mcmc_burnin=0,
             mh_rounds=1, adapt_iterations=0),
-        kernel=WarmupHMCNUTS(warmup_draws=4, warmup_evaluations=20,
-            stepsize_adaptation_limit=5, max_tree_depth=4))
+        kernel=WarmupHMCNUTS(max_tree_depth=4))
     @test fit.kernel == :warmuphmc_nuts
     @test size(fit.eta) == (1, 2)
     @test all(isfinite, fit.eta)
@@ -49,7 +48,7 @@ end
     @test ismissing(fit.rw_scale)
     @test_throws ArgumentError saem(model, Float64[], Float64[], [log(0.7)];
         options=SAEMOptions(iterations=2, burnin=0),
-        kernel=WarmupHMCNUTS(metric=:unsupported))
+        kernel=WarmupHMCNUTS(max_tree_depth=0))
     @test_throws ArgumentError saem(model, Float64[], Float64[], [log(0.7)];
         options=SAEMOptions(iterations=2, burnin=0),
         kernel=WarmupHMCNUTS(target_acceptance_rate=1.0))

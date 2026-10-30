@@ -229,14 +229,13 @@ nuts_fit = saem(model, θ, σ, ω; rng = Xoshiro(2026),
 nuts_fit.kernel, nuts_fit.nuts_divergences
 ```
 
-WarmupHMC warms up each subject once, initialized with a covariance derived
-from the local η Hessian when the model provides one. The default uses its
-diagonal; `WarmupHMCNUTS(metric = :dense)` passes the inverse regularized
-Hessian. SAEM then advances each
-subject by fixed-kernel NUTS transitions as the population parameters change.
-The warmup and stream files are temporary for the duration of the fit. NUTS
-uses `Xoshiro` streams internally, seeded from the supplied RNG; its MH-only
-`acceptance` and `rw_scale` fields are `missing`. See
+Each subject's chain starts with Pathfinder from its starting η and then adapts
+its diagonal metric and step size on every transition, for the whole fit, as the
+population parameters change (WarmupHMC's continuously adapting kernel). There is
+no warmup phase and no η Hessian; `WarmupHMCNUTS(; target_acceptance_rate = 0.8,
+max_tree_depth = 10)` are its only settings. NUTS uses `Xoshiro` streams
+internally, seeded from the supplied RNG; its MH-only `acceptance` and `rw_scale`
+fields are `missing`. See
 [`bench/RESULTS.md`](bench/RESULTS.md) for MH/NUTS sampling and fit benchmarks.
 
 SAEM keeps one η chain per subject. Each MH round evaluates prior-independence

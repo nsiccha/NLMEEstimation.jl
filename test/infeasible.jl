@@ -244,8 +244,7 @@ end
     # A trajectory that reaches an infeasible position diverges there.
     θ0, σ0 = [1.0, 0.5], [log(0.5)]
     ω0 = omega_parameters(GROWTH_LAYOUT, [0.8 0.0; 0.0 0.3])
-    kernel = WarmupHMCNUTS(warmup_draws = 4, warmup_evaluations = 20,
-        stepsize_adaptation_limit = 5, max_tree_depth = 4)
+    kernel = WarmupHMCNUTS(max_tree_depth = 4)
     fit, reference, hits = bounded_fits(
         throws -> Bounded(growth_model(); max_eta = 0.6, throws), θ0, σ0, ω0; kernel)
     @test hits[2] > 0
@@ -280,8 +279,7 @@ end
     # instead, some chains' φ₁ landed outside it and the fit stopped. MH, NUTS and
     # ragged MH fit, and the throwing model retraces its -Inf twin.
     opts = SAEMOptions(; BOUNDED_OPTIONS...)
-    nuts = WarmupHMCNUTS(warmup_draws = 4, warmup_evaluations = 20,
-        stepsize_adaptation_limit = 5, max_tree_depth = 4)
+    nuts = WarmupHMCNUTS(max_tree_depth = 4)
     growth = ([-3.0, 0.5], [log(0.5)],
         omega_parameters(GROWTH_LAYOUT, [0.8 0.0; 0.0 0.3]))
     cases = (("MH", growth_model, growth, StandardSAEMMH()),

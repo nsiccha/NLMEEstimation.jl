@@ -66,8 +66,7 @@ same_fit(a, b) = a.theta == b.theta && a.sigma == b.sigma && a.omega == b.omega 
     model = growth_model()
     fit(kernel; kwargs...) = saem(model, GROWTH_θ, GROWTH_σ, GROWTH_ω; rng = Xoshiro(3),
         options = SAEM_OPTIONS, kernel, kwargs...)
-    nuts = WarmupHMCNUTS(warmup_draws = 6, warmup_evaluations = 30,
-        stepsize_adaptation_limit = 6, max_tree_depth = 5)
+    nuts = WarmupHMCNUTS(max_tree_depth = 5)
     for (kernel, statistic) in ((StandardSAEMMH(), "acceptance"),
             (DualAveragingMALA(), "mean MALA step size"), (nuts, "divergent transitions"))
         plain = fit(kernel)
@@ -82,8 +81,8 @@ same_fit(a, b) = a.theta == b.theta && a.sigma == b.sigma && a.omega == b.omega 
         @test occursin("γ = ", tree) && occursin(statistic, tree)
         @test occursin("Σ log p(y|η)", tree) == !(kernel isa DualAveragingMALA)
         if kernel isa WarmupHMCNUTS
-            @test occursin("✓ NUTS warmup (12/12)", tree)
-            @test !occursin("subject", tree)   # each subject's WarmupHMC tree is transient
+            @test occursin("✓ Pathfinder start (12/12)", tree)
+            @test !occursin("subject", tree)   # no node per subject
         end
     end
     @test fit(StandardSAEMMH(); progress = :state).iterations == 30
@@ -186,9 +185,8 @@ end
     @test start.theta == GROWTH_θ && start.omega == GROWTH_ω
     @test isnan(start.acceptance.prior)
 
-    # During the NUTS warmup.
-    nuts = WarmupHMCNUTS(warmup_draws = 6, warmup_evaluations = 30,
-        stepsize_adaptation_limit = 6, max_tree_depth = 5)
+    # During the Pathfinder start.
+    nuts = WarmupHMCNUTS(max_tree_depth = 5)
     warm, tree = traced() do root
         saem(StopAfter(model, root, 40), GROWTH_θ, GROWTH_σ, GROWTH_ω; rng = Xoshiro(3),
             options, kernel = nuts, progress = root)

@@ -45,6 +45,16 @@ for k in 1:n
 end
 ```
 
+!!! note "NLMEEstimation 0.2.0 replaced this kernel"
+    The NUTS kernel measured on this page warmed each subject up once at the
+    start and then held its step size and metric fixed. From 0.2.0, `WarmupHMCNUTS`
+    starts each subject with Pathfinder and adapts its diagonal metric and step
+    size on every transition for the whole fit, and the `warmup_draws`,
+    `warmup_evaluations`, `stepsize_adaptation_limit`, `curvature_floor` and
+    `metric` keywords below no longer exist (see `bench/saem_nuts_continuous.jl`
+    for the current kernel's measurements). The numbers here are reproducible at
+    the pinned commits only.
+
 The [NUTS integration](https://github.com/nsiccha/NLMEEstimation.jl/blob/6c0010311a30b694d83cbda1852cdcd3d18a9aaa/src/saem.jl) adds the analytic Gaussian-prior gradient to the model's conditional η gradient. Per subject, it inverts a regularized local negative log-posterior Hessian for the initial covariance, adapts once, and loads a fixed-kernel state. The selected setting uses the full three-by-three covariance; the public default uses its diagonal.
 
 ```julia

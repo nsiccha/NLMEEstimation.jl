@@ -46,7 +46,6 @@ import DifferentiationInterface as DI
 import NLopt
 import LogDensityProblems as LDP
 import WarmupHMC
-using Serialization: deserialize
 using Treebars: Fraction, ProgressInterrupted, finalize_progress!, interrupt_requested,
     is_running, prepare_progress!, short_string, start_progress!, throw_if_interrupted,
     update_progress!, with_progress

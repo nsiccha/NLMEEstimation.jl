@@ -66,8 +66,7 @@ with_minibatch(o::SAEMOptions, b) = SAEMOptions(; merge(NamedTuple{fieldnames(SA
 const GROWTH_θ0, GROWTH_σ0 = [1.0, 0.5], [log(0.3)]
 const GROWTH_ω0 = omega_parameters(GROWTH_LAYOUT, [0.5 0.1; 0.1 0.2])
 const OCCASIONS_θ0, OCCASIONS_σ0, OCCASIONS_ω0 = [2.0], [log(0.25)], [log(0.6), log(0.4)]
-const SMALL_NUTS = WarmupHMCNUTS(warmup_draws = 6, warmup_evaluations = 30,
-    stepsize_adaptation_limit = 6, max_tree_depth = 5)
+const SMALL_NUTS = WarmupHMCNUTS(max_tree_depth = 5)
 
 @testset "minibatch SAEM options" begin
     model = growth_model()
@@ -111,8 +110,8 @@ end
             iterations, burnin = 15, mcmc_burnin = 2, minibatch_size = b))
         batches = model.batches
         # The start is checked on every subject once, and the MCMC burn-in
-        # sweeps every chain (NUTS warmup and transitions evaluate one subject
-        # at a time). Each SA iteration then opens with the domain check of
+        # sweeps every chain (NUTS's Pathfinder start and transitions evaluate
+        # one subject at a time). Each SA iteration then opens with the domain check of
         # exactly its batch, and every later evaluation of the iteration (kernel
         # proposals or transitions, the numerical step's values and gradients)
         # lies within it. The only exceptions are the numerical step's metric
@@ -258,8 +257,7 @@ end
     growth = growth_model(n = n)
     exact(x) = growth_exact(growth, x)
     _, best = exact_maximum(exact, vcat(GROWTH_θ0, GROWTH_σ0, GROWTH_ω0))
-    nuts = WarmupHMCNUTS(warmup_draws = 8, warmup_evaluations = 50,
-        stepsize_adaptation_limit = 10, max_tree_depth = 6)
+    nuts = WarmupHMCNUTS(max_tree_depth = 6)
     for (kernel, bound) in ((StandardSAEMMH(), 0.5), (DualAveragingMALA(metric = :hessian), 1.0),
             (nuts, 0.5))
         g = gaps(exact, best, fits(growth, GROWTH_θ0, GROWTH_σ0, GROWTH_ω0; kernel))
