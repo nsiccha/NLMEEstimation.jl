@@ -140,22 +140,23 @@ end
         log = model.log
         # The start is checked on every subject, and the Pathfinder start and the
         # burn-in transitions move every chain, each burn-in round opening with all
-        # of them. The numerical M-step's evaluations are per subject. So after the
+        # of them. The numerical M-step's gradients are per subject. So after the
         # last round over all chains, each SA iteration opens with the domain check
-        # of exactly its batch (densities alone), and every transition of the
-        # iteration evaluates within it.
+        # of exactly its batch (densities alone), and every later evaluation of the
+        # iteration, its transitions and the M-step's line search, lies within it.
         @test first(log) == (:value => 1:n)
         last_full = findlast(e -> e == (:gradient => 1:n), log)
         start = findnext(e -> first(e) === :value, log, last_full)
-        current, checks, contained = Int[], 0, true
+        current, changes, contained = last(log[start]), 0, true
         for (kind, s) in log[start:end]
-            if kind === :value
-                length(s) == b && (current = s; checks += 1)
+            if kind === :value && length(s) == b && s != current
+                current, changes = s, changes + 1
             end
             contained &= issubset(s, current)
         end
+        @test length(last(log[start])) == b
         @test contained
-        @test checks == iterations
+        @test 0 < changes <= iterations - 1
         @test all(e -> length(last(e)) <= b, log[start:end])
         @test sort!(unique(reduce(vcat, last.(log[start:end])))) == 1:n
     end
