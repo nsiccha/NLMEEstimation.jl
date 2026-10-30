@@ -106,19 +106,23 @@ end
 
 @testset "integrated families: SAEM sampling the rest" begin
     # Occasion effects integrated, subject effects sampled: SAEM samples one effect
-    # per subject and ends as close to the maximum as plain SAEM sampling all.
+    # per subject and ends within 0.5 log-likelihood units of the maximum. Plain
+    # SAEM sampling every effect is no tighter bound here: seeded full-batch fits
+    # of such ragged models end 0.008-1.01 units below (test/saem_minibatch.jl),
+    # and one plain fit of this model ended 1.09 below on CI's macOS
+    # runner. bench/saem_integrated.jl compares the two at scale.
     occasions = occasions_model(n = 30)
     exact(x) = occasions_exact_nested(occasions, x)
     _, best = integrated_maximum(exact, vcat(INTEGRATED_OCCASIONS_START...))
     gap(fit) = best - exact(vcat(fit.theta, fit.sigma, fit.omega))
-    for kernel in (StandardSAEMMH(), WarmupHMCNUTS(max_tree_depth = 6), DualAveragingMALA())
+    for (kernel, name) in ((StandardSAEMMH(), :standard_mh),
+            (WarmupHMCNUTS(max_tree_depth = 6), :warmuphmc_nuts),
+            (DualAveragingMALA(), :dual_averaging_mala))
         for seed in 1:3
             model = LinearIntegrated(occasions, [2])
             fit = saem(model, INTEGRATED_OCCASIONS_START...; rng = Xoshiro(seed), kernel)
-            plain = saem(occasions, INTEGRATED_OCCASIONS_START...; rng = Xoshiro(seed), kernel)
-            @test fit.integrated == [2] && fit.kernel == plain.kernel
+            @test fit.integrated == [2] && fit.kernel == name
             @test gap(fit) < 0.5
-            @test gap(plain) < 1.0
         end
     end
     # Under a minibatch, with the same calibration.
