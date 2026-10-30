@@ -681,9 +681,12 @@ function _saem_hessian_metric(model, i, θ, σ, prior, η;
     return Matrix(Symmetric(scale))
 end
 
-function _saem_check_options(o::SAEMOptions)
+# Laplace-EM (every family integrated) takes no SA step-size schedule, so its
+# `burnin` is not checked against `iterations`.
+function _saem_check_options(o::SAEMOptions; schedule::Bool = true)
     o.iterations > 0 || throw(ArgumentError("iterations must be positive"))
-    0 <= o.burnin < o.iterations || throw(ArgumentError("require 0 ≤ burnin < iterations"))
+    !schedule || 0 <= o.burnin < o.iterations ||
+        throw(ArgumentError("require 0 ≤ burnin < iterations"))
     o.mcmc_burnin >= 0 || throw(ArgumentError("mcmc_burnin must be nonnegative"))
     o.mh_rounds > 0 || throw(ArgumentError("mh_rounds must be positive"))
     isfinite(o.rw_scale) && o.rw_scale > 0 || throw(ArgumentError("rw_scale must be finite and positive"))
@@ -1711,7 +1714,8 @@ _saem_result(::NLMELayout, fields...) = SAEMResult(fields...)
 # prior and the result type; each kernel works subject by subject on either.
 function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel, node,
         integrated = Int[])
-    _saem_check_options(options)
+    integrated = _checked_integrated(layout, integrated)
+    _saem_check_options(options; schedule = integrated != _families(layout))
     kernel isa WarmupHMCNUTS && _saem_check_nuts(kernel)
     kernel isa DualAveragingMALA && _saem_check_mala(kernel)
     _saem_check_subjects(layout, model)
@@ -1722,7 +1726,6 @@ function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel
     ids = subjects === nothing ? collect(1:nsubjects(model)) : collect(Int, subjects)
     !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= nsubjects(model), ids) ||
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
-    integrated = _checked_integrated(layout, integrated)
     indices, design = _saem_mu_trait(model, ids, layout)
     θ, σ, ω = Float64.(θ0), Float64.(σ0), Float64.(ω0)
     initial_lp = population_logprior(model, θ, σ, ω)

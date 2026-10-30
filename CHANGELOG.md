@@ -33,8 +33,9 @@ failing or silently behaving differently at run time.
   Laplace moments, `E[u uᵀ] ≈ û ûᵀ + C`, averaged like the chains' statistics,
   and moves θ and σ on the Laplace conditionals at fixed sampled effects.
 - With every family integrated, `saem` runs Laplace-EM: nothing is sampled,
-  every iteration takes the whole step without burn-in or Ω annealing, and the
-  result's `kernel` is `:laplace_em`. Where the model is Gaussian in its effects
+  every iteration takes the whole step without burn-in or Ω annealing (so
+  `burnin` need not be below `iterations`), and the result's `kernel` is
+  `:laplace_em`. Where the model is Gaussian in its effects
   it converges to the maximum-likelihood estimate.
 - `SAEMResult` and `RaggedSAEMResult` gain the field `integrated`, the families
   the fit integrated; their entries of `eta` are the final Laplace modes.
