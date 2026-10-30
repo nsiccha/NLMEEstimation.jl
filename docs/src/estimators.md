@@ -35,6 +35,17 @@ A model that computes its own Laplace approximation can integrate some covarianc
 
 Each transition's evaluations cost one warm-started mode search of the model's, against one conditional density for a sampled subject; what a fit gains depends on how many effects it no longer samples. The model keeps its own factorization; only the modes and the instances' covariance blocks cross the protocol.
 
+Measured on six subjects of 250–8,000 nested units (15,750 unit effects; the model of the ragged-kernel benchmark above), with a model that integrates in closed form at a cost linear in its observations, as a sparse Laplace engine does ([`bench/saem_integrated.jl`](https://github.com/nsiccha/NLMEEstimation.jl/blob/master/bench/saem_integrated.jl), results in `bench/saem_integrated_results.txt`, three seeds). The model is Gaussian in its effects, so every integrated fit should reach the maximum likelihood:
+
+| Fit | Marginal gap to the maximum | Seconds | Sampled coordinates |
+| --- | --- | --- | --- |
+| Laplace-EM, every family integrated | ≤ 4e-9 after 10 iterations (one moments call and about one population gradient per iteration) | 16–23 for 400 iterations | 0 |
+| Units integrated, MH on the region effects | ≤ 0.0001 | 22 | 6 |
+| Units integrated, NUTS on the region effects | ≤ 0.0001 | 19–22 | 6 |
+| Plain SAEM, NUTS on every effect | 0.004–0.009 | 46–49 | 15,756 |
+
+Each fit ran 300 iterations (150 at γ = 1) unless stated. The seconds are mostly the package's per-block statistics over 15,756 random-effect blocks, which every fit pays, and they vary with host load. On models where the Laplace approximation is not exact, the integrated families carry its error.
+
 ## Minibatch SAEM
 
 `SAEMOptions(minibatch_size = b)` runs minibatch SAEM (Kuhn, Matias & Rebafka, 2020) for data where one kernel sweep over every subject per iteration costs too much. Each SA iteration draws `b` of the `n` fitted subjects uniformly at random without replacement. Only their chains move, with any kernel the layout supports, and the model is evaluated for them alone:
