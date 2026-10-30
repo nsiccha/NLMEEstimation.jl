@@ -34,7 +34,7 @@ memory proportional to the Hessian's nonzeros.
 struct NewtonEBE <: EBEMethod end
 
 """
-    QuasiNewtonEBE(; memory = 20)
+    QuasiNewtonEBE(; memory = 20, curvature_steps = 20)
 
 Limited-memory BFGS per subject on η gradients, with backtracking (halving) to the
 Armijo condition. The inverse-Hessian approximation applies the last `memory`
@@ -53,18 +53,29 @@ pair with `sᵀy ≤ 0`, which BFGS skips) and, once no subject is still iterati
 every subject that passed the gradient test. The block is sparse when the model
 declares [`eta_hessian_sparsity`](@ref) (two batched gradient calls per color of
 its pattern), else the model's own when it [`provides_eta_hessian`](@ref) (the one
-the result reports, so the check adds no model calls), and otherwise forward
-differences of batched gradients (`neta` batched gradient calls per check, not
-reported in the result). Where `-H` is not positive
+the result reports, so the check adds no model calls). Where `-H` is not positive
 definite, the next step is [`NewtonEBE`](@ref)'s trust-region step with a radius of
 one prior standard deviation, halved until the density increases, and BFGS restarts
 from Ω.
+
+A model with gradients only and no declared pattern is checked without a Hessian
+block: Lanczos on forward differences of batched gradients, at most
+`min(neta, curvature_steps + 16)` batched gradient calls per check, however many
+effects a subject has, and memory linear in them. A negative Ritz value proves
+upward curvature, and the next step goes one prior standard deviation along its
+Ritz vector. A subject of at most `curvature_steps + 16` effects is checked exactly.
+Above that the check can miss upward curvature, so a converged subject is one where
+none was found, not one proven concave; declare [`eta_hessian_sparsity`](@ref) for
+an exact check. Likelihoods that are log-concave in η cannot have a saddle.
 """
 struct QuasiNewtonEBE <: EBEMethod
     memory::Int
-    function QuasiNewtonEBE(; memory::Integer = 20)
+    curvature_steps::Int
+    function QuasiNewtonEBE(; memory::Integer = 20, curvature_steps::Integer = 20)
         memory >= 1 || throw(ArgumentError("QuasiNewtonEBE memory must be positive, got $memory"))
-        return new(memory)
+        curvature_steps >= 1 || throw(ArgumentError(
+            "QuasiNewtonEBE curvature_steps must be positive, got $curvature_steps"))
+        return new(memory, curvature_steps)
     end
 end
 
@@ -617,23 +628,27 @@ _reopen_nonconcave!(::NewtonEBE, state, model, subjects, θ, σ, prior, H, G, co
 # update rather than only the first halved the iterations on nested subjects of
 # 125–4,000 units with 20 pairs, and kept them below the full BFGS update's.
 # Ω is applied through the subject's prior, block by block for a ragged subject.
-# Alongside: the complete-data Hessian block at the subject's current point where
-# it has been computed (`nothing` otherwise; a step discards it), sparse for a model
-# that declares `eta_hessian_sparsity`.
+# Alongside: what is known of the complete-data curvature at the subject's current
+# point (`nothing` until it is checked; a step discards it). That is the Hessian
+# block, sparse for a model that declares `eta_hessian_sparsity`, or for a model with
+# gradients only the finding of `_lanczos_curvature`.
 struct BFGSState{T, P}
     priors::Vector{P}
     scales::Vector{T}
     pairs::Vector{Vector{Tuple{Vector{T}, Vector{T}, T}}}
     memory::Int
-    hessians::Vector{Union{Nothing, Matrix{T}, SparseMatrixCSC{T, Int}}}
+    curvature_steps::Int
+    hessians::Vector{Union{Nothing, Matrix{T}, SparseMatrixCSC{T, Int}, _NoUpwardCurvature,
+        _UpwardCurvature{T}}}
 end
 
 function _initial_curvature(method::QuasiNewtonEBE, model, subjects, θ, σ, prior, H, G)
     T = _eta_eltype(H)
     n = length(subjects)
     return BFGSState([_subject_prior(prior, i) for i in subjects], ones(T, n),
-        [Tuple{Vector{T}, Vector{T}, T}[] for _ in 1:n], method.memory,
-        Vector{Union{Nothing, Matrix{T}, SparseMatrixCSC{T, Int}}}(nothing, n))
+        [Tuple{Vector{T}, Vector{T}, T}[] for _ in 1:n], method.memory, method.curvature_steps,
+        Vector{Union{Nothing, Matrix{T}, SparseMatrixCSC{T, Int}, _NoUpwardCurvature,
+            _UpwardCurvature{T}}}(nothing, n))
 end
 
 # Back to γΩ with no pairs, after an escape step.
@@ -660,12 +675,13 @@ function _inverse_hessian_times(state::BFGSState, k, g)
     return r
 end
 
-# Whether subject k's Hessian block shows that the density is not concave at its
-# current point.
-function _nonconcave(state::BFGSState, k)
-    Hk = state.hessians[k]
-    return Hk !== nothing && !issuccess(cholesky(Symmetric(-Hk); check = false))
-end
+# Whether what is known of subject k's curvature shows that the density is not
+# concave at its current point.
+_nonconcave(state::BFGSState, k) = _nonconcave(state.hessians[k])
+_nonconcave(::Nothing) = false
+_nonconcave(Hk::AbstractMatrix) = !issuccess(cholesky(Symmetric(-Hk); check = false))
+_nonconcave(::_NoUpwardCurvature) = false
+_nonconcave(::_UpwardCurvature) = true
 
 _is_converged(::QuasiNewtonEBE, state, k, g, prior, i, opt) =
     !_nonconcave(state, k) && _standardized_norm(prior, i, g) <= opt.gtol
@@ -673,8 +689,8 @@ _is_converged(::QuasiNewtonEBE, state, k, g, prior, i, opt) =
 # A quasi-Newton trial: the step p and the predicted increase of f along it,
 # `slope + curvature / 2` with slope gᵀp and curvature pᵀHp. A BFGS step predicts with
 # the slope alone (the Armijo test). An escape step from a non-concave point uses the
-# quadratic model of the Hessian block, and BFGS restarts after it. `full` marks the
-# unhalved step.
+# quadratic model of the curvature found, and BFGS restarts after it. `full` marks
+# the unhalved step.
 struct QuasiNewtonTrial{T}
     step::Vector{T}
     slope::T
@@ -687,11 +703,18 @@ _predicted(trial::QuasiNewtonTrial, g) = trial.slope + trial.curvature / 2
 # The escape step is Newton's trust-region step over one prior standard deviation:
 # where -H is not positive definite it follows the directions in which the density
 # curves upward, out to the radius (along the most upward one at a zero gradient).
+# Without a block it goes that far along the Ritz vector, uphill.
+function _escape_step(Hk::AbstractMatrix, prior, g)
+    step = _trust_region_trial(Hk, prior, g, one(eltype(Hk))).step
+    return step, dot(step, Hk * step)
+end
+_escape_step(up::_UpwardCurvature, prior, g) =
+    (dot(g, up.direction) < 0 ? -up.direction : up.direction, up.curvature)
+
 function _first_trial(::QuasiNewtonEBE, state, k, g)
     if _nonconcave(state, k)
-        Hk = state.hessians[k]
-        step = _trust_region_trial(Hk, state.priors[k], g, one(eltype(Hk))).step
-        return QuasiNewtonTrial(step, dot(g, step), dot(step, Hk * step), true, true)
+        step, curvature = _escape_step(state.hessians[k], state.priors[k], g)
+        return QuasiNewtonTrial(step, dot(g, step), curvature, true, true)
     end
     step = _inverse_hessian_times(state, k, g)
     return QuasiNewtonTrial(step, dot(g, step), zero(eltype(step)), true, false)
@@ -701,8 +724,8 @@ _next_trial(::QuasiNewtonEBE, trial, state, k, g) =
 
 # BFGS update of the inverse Hessian of -f with s = Δη, y = Δ(-g): the pair is stored,
 # dropping the oldest beyond `memory`. A pair with sᵀy ≤ 0 shows the density curving
-# upward along s: BFGS cannot represent that, so the update is skipped and the Hessian
-# block at the new point is checked. After an escape step BFGS restarts from Ω.
+# upward along s: BFGS cannot represent that, so the update is skipped and the
+# curvature at the new point is checked. After an escape step BFGS restarts from Ω.
 function _update_curvature!(::QuasiNewtonEBE, state, model, subjects, θ, σ, prior, H, accepted, trials, gains, previous_G, Ga)
     upward = Int[]
     for (j, k) in enumerate(accepted)
@@ -728,8 +751,8 @@ function _update_curvature!(::QuasiNewtonEBE, state, model, subjects, θ, σ, pr
     return state
 end
 
-# Once no subject iterates, the converged subjects whose Hessian block is not yet
-# known are checked; those where the density is not concave are reopened and take an
+# Once no subject iterates, the converged subjects whose curvature is not yet known
+# are checked; those where the density is not concave are reopened and take an
 # escape step.
 function _reopen_nonconcave!(::QuasiNewtonEBE, state, model, subjects, θ, σ, prior, H, G, converged)
     ks = findall(k -> converged[k] && state.hessians[k] === nothing, eachindex(subjects))
@@ -737,37 +760,24 @@ function _reopen_nonconcave!(::QuasiNewtonEBE, state, model, subjects, θ, σ, p
     return filter(k -> _nonconcave(state, k), ks)
 end
 
-# The complete-data Hessian blocks of subjects `ks` at their points `Hks` (with
+# The complete-data curvature of subjects `ks` at their points `Hks` (with
 # complete-data gradients `Gks` there): sparse from the declared patterns, the
-# model's own blocks, or else forward differences of batched gradients.
+# model's own blocks, or else the finding of a Lanczos check.
 function _store_hessians!(state::BFGSState, model, subjects, θ, σ, prior, ks, Hks, Gks)
     isempty(ks) && return state
     state.hessians[ks] = _declares_eta_hessian_sparsity(model) ?
         _sparse_complete_hessians(model, subjects[ks], θ, σ, prior, Hks) :
         provides_eta_hessian(model) ? _model_complete_hessians(model, subjects[ks], θ, σ, prior, Hks) :
-        _difference_blocks(model, subjects[ks], θ, σ, prior,
-            [Vector(_column(Hks, j)) for j in eachindex(ks)], [Vector(_column(Gks, j)) for j in eachindex(ks)])
+        _lanczos_curvature(model, subjects[ks], θ, σ, prior,
+            [Vector(_column(Hks, j)) for j in eachindex(ks)], [Vector(_column(Gks, j)) for j in eachindex(ks)],
+            state.curvature_steps)
     return state
-end
-
-# Forward-difference blocks (`_difference_eta_hessians`) take gradients a step away
-# from each point. If that batch throws `_InfeasibleEvaluation` (a step left the
-# model's domain), each subject is differenced alone, and one whose step still
-# throws gets no block: its curvature is unknown, so it converges on the gradient
-# test alone.
-function _difference_blocks(model, subjects, θ, σ, prior, points, gradients)
-    layout = nlme_layout(model)
-    blocks(ks) = _difference_eta_hessians(model, layout, subjects[ks], θ, σ, prior, points[ks], gradients[ks])
-    batch = _feasible(blocks, eachindex(subjects))
-    batch === nothing || return batch
-    return [_feasible(k -> only(blocks([k])), k) for k in eachindex(subjects)]
 end
 
 _polish!(::QuasiNewtonEBE, model, subjects, θ, σ, prior, H, ℓ, f, G, state, iterations, done) = nothing
 
 # The Hessian blocks at the final points (the model's, or sparse from its patterns),
-# computing those not yet known; none for a gradient-only model without patterns,
-# whose difference blocks served only the checks.
+# computing those not yet known; none for a gradient-only model without patterns.
 function _final_hessians(::QuasiNewtonEBE, state::BFGSState, model, subjects, θ, σ, prior, H)
     _reports_eta_hessians(model) || return nothing
     ks = findall(isnothing, state.hessians)

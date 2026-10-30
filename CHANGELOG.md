@@ -14,6 +14,32 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.2
+
+- `QuasiNewtonEBE` checks the curvature of a model with gradients only and no
+  declared `eta_hessian_sparsity` without a Hessian block. Each check used to
+  form the subject's dense η Hessian from forward differences of batched
+  gradients: one batched call per random effect of the largest subject and
+  `n²` numbers per subject (36,001 calls and 10 GB for a subject of 36,000
+  effects). It now runs Lanczos on Hessian-vector products, each a forward
+  difference of the batched gradients, in the prior-standardized coordinates
+  `L⁻¹η` and preconditioned by a diagonal estimated from 16 random sign
+  vectors: at most `curvature_steps + 16` batched gradient calls per check (new
+  keyword `QuasiNewtonEBE(; curvature_steps = 20)`) and memory linear in a
+  subject's effects. A negative Ritz value proves upward curvature, and the
+  escape step goes one prior standard deviation uphill along its Ritz vector.
+  A subject of at most `curvature_steps + 16` effects is checked exactly, in at
+  most as many calls as it has effects. In a larger one the check can miss
+  upward curvature its products did not reach, so a converged subject there is
+  one where none was found; declaring `eta_hessian_sparsity` keeps the check
+  exact. On `bench/ebe_gradient_only_scale.jl`, with units whose information
+  spreads over five orders of magnitude, the check found a saddle hidden from
+  the diagonal in 24–29 calls at 2,000–50,000 effects and took 36 calls where
+  there was none. From that saddle, with information from 0.1 to 1, the whole
+  pass converged at every size, in 216–341 calls.
+  Models that provide η Hessian blocks or declare their pattern are unchanged,
+  and so are `marginal_loglikelihood` and `covariance_step`.
+
 ## 0.2.1
 
 - `WarmupHMCNUTS` evaluates a `BatchedEvaluation` model's chains in lockstep.

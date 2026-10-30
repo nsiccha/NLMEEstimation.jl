@@ -8,7 +8,8 @@ import NLMEEstimation as NE
 import Optim
 isdefined(@__MODULE__, :TestCommon) || include("common.jl")
 using .TestCommon: occasions_model, occasions_unit_posterior, occasions_exact_nested,
-    occasions_pattern, occasions_sparse, SparseDeclared, SteepWell
+    occasions_pattern, occasions_sparse, SparseDeclared, SteepWell, NestedWells, nested_wells,
+    QuadraticEta
 
 # The exact mode of an occasions subject: for this linear-Gaussian model, the
 # posterior means of its subject effect and of its occasion effects.
@@ -42,6 +43,71 @@ end
     end
     # refused: limited-memory BFGS stores at least one curvature pair
     @test_throws ArgumentError QuasiNewtonEBE(memory = 0)
+    # refused: the curvature check of a gradient-only model needs at least one product
+    @test_throws ArgumentError QuasiNewtonEBE(curvature_steps = 0)
+end
+
+@testset "the Lanczos curvature check is exact on small subjects" begin
+    # Twenty random symmetric matrices of up to 12 effects, half of them with
+    # A = I - M indefinite: the finding agrees with a dense eigendecomposition, within
+    # at most n batched calls, and the direction's curvature is the true one.
+    rng = Xoshiro(5)
+    for n in (1, 2, 3, 12), shift in (-3.0, 3.0), _ in 1:5
+        B = randn(rng, n, n)
+        M = (B + B') / 2 .+ shift .* Matrix(I, n, n)
+        model = QuadraticEta([M])
+        prior = re_prior(model, omega_parameters(nlme_layout(model), Matrix(1.0I, n, n)))
+        η = randn(rng, n)
+        g = M * η - η
+        finding = only(NE._lanczos_curvature(model, [1], Float64[], Float64[], prior, [η], [g], 20))
+        if isposdef(Symmetric(I - M))
+            @test finding isa NE._NoUpwardCurvature
+        else
+            @test finding isa NE._UpwardCurvature
+            d = finding.direction
+            @test norm(d) ≈ 1
+            @test finding.curvature ≈ dot(d, M * d) - 1 rtol = 1e-6
+        end
+    end
+end
+
+@testset "a gradient-only model's check is bounded and sees a hidden saddle" begin
+    # Two subjects of 3,000 units; subject 1 starts at a saddle whose upward direction
+    # combines two units that the Hessian's diagonal does not show, subject 2 is
+    # concave. A dense check would take 3,001 batched gradient calls.
+    model = nested_wells(units = [3_000, 3_000], wells = [[(101, 2_000)], Tuple{Int, Int}[]],
+        information = (0.1, 1.0))
+    @test default_ebe_method(model) === QuasiNewtonEBE()
+    ω = omega_parameters(nlme_layout(model), [ones(1, 1), ones(1, 1)])
+    prior = re_prior(model, ω)
+    # The check at `points`, counting only its own calls: the complete-data
+    # gradients there (with unit prior variances) are known beforehand.
+    function check(points)
+        gradients = [last(NE.conditional_loglikelihood_and_gradient(model, i, Float64[], Float64[], η)) .- η
+            for (i, η) in enumerate(points)]
+        model.calls[] = 0
+        return NE._lanczos_curvature(model, [1, 2], Float64[], Float64[], prior, points, gradients, 20)
+    end
+    # At η = 0 the check finds the saddle along u, within 20 steps and 16 probes.
+    findings = check([zeros(3_001), zeros(3_001)])
+    @test model.calls[] <= 2 * (20 + 16)
+    @test findings[1] isa NE._UpwardCurvature
+    @test abs(findings[1].direction[102] + findings[1].direction[2_001]) / sqrt(2) > 0.9
+    @test findings[2] isa NE._NoUpwardCurvature
+    model.calls[] = 0
+    r = empirical_bayes(model, Float64[], Float64[], ω)
+    @test r isa RaggedEBEResult
+    @test r.hessians === nothing
+    @test all(r.converged)
+    u = (r.modes[1][102] + r.modes[1][2_001]) / sqrt(2)
+    @test abs(u) ≈ sqrt(model.a - 1) rtol = 1e-7
+    @test maximum(abs, r.modes[2]) < 1e-12
+    @test r.iterations[2] == 0
+    # The whole pass, checks and all, evaluates each subject fewer times than one
+    # dense check would.
+    @test model.calls[] / 2 < 3_001
+    @test all(f -> f isa NE._NoUpwardCurvature, check(r.modes))
+    @test model.calls[] <= 2 * (20 + 16)
 end
 
 # The occasions model's complete-data η Hessian, in closed form.

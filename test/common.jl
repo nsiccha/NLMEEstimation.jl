@@ -21,7 +21,7 @@ export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH,
     LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
     occasions_exact_nested, occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly,
-    SparseDeclared, occasions_pattern, occasions_sparse, OccasionsBlocks, PoissonOccasions,
+    SparseDeclared, NestedWells, nested_wells, QuadraticEta, occasions_pattern, occasions_sparse, OccasionsBlocks, PoissonOccasions,
     poisson_model, poisson_sparse, poisson_exact
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
@@ -101,6 +101,65 @@ NE.conditional_loglikelihood(m::GradientOnly, i, θ, σ, η) = NE.conditional_lo
 NE.conditional_loglikelihood_and_gradient(m::GradientOnly, i, θ, σ, η) =
     NE.conditional_loglikelihood_and_gradient(m.inner, i, θ, σ, η)
 NE.provides_eta_hessian(::GradientOnly) = false
+
+# Gradients only, with no declared pattern: a subject effect η₁ and n units, where
+# unit j adds -w_j(η₁ + η_{1+j})²/2 with its information w_j spread log-uniformly over
+# `information`. The units in `wells[i]` are pairs (p, q) outside that sum: with
+# u = (η_p + η_q)/√2 and v = (η_p - η_q)/√2 they add -(u² - a)²/4 - Dv²/2, so with unit
+# prior variances, a > 1 and D > a, η = 0 is a saddle whose upward direction u the
+# Hessian's diagonal does not show. `calls` counts per-subject evaluations.
+struct NestedWells
+    information::Vector{Vector{Float64}}
+    wells::Vector{Vector{Tuple{Int, Int}}}
+    a::Float64
+    D::Float64
+    calls::Base.RefValue{Int}
+end
+function nested_wells(; units, wells, information = (0.1, 1.0e4), a = 2.0, D = 20.0)
+    lo, hi = information
+    information = map(eachindex(units)) do i
+        w = exp.(range(log(lo), log(hi); length = units[i]))
+        shuffle!(Xoshiro(i), w)
+        w[reduce(vcat, [[p, q] for (p, q) in wells[i]]; init = Int[])] .= 0.0
+        w
+    end
+    return NestedWells(information, wells, a, D, Ref(0))
+end
+NE.nsubjects(m::NestedWells) = length(m.information)
+NE.nlme_layout(m::NestedWells) = RaggedNLMELayout(0, 0, [1, 1],
+    [[1; fill(2, length(w))] for w in m.information])
+NE.provides_eta_hessian(::NestedWells) = false
+function NE.conditional_loglikelihood_and_gradient(m::NestedWells, i, θ, σ, η)
+    m.calls[] += 1
+    w = m.information[i]
+    r = η[1] .+ view(η, 2:length(η))
+    value = -sum(w .* r .^ 2) / 2
+    g = zeros(eltype(η), length(η))
+    g[1] = -sum(w .* r)
+    g[2:end] = -w .* r
+    for (p, q) in m.wells[i]
+        u, v = (η[1 + p] + η[1 + q]) / sqrt(2), (η[1 + p] - η[1 + q]) / sqrt(2)
+        value += -(u^2 - m.a)^2 / 4 - m.D * v^2 / 2
+        gu, gv = -(u^2 - m.a) * u, -m.D * v
+        g[1 + p] += (gu + gv) / sqrt(2)
+        g[1 + q] += (gu - gv) / sqrt(2)
+    end
+    return value, g
+end
+NE.conditional_loglikelihood(m::NestedWells, i, θ, σ, η) =
+    first(NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η))
+
+# Gradients only, ℓ(η) = ηᵀMη/2 for one subject per matrix.
+struct QuadraticEta
+    M::Vector{Matrix{Float64}}
+end
+NE.nsubjects(m::QuadraticEta) = length(m.M)
+NE.nlme_layout(m::QuadraticEta) = NLMELayout(0, 0, [size(first(m.M), 1)])
+NE.provides_eta_hessian(::QuadraticEta) = false
+NE.conditional_loglikelihood_and_gradient(m::QuadraticEta, i, θ, σ, η) =
+    (dot(η, m.M[i] * η) / 2, m.M[i] * η)
+NE.conditional_loglikelihood(m::QuadraticEta, i, θ, σ, η) =
+    first(NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η))
 
 # A model with gradients only that declares its η Hessian pattern
 # (`eta_hessian_sparsity`): `pattern(i)` gives subject i's. Everything else is the
