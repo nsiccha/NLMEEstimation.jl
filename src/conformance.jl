@@ -14,7 +14,7 @@ Base.showerror(io::IO, e::ProtocolViolation) =
     check_protocol(model, θ, σ, ω; subjects = 1:nsubjects(model), η = nothing,
                    reference_backend = nothing, reference_hessian_backend = reference_backend,
                    population_gradient = false, rtol = 1e-8,
-                   integrated = integrated_families(model)) -> true
+                   integrated = integrated_families(model), threads = false) -> true
 
 Check that `model` implements the protocol consistently at the given parameters,
 and throw a [`ProtocolViolation`](@ref) naming the first violation otherwise.
@@ -67,19 +67,27 @@ against that backend, and its Hessian blocks (when provided) against
 `DifferentiationInterface.SecondOrder`). With
 `population_gradient = true`, the optional θ/σ gradient is checked as well (against
 `reference_backend` when given).
+
+With `threads = true`, which needs a Julia process with several threads, all
+`subjects` are evaluated at once on Julia's threads, 20 times over, and every value
+and η gradient must equal its one-at-a-time result. That tries out what
+`WarmupHMCNUTS(threads = true)` asks of a model. A pass is evidence, not proof: a race
+shows only if it happens during these calls.
 """
 function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η = nothing, reference_backend = nothing,
         reference_hessian_backend = reference_backend,
         population_gradient::Bool = false, rtol::Real = 1.0e-8,
-        integrated = integrated_families(model))
+        integrated = integrated_families(model), threads::Bool = false)
     violation(msg) = throw(ProtocolViolation(typeof(model), msg))
     n = nsubjects(model)
     n isa Integer && n >= 1 || violation("nsubjects returned $(repr(n)); expected a positive integer")
     layout = nlme_layout(model)
+    threads && Threads.nthreads() == 1 && throw(ArgumentError(
+        "check_protocol(...; threads = true) needs several threads; start Julia with `-t <n>`"))
     layout isa RaggedNLMELayout && return _check_ragged_protocol(model, layout, θ, σ, ω;
         subjects, η, reference_backend, reference_hessian_backend,
-        population_gradient, rtol, integrated)
+        population_gradient, rtol, integrated, threads)
     layout isa NLMELayout || violation("nlme_layout returned a $(typeof(layout)); expected an NLMELayout")
     evaluation_style(model) isa EvaluationStyle ||
         violation("evaluation_style returned $(repr(evaluation_style(model))); expected an EvaluationStyle")
@@ -138,7 +146,28 @@ function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
     end
     observation_model(model) isa GaussianObservations &&
         _check_observation_batch(violation, agrees, model, subjects, θ, σ, H, m)
+    threads && _check_concurrent_evaluation(violation, agrees, model, subjects, θ, σ, H)
     return true
+end
+
+# All subjects at once, repeatedly, against their one-at-a-time results.
+function _check_concurrent_evaluation(violation, agrees, model, subjects, θ, σ, H)
+    evaluate(k) = conditional_loglikelihood_and_gradient(model, subjects[k], θ, σ,
+        _eta_column(H, k))
+    serial = map(evaluate, eachindex(subjects))
+    for _ in 1:20
+        tasks = [Threads.@spawn(evaluate(k)) for k in eachindex(subjects)]
+        results = [try fetch(task) catch err; err end for task in tasks]
+        for (k, result) in enumerate(results)
+            i = subjects[k]
+            result isa Exception && violation("subject $i threw when evaluated concurrently " *
+                "with other subjects: " * sprint(showerror, result))
+            agrees(first(result), first(serial[k])) && agrees(last(result), last(serial[k])) ||
+                violation("subject $i: a concurrent evaluation differs from a serial one; " *
+                    "this model cannot take WarmupHMCNUTS(threads = true)")
+        end
+    end
+    return nothing
 end
 
 _check_eta(violation, ::Nothing, m, n) = zeros(m, n)

@@ -23,7 +23,9 @@ summed population gradient (two batched calls per coordinate and draw, with
 `kernel`, a [`WarmupHMCNUTS`](@ref), draws each subject's η: Pathfinder from the
 starting η (a fit's chain states or modes), `burnin` discarded transitions that
 adapt the kernel, then `draws` kept ones under the kernel frozen. `R` and `S`
-carry Monte Carlo error that falls as `1/√draws`. It applies to any likelihood
+carry Monte Carlo error that falls as `1/√draws`. `WarmupHMCNUTS(threads = true)`
+takes the draws on Julia's threads; the scores and curvature between them stay on the
+calling thread. It applies to any likelihood
 and to both layouts, asks the model for no η Hessian, and keeps no `n × n`
 matrix per subject. It is not a marginal likelihood:
 [`marginal_loglikelihood`](@ref) refuses it.
@@ -57,6 +59,7 @@ end
 function _prepare_marginal(approximation::LouisInformation, model, θ, σ, ω, subjects, η0,
         rng, progress = nothing)
     _check_approximation(approximation)
+    _saem_check_threads(approximation.kernel, model)
     return _PreparedLouis(model, approximation, nlme_layout(model),
         _covariance_subjects(model, subjects), η0, rng)
 end
@@ -109,7 +112,8 @@ function _covariance_matrices(prepared::_PreparedLouis, split, ŷ, free, step, m
     states = _saem_nuts_start!(prepared.rng, a.kernel, model, ids, θ, σ, prior, H)
     for round in 1:(a.burnin + a.draws)
         throw_if_interrupted(counter)
-        _saem_nuts_round!(states, model, ids, θ, σ, prior, H; adapt = round <= a.burnin)
+        _saem_nuts_round!(states, model, ids, θ, σ, prior, H; adapt = round <= a.burnin,
+            a.kernel.threads)
         counter === nothing || update_progress!(counter, round)
         round <= a.burnin && continue
         _louis_add_moments!(mean_phi, second_phi, _saem_phi(H, θ, indices, design))

@@ -14,6 +14,21 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.5
+
+- `WarmupHMCNUTS(threads = true)` runs each subject's NUTS chain in its own task on
+  Julia's threads, for the call the kernel is passed to: `saem(...; kernel = …)`, or
+  `covariance_step` through `LouisInformation(kernel = …)`. The default stays `false`,
+  and it needs a Julia process started with `-t <n>`. Fits equal the serial ones bit
+  for bit. Each chain makes its own one-subject model calls whatever the model's
+  `evaluation_style`, so a `BatchedEvaluation` model leaves lockstep for that call,
+  and the model must accept concurrent calls for different subjects.
+- `check_protocol(...; threads = true)` tries that out: it evaluates all subjects at
+  once, 20 times over, and compares with their one-at-a-time results.
+- With a model whose `ad_backend` is Enzyme, `threads = true` is refused unless the
+  loaded Enzyme has the repair for reverse gradients beside allocating threads, whose
+  gradients can otherwise be silently wrong.
+
 ## 0.2.4
 
 - SAEM samples only the random effects a model does not integrate out by its own

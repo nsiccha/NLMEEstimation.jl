@@ -348,7 +348,7 @@ function _saem_mala_batch_round!(rng, kernel::DualAveragingMALA, states, model, 
 end
 
 """
-    WarmupHMCNUTS(; target_acceptance_rate=0.8, max_tree_depth=10)
+    WarmupHMCNUTS(; target_acceptance_rate=0.8, max_tree_depth=10, threads=false)
 
 One continuously adapting NUTS chain per subject, WarmupHMC's
 `ContinuousNUTSState`. Pathfinder from the subject's starting η at the starting
@@ -356,10 +356,27 @@ population parameters gives the first position and the first diagonal metric,
 and every transition then adapts the metric and the step size from its leapfrog
 leaves, for the whole fit, as θ, σ and Ω move. There is no warmup phase and no
 η Hessian. `target_acceptance_rate` must lie strictly between zero and one.
+
+`threads = true` runs each subject's chain in its own task on Julia's threads
+(start Julia with `-t <n>`), for the call this kernel is passed to, Pathfinder start
+included. The fit equals the one `threads = false` gives. Each chain makes its own
+one-subject model calls, whatever [`evaluation_style`](@ref) the model declares, so
+the model is called concurrently for different subjects. Passing `threads = true`
+states that it can be: [`check_protocol`](@ref)`(...; threads = true)` tries that
+out. With a model that declares Enzyme as its [`ad_backend`](@ref), `saem` and
+[`covariance_step`](@ref) refuse an Enzyme without the repair for reverse gradients
+beside allocating threads, because they can be silently wrong there. On a process
+with one thread the chains run one after another, with a warning.
+
+With `threads = false` a [`PerSubjectEvaluation`](@ref) model's chains run one
+after another and a [`BatchedEvaluation`](@ref) model's in lockstep, one batched call
+per leapfrog step. A batched model pays for one-subject calls under `threads = true`,
+so that can be much slower than lockstep where such a call costs a whole-model sweep.
 """
 Base.@kwdef struct WarmupHMCNUTS <: AbstractSAEMKernel
     target_acceptance_rate::Float64 = 0.8
     max_tree_depth::Int = 10
+    threads::Bool = false
 end
 
 """
@@ -500,11 +517,13 @@ end
 # Run `chain(k, target)` for each chain position `k` in `positions`, with `target`
 # subject `ids[k]`'s `_SAEMSubjectTarget` at θ and σ, and return the results in the
 # order of `positions`, or `nothing` once `stop()` holds before an evaluation.
-# `finished()` is called each time a chain returns.
-_saem_chains(chain, model, ids, θ, σ, prior, positions;
+# `finished()` is called each time a chain returns. `threads` is the kernel's.
+_saem_chains(chain, model, ids, θ, σ, prior, positions; threads::Bool = false,
         stop = () -> false, finished = () -> nothing) =
-    _saem_chains(evaluation_style(model), chain, model, ids, θ, σ, prior, positions;
-        stop, finished)
+    _saem_chains(threads ? _ThreadedChains() : evaluation_style(model), chain, model,
+        ids, θ, σ, prior, positions; stop, finished)
+
+struct _ThreadedChains end
 
 # A per-subject model gains nothing from a batch: the chains run one after another,
 # each with its own model calls, and `stop` is checked between them.
@@ -517,6 +536,37 @@ function _saem_chains(::PerSubjectEvaluation, chain, model, ids, θ, σ, prior, 
         finished()
     end
     return results
+end
+
+# `WarmupHMCNUTS(threads = true)`: each chain in its own task on Julia's threads, with
+# its own model calls, whatever the evaluation style. A chain's draws depend only on
+# its own state, so the results are the serial route's. `stop` is checked as each chain
+# starts and `finished` runs under a lock. Every task ends before this returns, so no
+# chain still calls the model once its failure has reached the caller, and the failure
+# reported is the first in fit order, the chain's own exception.
+function _saem_chains(::_ThreadedChains, chain, model, ids, θ, σ, prior, positions;
+        stop, finished)
+    guard = ReentrantLock()
+    tasks = map(collect(positions)) do k
+        Threads.@spawn begin
+            stop() && return nothing
+            result = chain(k, _saem_target(model, ids[k], θ, σ, prior))
+            lock(finished, guard)
+            result
+        end
+    end
+    results = Vector{Any}(undef, length(tasks))
+    failure = nothing
+    for (j, task) in enumerate(tasks)
+        try
+            results[j] = fetch(task)
+        catch err
+            err isa TaskFailedException || rethrow()
+            failure === nothing && (failure = err.task.exception)
+        end
+    end
+    failure === nothing || throw(failure)
+    return any(isnothing, results) ? nothing : results
 end
 
 # A batched model evaluates the chains in lockstep. Each chain's WarmupHMC call runs
@@ -608,17 +658,45 @@ function _saem_check_nuts(o::WarmupHMCNUTS)
     return nothing
 end
 
+# Registered Enzyme's reverse gradients can use memory a collection has freed while
+# another thread allocates, which gives silently wrong gradients. Enzyme's dogfood line
+# from 72d5d25 repairs that and then defines this pass. This package does not depend on
+# Enzyme, so it asks the loaded one, as `enzyme-use` tells a process to check.
+function _enzyme_has_gc_repair()
+    id = Base.PkgId(Base.UUID("7da242da-08ed-463a-9acd-ee780be4f1d9"), "Enzyme")
+    return Base.root_module_exists(id) &&
+        isdefined(Base.root_module(id).Compiler, :RestoreSafepointEffectsPass)
+end
+
+# `model` is the caller's, not a wrapper around it, so its `ad_backend` is the one in use.
+function _saem_check_threads(o::WarmupHMCNUTS, model)
+    o.threads || return nothing
+    if Threads.nthreads() == 1
+        @warn "WarmupHMCNUTS(threads = true) in a Julia process with one thread: the " *
+            "chains run one after another. Start Julia with `-t <n>` to run them in parallel."
+        return nothing
+    end
+    ad_backend(model) isa ADTypes.AutoEnzyme && !_enzyme_has_gc_repair() &&
+        throw(ArgumentError("WarmupHMCNUTS(threads = true) refused: this model's " *
+            "ad_backend is Enzyme, and this Enzyme lacks the repair for reverse gradients " *
+            "beside allocating threads, whose gradients can be silently wrong. Use an " *
+            "Enzyme that defines Enzyme.Compiler.RestoreSafepointEffectsPass (its dogfood " *
+            "line from 72d5d25 does) or pass threads = false."))
+    return nothing
+end
+
 # Each subject's chain starts with a Pathfinder run from its η at the starting
 # population parameters (WarmupHMC's `ContinuousNUTSState`), counted on `progress`,
 # the start phase, as each subject's start completes. An interrupt request ends the
 # start early and returns `nothing`: checked between subjects, or for a batched
-# model, whose starts run in lockstep (`_saem_chains`), between batched evaluations.
+# model, whose starts run in lockstep (`_saem_chains`), between batched evaluations,
+# or under `kernel.threads` as each subject's start begins.
 function _saem_nuts_start!(rng, kernel::WarmupHMCNUTS, model, ids, θ, σ, prior, H,
         progress = nothing)
     start_progress!(progress)
     seeds = [rand(rng, UInt64) for _ in ids]
     started = Ref(0)
-    states = _saem_chains(model, ids, θ, σ, prior, eachindex(ids);
+    states = _saem_chains(model, ids, θ, σ, prior, eachindex(ids); kernel.threads,
             stop = () -> interrupt_requested(progress),
             finished = () -> progress === nothing ||
                 update_progress!(progress, started[] += 1)) do k, target
@@ -641,10 +719,10 @@ end
 # One NUTS transition for each subject at positions `active`, adapting the kernel
 # from its leapfrog leaves; `adapt = false` takes the transition under the current
 # kernel (posterior draws at a fixed point). A batched model takes the transitions in
-# lockstep (`_saem_chains`).
+# lockstep and `threads`, the kernel's, runs them on threads (`_saem_chains`).
 function _saem_nuts_round!(states, model, ids, θ, σ, prior, H, active = eachindex(ids);
-        adapt::Bool = true)
-    steps = _saem_chains(model, ids, θ, σ, prior, active) do k, target
+        adapt::Bool = true, threads::Bool = false)
+    steps = _saem_chains(model, ids, θ, σ, prior, active; threads) do k, target
         WarmupHMC.continuous_nuts_step(states[k], target; adapt)
     end
     divergences = 0
@@ -1716,7 +1794,7 @@ function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel
         integrated = Int[])
     integrated = _checked_integrated(layout, integrated)
     _saem_check_options(options; schedule = integrated != _families(layout))
-    kernel isa WarmupHMCNUTS && _saem_check_nuts(kernel)
+    kernel isa WarmupHMCNUTS && (_saem_check_nuts(kernel); _saem_check_threads(kernel, model))
     kernel isa DualAveragingMALA && _saem_check_mala(kernel)
     _saem_check_subjects(layout, model)
     _check_length("θ", θ0, layout.ntheta)
@@ -1836,7 +1914,7 @@ function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel
                 _saem_nuts_reposition!(nuts, eH, restart)
                 nuts_moved[restart] .= false
                 ndivergent += _saem_nuts_round!(nuts, emodel, eids, θ, σ,
-                    eprior, eH, eactive)
+                    eprior, eH, eactive; kernel.threads)
             elseif kernel isa DualAveragingMALA
                 _saem_mala_batch_round!(rng, kernel, mala_states, emodel, eids, θ, σ,
                     eprior, eH, eactive; metrics=mala_metrics, cache=mala_cache)
