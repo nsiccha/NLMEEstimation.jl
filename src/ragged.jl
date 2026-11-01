@@ -400,7 +400,7 @@ _saem_mala_metric(model, i, θ, σ, prior::RaggedNormalREPrior, η, floor) =
 
 function _check_ragged_protocol(model, layout::RaggedNLMELayout, θ, σ, ω;
         subjects, η, reference_backend, reference_hessian_backend,
-        population_gradient, rtol, integrated)
+        population_gradient, rtol, integrated, threads = false)
     violation(msg) = throw(ProtocolViolation(typeof(model), msg))
     n = nsubjects(model)
     length(layout.subject_families) == n || violation(
@@ -473,6 +473,7 @@ function _check_ragged_protocol(model, layout::RaggedNLMELayout, θ, σ, ω;
     end
     observation_model(model) isa GaussianObservations &&
         _check_observation_batch(violation, agrees, model, ids, θ, σ, H, layout)
+    threads && _check_concurrent_evaluation(violation, agrees, model, ids, θ, σ, H)
     return true
 end
 

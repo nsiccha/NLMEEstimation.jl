@@ -237,7 +237,7 @@ Each subject's chain starts with Pathfinder from its starting η and then adapts
 its diagonal metric and step size on every transition, for the whole fit, as the
 population parameters change (WarmupHMC's continuously adapting kernel). There is
 no warmup phase and no η Hessian; `WarmupHMCNUTS(; target_acceptance_rate = 0.8,
-max_tree_depth = 10)` are its only settings. NUTS uses `Xoshiro` streams
+max_tree_depth = 10, threads = false)` are its only settings. NUTS uses `Xoshiro` streams
 internally, seeded from the supplied RNG; its MH-only `acceptance` and `rw_scale`
 fields are `missing`. A `BatchedEvaluation` model's chains run in lockstep: each
 leapfrog step of every subject whose trajectory is still growing reaches the model
@@ -250,8 +250,20 @@ subject at a time) lockstep never asks a model for more subject evaluations; a
 model whose small batches cost more than their subjects' own calls pays the difference, which is
 its batched call's to remove. A per-subject model's chains run one
 after another, one call per subject and leapfrog step. The chains are tasks on the
-calling thread: the model is never called from another thread. See
-[`bench/RESULTS.md`](bench/RESULTS.md) for MH/NUTS sampling and fit benchmarks.
+calling thread: the model is never called from another thread.
+
+`kernel = WarmupHMCNUTS(threads = true)` runs the chains in parallel instead, for that
+call: each chain is a task on Julia's threads (start Julia with `-t <n>`) making its
+own one-subject model calls, whatever the model's evaluation style. A batched model
+therefore leaves lockstep for that call, which can cost much more where a one-subject
+call costs a whole-model sweep, and the model must accept concurrent calls for
+different subjects. `check_protocol(...; threads = true)` tries that out. The fit
+equals the serial one bit for bit (`test/saem_nuts_threads.jl`). On twelve subjects of
+3,294–35,783 nested units, two threads on two CPUs of a loaded host took a fit from
+20.9 s to 19.2 s, and the largest subject limits the gain to 3.6× on any number of
+threads (`bench/saem_nuts_threads.jl`).
+
+See [`bench/RESULTS.md`](bench/RESULTS.md) for MH/NUTS sampling and fit benchmarks.
 
 SAEM keeps one η chain per subject. Each MH round evaluates prior-independence
 and random-walk proposals in two model batches, with separate accept/reject

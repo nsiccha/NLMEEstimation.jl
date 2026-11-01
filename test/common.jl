@@ -22,7 +22,8 @@ export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
     occasions_exact_nested, occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly,
     SparseDeclared, NestedWells, nested_wells, QuadraticEta, occasions_pattern, occasions_sparse, OccasionsBlocks, PoissonOccasions,
-    poisson_model, poisson_sparse, poisson_exact, LinearIntegrated
+    poisson_model, poisson_sparse, poisson_exact, LinearIntegrated, Lockstep,
+    gradient_batches, BoundedFirst
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -715,7 +716,8 @@ NE.population_logprior(m::LinearIntegrated, θ, σ, ω) = NE.population_logprior
 NE.ad_backend(::LinearIntegrated) = AutoForwardDiff()
 NE.integrated_families(m::LinearIntegrated) = m.integrated
 
-counted!(m, what) = (m.calls[what] = get(m.calls, what, 0) + 1)
+const COUNTED_LOCK = ReentrantLock()   # WarmupHMCNUTS(threads = true) calls these at once
+counted!(m, what) = lock(() -> m.calls[what] = get(m.calls, what, 0) + 1, COUNTED_LOCK)
 
 # Subject i's observations y, their mean μ₀ at η = 0, the design Z of η and the
 # residual variance v.
@@ -827,4 +829,60 @@ function NE.laplace_conditionals_and_population_gradient(m::LinearIntegrated, F,
     return values, g[1:nθ], g[nθ+1:nθ+nσ], g[nθ+nσ+1:end]
 end
 
+
+# A per-subject model behind the batched protocol, as a joint program such as BRM's
+# whole-model sweep presents one: each batched call evaluates the listed subjects
+# with the inner model's per-subject functions and logs the subjects it was given,
+# `:gradient` for values with η gradients and `:value` for values alone. Its numbers
+# are the inner model's, so fitting either gives the same result.
+struct Lockstep{M}
+    inner::M
+    log::Vector{Pair{Symbol, Vector{Int}}}
+end
+Lockstep(inner) = Lockstep(inner, Pair{Symbol, Vector{Int}}[])
+gradient_batches(m::Lockstep) = [s for (kind, s) in m.log if kind === :gradient]
+NE.evaluation_style(::Lockstep) = BatchedEvaluation()
+NE.saem_population_gradient_style(::Lockstep) = PerSubjectEvaluation()
+for f in (:nsubjects, :nlme_layout, :mu_referencing)
+    @eval NE.$f(m::Lockstep) = NE.$f(m.inner)
+end
+for f in (:conditional_loglikelihood, :conditional_loglikelihood_and_gradient,
+        :conditional_loglikelihood_and_population_gradient)
+    @eval NE.$f(m::Lockstep, i::Integer, θ, σ, η) = NE.$f(m.inner, i, θ, σ, η)
+end
+function NE.conditional_loglikelihoods(m::Lockstep, subjects, θ, σ, H)
+    push!(m.log, :value => collect(subjects))
+    return [conditional_loglikelihood(m.inner, i, θ, σ, NE._eta_column(H, k))
+        for (k, i) in enumerate(subjects)]
+end
+function NE.conditional_loglikelihoods_and_gradients(m::Lockstep, subjects, θ, σ, H)
+    push!(m.log, :gradient => collect(subjects))
+    pairs = [conditional_loglikelihood_and_gradient(m.inner, i, θ, σ, NE._eta_column(H, k))
+        for (k, i) in enumerate(subjects)]
+    G = last.(pairs)
+    return first.(pairs), H isa AbstractMatrix ? stack(G) : G
+end
+
+# The inner model, except that subject 1's density throws a `DomainError` where its
+# first random effect exceeds `bound` in magnitude, as a Stan-semantics model does
+# outside its domain; `hits` counts those evaluations. It declares no mu-referencing,
+# so a population update never moves a chain's η.
+struct BoundedFirst{M}
+    inner::M
+    bound::Float64
+    hits::Base.RefValue{Int}
+end
+BoundedFirst(inner, bound) = BoundedFirst(inner, bound, Ref(0))
+NE.nsubjects(m::BoundedFirst) = nsubjects(m.inner)
+NE.nlme_layout(m::BoundedFirst) = nlme_layout(m.inner)
+for f in (:conditional_loglikelihood, :conditional_loglikelihood_and_gradient,
+        :conditional_loglikelihood_and_population_gradient)
+    @eval function NE.$f(m::BoundedFirst, i::Integer, θ, σ, η)
+        if i == 1 && abs(η[1]) > m.bound
+            m.hits[] += 1
+            throw(DomainError(η[1], "outside the model's domain"))
+        end
+        return NE.$f(m.inner, i, θ, σ, η)
+    end
+end
 end
