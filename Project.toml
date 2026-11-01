@@ -1,7 +1,7 @@
 name = "NLMEEstimation"
 uuid = "93620da2-aa34-4028-9135-3a6a776ddbc2"
 authors = ["Nikolas Siccha and contributors"]
-version = "0.2.3"
+version = "0.2.4"
 
 [deps]
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"

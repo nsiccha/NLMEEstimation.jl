@@ -13,7 +13,8 @@ Base.showerror(io::IO, e::ProtocolViolation) =
 """
     check_protocol(model, θ, σ, ω; subjects = 1:nsubjects(model), η = nothing,
                    reference_backend = nothing, reference_hessian_backend = reference_backend,
-                   population_gradient = false, rtol = 1e-8) -> true
+                   population_gradient = false, rtol = 1e-8,
+                   integrated = integrated_families(model)) -> true
 
 Check that `model` implements the protocol consistently at the given parameters,
 and throw a [`ProtocolViolation`](@ref) naming the first violation otherwise.
@@ -47,7 +48,18 @@ subject):
   returns one value per subject and gradients of the lengths of θ, σ and ω, its
   values equal `marginal_loglikelihood` with `AdaptiveGaussHermite(nodes = 1)`
   (within `max(rtol, 1e-6)`), and its gradient along a random direction equals a
-  central difference of its values (within `max(rtol, 1e-5)`).
+  central difference of its values (within `max(rtol, 1e-5)`);
+- with `integrated` families (by default [`integrated_families`](@ref)):
+  [`laplace_conditionals_and_gradients`](@ref), [`laplace_conditionals`](@ref)
+  and [`laplace_conditional_moments`](@ref) agree in their values and shapes; the
+  values, modes and covariance blocks equal the package's own Laplace
+  approximation of the integrated effects given the others (within
+  `max(rtol, 1e-6)` for values and `max(rtol, 1e-5)` for modes and covariances;
+  a dense check meant for small subjects); the gradient is zero in the
+  integrated entries and, along a random direction of the sampled ones, equals a
+  central difference of the values; and where SAEM's numerical M-step would run,
+  [`laplace_conditionals_and_population_gradient`](@ref) agrees with the values
+  and with a central difference along a random direction of θ, σ and ω.
 
 With `reference_backend` (an AD backend), the model's η gradients are also compared
 against that backend, and its Hessian blocks (when provided) against
@@ -59,14 +71,15 @@ against that backend, and its Hessian blocks (when provided) against
 function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::AbstractVector;
         subjects = nothing, η = nothing, reference_backend = nothing,
         reference_hessian_backend = reference_backend,
-        population_gradient::Bool = false, rtol::Real = 1.0e-8)
+        population_gradient::Bool = false, rtol::Real = 1.0e-8,
+        integrated = integrated_families(model))
     violation(msg) = throw(ProtocolViolation(typeof(model), msg))
     n = nsubjects(model)
     n isa Integer && n >= 1 || violation("nsubjects returned $(repr(n)); expected a positive integer")
     layout = nlme_layout(model)
     layout isa RaggedNLMELayout && return _check_ragged_protocol(model, layout, θ, σ, ω;
         subjects, η, reference_backend, reference_hessian_backend,
-        population_gradient, rtol)
+        population_gradient, rtol, integrated)
     layout isa NLMELayout || violation("nlme_layout returned a $(typeof(layout)); expected an NLMELayout")
     evaluation_style(model) isa EvaluationStyle ||
         violation("evaluation_style returned $(repr(evaluation_style(model))); expected an EvaluationStyle")
@@ -107,6 +120,7 @@ function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
     _check_block_shapes(violation, agrees, blocks, subjects, m)
     _check_eta_hessian_sparsity(violation, model, layout, subjects, θ, σ, H, rtol)
     _check_laplace_gradient(violation, model, subjects, θ, σ, ω, H, rtol)
+    _check_integrated(violation, model, integrated, subjects, θ, σ, ω, H, rtol)
 
     for (k, i) in enumerate(subjects)
         ηi = H[:, k]

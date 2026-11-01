@@ -384,6 +384,10 @@ population point estimate, not a draw from a population posterior.
 Treebars interrupt request (see `progress` in [`saem`](@ref)) stopped the run before
 `SAEMOptions.iterations`, so the estimate is that of the last completed iteration.
 The acceptance and MALA fields are `NaN` when no kernel sweep ran.
+`integrated` lists the families the model integrated by its own Laplace
+approximation (`integrated` in [`saem`](@ref)); their entries of `eta` are the
+Laplace modes at the final state, and `kernel` is `:laplace_em` when every
+family was integrated, so that nothing was sampled.
 """
 struct SAEMResult{T, A, R, P}
     subjects::Vector{Int}
@@ -405,6 +409,7 @@ struct SAEMResult{T, A, R, P}
     prior_provenance::P
     iterations::Int
     interrupted::Bool
+    integrated::Vector{Int}
 end
 
 """
@@ -416,7 +421,7 @@ covariance of random-effect family `f`. The other fields are those of
 [`SAEMResult`](@ref): `acceptance` and `rw_scale` for the MH kernel, whose
 per-coordinate acceptance is per family coordinate, `nuts_divergences` for
 NUTS, the `mala_` fields for MALA, `objective` (`:MAP` with a population prior,
-`:ML` without one), `iterations` and `interrupted`.
+`:ML` without one), `iterations`, `interrupted` and `integrated`.
 """
 struct RaggedSAEMResult{T, A, R, P}
     subjects::Vector{Int}
@@ -438,6 +443,7 @@ struct RaggedSAEMResult{T, A, R, P}
     prior_provenance::P
     iterations::Int
     interrupted::Bool
+    integrated::Vector{Int}
 end
 
 # A subject's NUTS target: its conditional density at θ and σ (`conditional`) plus
@@ -675,9 +681,12 @@ function _saem_hessian_metric(model, i, θ, σ, prior, η;
     return Matrix(Symmetric(scale))
 end
 
-function _saem_check_options(o::SAEMOptions)
+# Laplace-EM (every family integrated) takes no SA step-size schedule, so its
+# `burnin` is not checked against `iterations`.
+function _saem_check_options(o::SAEMOptions; schedule::Bool = true)
     o.iterations > 0 || throw(ArgumentError("iterations must be positive"))
-    0 <= o.burnin < o.iterations || throw(ArgumentError("require 0 ≤ burnin < iterations"))
+    !schedule || 0 <= o.burnin < o.iterations ||
+        throw(ArgumentError("require 0 ≤ burnin < iterations"))
     o.mcmc_burnin >= 0 || throw(ArgumentError("mcmc_burnin must be nonnegative"))
     o.mh_rounds > 0 || throw(ArgumentError("mh_rounds must be positive"))
     isfinite(o.rw_scale) && o.rw_scale > 0 || throw(ArgumentError("rw_scale must be finite and positive"))
@@ -1450,7 +1459,7 @@ _saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
 function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indices,
         design, free, bank, weights, mean_phi, second_phi, options, γ,
         constraints, map_objective, active = eachindex(subjects);
-        identified = _saem_identified(design, indices))
+        identified = _saem_identified(design, indices), anneal::Bool = true)
     ω_previous = ω
     θ, Ω = _saem_closed_form_mstep(layout, θ, omega_matrix(layout, ω), indices,
         design, mean_phi, second_phi, options.omega_floor, subjects, constraints;
@@ -1460,7 +1469,7 @@ function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indice
         θ, ω = _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
             mean_phi, second_phi, subjects, options.omega_floor, constraints; identified)
     end
-    if options.omega_annealing > 0 && γ == 1
+    if anneal && options.omega_annealing > 0 && γ == 1
         ω = _saem_anneal(layout, ω_previous, ω, options.omega_annealing, constraints)
     end
     θ_centered = θ
@@ -1469,8 +1478,8 @@ function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indice
     isempty(free) && return θ, σ, ω, θ_centered
     etas = [_saem_eta(Φ, θ, indices, design) for Φ in bank]
     nodesign = [zeros(size(X, 1), 0) for X in design]
-    θ, σ = numeric_update(model, subjects, θ, σ, sort!(vcat(indices, free)), Int[],
-        nodesign, etas, weights, options.numeric_maxiter, γ,
+    θ, σ = numeric_update(_saem_numeric_model(model, ω), subjects, θ, σ,
+        sort!(vcat(indices, free)), Int[], nodesign, etas, weights, options.numeric_maxiter, γ,
         map_objective ? ω : nothing, active)::Tuple{Vector{Float64},Vector{Float64}}
     _saem_transport!(mean_phi, second_phi, bank, design, θ[indices] - θ_centered[indices])
     return θ, σ, ω, θ_centered
@@ -1513,12 +1522,13 @@ end
 # Progress phases of an SAEM run under its node, prepared up front so that the
 # whole run shows from the start: the Pathfinder start, the MCMC burn-in and the SA
 # iterations. A phase is `nothing` when the run has none or progress is off.
-function _saem_phases(node, kernel, options, nsubjects)
-    warmup = kernel isa WarmupHMCNUTS ?
+function _saem_phases(node, kernel, options, nsubjects, sampling = true)
+    warmup = sampling && kernel isa WarmupHMCNUTS ?
         prepare_progress!(node, nsubjects; description = "Pathfinder start") : nothing
-    burnin = options.mcmc_burnin > 0 ?
+    burnin = sampling && options.mcmc_burnin > 0 ?
         prepare_progress!(node, options.mcmc_burnin; description = "MCMC burn-in") : nothing
-    sa = prepare_progress!(node, options.iterations; description = "Stochastic approximation")
+    sa = prepare_progress!(node, options.iterations;
+        description = sampling ? "Stochastic approximation" : "Laplace-EM")
     return (; warmup, burnin, sa)
 end
 
@@ -1566,6 +1576,15 @@ _saem_loglikelihood_part(estimate::_SAEMBatchEstimate) =
     "Σ log p(y|η) ≈ $(short_string(estimate.value; sigdigits = 7)) " *
     "(batch of $(estimate.size))"
 
+# With integrated families: the sum of every subject's Laplace conditional at its
+# chain's last state, or with nothing sampled the Laplace marginal log-likelihood.
+struct _SAEMLaplaceSum
+    value::Float64
+    sampling::Bool
+end
+_saem_loglikelihood_part(s::_SAEMLaplaceSum) =
+    "Σ log p(y$(s.sampling ? "|s" : "")) ≈ $(short_string(s.value; sigdigits = 7)) (Laplace)"
+
 _saem_batch_estimate(ℓ, active, n) =
     _SAEMBatchEstimate(sum(view(ℓ, active)) * n / length(active), length(active))
 
@@ -1581,13 +1600,16 @@ _saem_kernel_stats(::DualAveragingMALA, nprior, nrw, ncw, ncw_proposed, denom, n
     "mean MALA step size $(short_string(
         sum(s -> exp(s.log_stepsize), mala_states) / length(mala_states); sigdigits = 3))"
 
+_saem_progress_stats(sampling, kernel, counts...) =
+    sampling ? _saem_kernel_stats(kernel, counts...) : "every family integrated"
+
 _saem_stop_message(completed, options) =
     "stopped by interrupt after $completed of $(options.iterations) SA iterations"
 
 """
     saem(model, θ0, σ0, ω0; rng=Random.default_rng(), subjects=nothing,
          η0=nothing, options=SAEMOptions(), kernel=StandardSAEMMH(),
-         progress=nothing) -> SAEMResult
+         progress=nothing, integrated=integrated_families(model)) -> SAEMResult
 
 Estimate population parameters using MCMC stochastic approximation. Subject
 chains persist across iterations. The Gaussian random-effect prior supplies a
@@ -1632,6 +1654,27 @@ parameters of its next iteration; it is then replaced by a feasible draw from
 the random-effect prior. The progress message's `Σ log p(y|η)` is then the
 batch's sum scaled to all subjects.
 
+`integrated` lists covariance families (for an [`NLMELayout`](@ref), η blocks)
+whose random effects the model integrates out by its own Laplace approximation
+(see [`integrated_families`](@ref) for the methods it implements). The chains
+then sample only each subject's other random effects, against the Laplace
+conditional likelihood of the integrated ones, and a subject with none keeps no
+chain. After each iteration's transitions the model returns every subject's
+integrated modes `û` and covariance blocks `C` at its chain's state, and the
+M-step takes each integrated family's covariance and mu-referenced θ in closed
+form from those moments, `E[u uᵀ] ≈ û ûᵀ + C`, stochastically averaged like
+the chains' statistics; the numerical update of θ and σ maximizes the Laplace
+conditionals, holding the sampled effects fixed. Where the model is Gaussian in
+the integrated effects the moments are exact. With every family integrated
+nothing is sampled: the iterations are Laplace-EM, each taking the whole step
+(γ = 1) without `mcmc_burnin`, the `burnin` schedule or Ω annealing, and
+`kernel` is unused. Its fixed point is the maximum of the Laplace marginal
+likelihood where the likelihood is Gaussian in the effects, and close to it
+otherwise, because the closed-form covariance update leaves out the change of
+the Laplace curvature with the mode. The result's `eta` holds the sampled chains'
+states and the integrated modes. A later call can integrate another set, for
+example a staged fit that starts from Laplace-EM and then samples some families.
+
 `progress` is a Treebars node (or a backend symbol such as `:term`) under which a
 `SAEM` node shows the run's phases: `Pathfinder start` (one subject per step),
 `MCMC burn-in` and `Stochastic approximation`, each counting its
@@ -1645,10 +1688,11 @@ boundary: `saem` returns the estimate of the last completed iteration with
 function saem(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVector;
         rng::AbstractRNG = Random.default_rng(), subjects = nothing, η0 = nothing,
         options::SAEMOptions = SAEMOptions(),
-        kernel::AbstractSAEMKernel = StandardSAEMMH(), progress = nothing)
+        kernel::AbstractSAEMKernel = StandardSAEMMH(), progress = nothing,
+        integrated = integrated_families(model))
     return with_progress(progress; description = "SAEM") do node
         _saem(nlme_layout(model), model, θ0, σ0, ω0, rng, subjects, η0,
-            options, kernel, node)
+            options, kernel, node, integrated)
     end
 end
 
@@ -1668,8 +1712,10 @@ _saem_result(::NLMELayout, fields...) = SAEMResult(fields...)
 # One loop for both layouts and every kernel. The layout decides the η storage
 # (a matrix, or one compact vector per subject), the running statistics, the
 # prior and the result type; each kernel works subject by subject on either.
-function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel, node)
-    _saem_check_options(options)
+function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel, node,
+        integrated = Int[])
+    integrated = _checked_integrated(layout, integrated)
+    _saem_check_options(options; schedule = integrated != _families(layout))
     kernel isa WarmupHMCNUTS && _saem_check_nuts(kernel)
     kernel isa DualAveragingMALA && _saem_check_mala(kernel)
     _saem_check_subjects(layout, model)
@@ -1697,10 +1743,27 @@ function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel
     map_objective || _saem_require_identified(model, indices, identified)
     H = _saem_start(layout, η0, ids)
     free = [i for i in 1:(layout.ntheta + layout.nsigma) if i > layout.ntheta || !(i in indices)]
-    prior = _re_prior(layout, ω)
-    ℓ = conditional_loglikelihoods(model, ids, θ, σ, H)
-    length(ℓ) == length(ids) && all(isfinite, ℓ) || throw(DomainError(ℓ,
-        "SAEM initial conditional log densities must be finite and one per subject"))
+    # With integrated families the kernels run on the view of the sampled entries
+    # (`emodel`, chain subjects `eids`, their prior and states `eH`), and every
+    # subject's integrated entries hold their Laplace modes, with the covariance
+    # blocks and Laplace conditionals beside them. Without, the view is the model.
+    plan = isempty(integrated) ? nothing : _integration_plan(layout, integrated, ids)
+    covariances = Vector{Vector{Matrix{Float64}}}(undef, length(ids))
+    laplace_values = zeros(length(ids))
+    if plan === nothing
+        ℓ = conditional_loglikelihoods(model, ids, θ, σ, H)
+        length(ℓ) == length(ids) && all(isfinite, ℓ) || throw(DomainError(ℓ,
+            "SAEM initial conditional log densities must be finite and one per subject"))
+    else
+        _saem_laplace_moments!(H, covariances, laplace_values, model, plan, ids,
+            eachindex(ids), θ, σ, ω)
+        ℓ = laplace_values[plan.sampled.positions]
+    end
+    emodel, eids, eprior, eH = _saem_estep(model, plan, ids, layout, ω, H)
+    # Nothing to sample (every family integrated): Laplace-EM, deterministic, so
+    # every iteration takes the whole step (γ = 1) without burn-in or annealing.
+    sampling = !isempty(eids)
+    mcmc_burnin = sampling ? options.mcmc_burnin : 0
     bank = typeof(H)[]
     weights = Float64[]
     batch = _saem_minibatch(options.minibatch_size, length(ids))
@@ -1710,101 +1773,118 @@ function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel
         Base.invokelatest(_SAEMScoreStep, batch / length(ids))::Function
     mean_phi, second_phi = _saem_statistics(layout, ids, H)
     logscale = log(options.rw_scale)
-    component_logscales = fill(log(options.rw_scale), _saem_ncoordinates(layout))
+    component_logscales = fill(log(options.rw_scale),
+        sampling ? _saem_ncoordinates(nlme_layout(emodel)) : 0)
     nprior = nrw = ncw = ncw_proposed = sweeps = moved = 0
     ndivergent = 0
-    mala_states = kernel isa DualAveragingMALA ?
-        _saem_mala_states(kernel, length(ids)) : nothing
-    mala_cache = kernel isa DualAveragingMALA ? _saem_mala_cache(H) : nothing
-    mala_metrics = kernel isa DualAveragingMALA ?
-        _saem_mala_metrics(kernel, model, ids, θ, σ, prior, H) : nothing
+    is_mh = sampling && kernel isa StandardSAEMMH
+    is_mala = sampling && kernel isa DualAveragingMALA
+    is_nuts = sampling && kernel isa WarmupHMCNUTS
+    mala_states = is_mala ? _saem_mala_states(kernel, length(eids)) : nothing
+    mala_cache = is_mala ? _saem_mala_cache(eH) : nothing
+    mala_metrics = is_mala ? _saem_mala_metrics(kernel, emodel, eids, θ, σ, eprior, eH) : nothing
     # Chains moved (re-centred or replaced) since their last NUTS transition; each
     # moves its chain to the new position before its next transition.
-    nuts_moved = falses(length(ids))
-    phases = _saem_phases(node, kernel, options, length(ids))
+    nuts_moved = falses(length(eids))
+    phases = _saem_phases(node, kernel, options, length(eids), sampling)
     completed = 0
     interrupted = false
     loglikelihood = nothing
-    nuts = kernel isa WarmupHMCNUTS ? _saem_nuts_start!(rng, kernel,
-        model, ids, θ, σ, prior, H, phases.warmup) : nothing
-    interrupted = kernel isa WarmupHMCNUTS && nuts === nothing
-    for iteration in 1:(interrupted ? 0 : options.mcmc_burnin + options.iterations)
+    nuts = is_nuts ? _saem_nuts_start!(rng, kernel,
+        emodel, eids, θ, σ, eprior, eH, phases.warmup) : nothing
+    interrupted = is_nuts && nuts === nothing
+    for iteration in 1:(interrupted ? 0 : mcmc_burnin + options.iterations)
         if interrupt_requested(node)
             interrupted = true
             break
         end
-        phase = _saem_phase!(phases, iteration, options.mcmc_burnin)
-        active = iteration <= max(options.mcmc_burnin, 1) ? Base.OneTo(length(ids)) :
+        phase = _saem_phase!(phases, iteration, mcmc_burnin)
+        active = iteration <= max(mcmc_burnin, 1) ? Base.OneTo(length(ids)) :
             _saem_active(rng, length(ids), batch)
-        if iteration > options.mcmc_burnin
-            prior = _re_prior(layout, ω)
-            if batch !== nothing
-                replaced = _saem_batch_loglikelihoods!(rng, model, ids, θ, σ,
-                    prior, H, ℓ, active)
+        eactive = _saem_chain_active(plan, active, length(eids))
+        if iteration > mcmc_burnin
+            if plan === nothing
+                eprior = _re_prior(layout, ω)
+            else
+                emodel, eids, eprior, eH = _saem_estep(model, plan, ids, layout, ω, H)
+            end
+            if !sampling
+            elseif batch !== nothing
+                replaced = _saem_batch_loglikelihoods!(rng, emodel, eids, θ, σ,
+                    eprior, eH, ℓ, eactive)
                 mala_cache === nothing || (mala_cache.valid[replaced] .= false)
                 nuts_moved[replaced] .= true
-                loglikelihood = _saem_batch_estimate(ℓ, active, length(ids))
+                loglikelihood = _saem_batch_estimate(ℓ, eactive, length(eids))
             elseif kernel isa StandardSAEMMH || kernel isa WarmupHMCNUTS
-                ℓ = _saem_current_loglikelihoods(model, ids, θ, σ, H)
+                ℓ = _saem_current_loglikelihoods(emodel, eids, θ, σ, eH)
                 loglikelihood = sum(ℓ)
             end
         end
-        for _ in 1:options.mh_rounds
+        for _ in 1:(sampling ? options.mh_rounds : 0)
             if kernel isa StandardSAEMMH
-                Hb, ℓb = _columns(H, active), ℓ[active]
-                ap, ar, ac, apc = _saem_mh_round!(rng, model, ids[active], θ, σ, prior,
+                Hb, ℓb = _columns(eH, eactive), ℓ[eactive]
+                ap, ar, ac, apc = _saem_mh_round!(rng, emodel, eids[eactive], θ, σ, eprior,
                     Hb, ℓb, exp(logscale), exp.(component_logscales))
-                _set_columns!(H, active, Hb)
-                ℓ[active] = ℓb
+                _set_columns!(eH, eactive, Hb)
+                ℓ[eactive] = ℓb
                 nprior += ap
                 nrw += ar
                 ncw += sum(ac)
                 ncw_proposed += sum(apc)
             elseif kernel isa WarmupHMCNUTS
-                restart = [k for k in active if nuts_moved[k]]
-                _saem_nuts_reposition!(nuts, H, restart)
+                restart = [k for k in eactive if nuts_moved[k]]
+                _saem_nuts_reposition!(nuts, eH, restart)
                 nuts_moved[restart] .= false
-                ndivergent += _saem_nuts_round!(nuts, model, ids, θ, σ,
-                    prior, H, active)
+                ndivergent += _saem_nuts_round!(nuts, emodel, eids, θ, σ,
+                    eprior, eH, eactive)
             elseif kernel isa DualAveragingMALA
-                _saem_mala_batch_round!(rng, kernel, mala_states, model, ids, θ, σ,
-                    prior, H, active; metrics=mala_metrics, cache=mala_cache)
+                _saem_mala_batch_round!(rng, kernel, mala_states, emodel, eids, θ, σ,
+                    eprior, eH, eactive; metrics=mala_metrics, cache=mala_cache)
             else
                 throw(ArgumentError("unsupported SAEM kernel $(typeof(kernel))"))
             end
             sweeps += 1
-            moved += length(active)
+            moved += length(eactive)
             if kernel isa StandardSAEMMH && sweeps <= options.adapt_iterations
                 logscale = _saem_adapt_mh_scales!(logscale, component_logscales, ar,
-                    length(active), ac, apc, sweeps)
+                    length(eactive), ac, apc, sweeps)
             end
         end
-        if iteration <= options.mcmc_burnin
+        sampling && plan !== nothing && _write_sampled!(H, plan, eH)
+        if iteration <= mcmc_burnin
             if phase !== nothing
                 update_progress!(phase, iteration)
-                _saem_report!(phase, nothing, nothing, nothing, _saem_kernel_stats(kernel,
-                    nprior, nrw, ncw, ncw_proposed, moved, ndivergent, mala_states))
+                _saem_report!(phase, nothing, nothing, nothing, _saem_progress_stats(sampling,
+                    kernel, nprior, nrw, ncw, ncw_proposed, moved, ndivergent, mala_states))
             end
             continue
         end
-        k = iteration - options.mcmc_burnin
-        γ = k <= options.burnin ? 1.0 : (k - options.burnin)^(-options.step_exponent)
+        k = iteration - mcmc_burnin
+        γ = !sampling || k <= options.burnin ? 1.0 :
+            (k - options.burnin)^(-options.step_exponent)
+        if plan !== nothing
+            _saem_laplace_moments!(H, covariances, laplace_values, model, plan, ids,
+                active, θ, σ, ω)
+            loglikelihood = _SAEMLaplaceSum(sum(laplace_values), sampling)
+        end
         Φ = _saem_phi(H, θ, indices, design)
         _saem_moments!(mean_phi, second_phi, Φ, γ)
+        plan === nothing || _saem_add_covariances!(second_phi, plan, covariances, γ)
         _saem_record!(numeric_mode, bank, weights, Φ, γ)
         if k % options.mstep_interval == 0 || k == options.iterations
             phase === nothing || _saem_report!(phase, "M-step", γ, loglikelihood,
-                _saem_kernel_stats(kernel, nprior, nrw, ncw, ncw_proposed,
-                    moved, ndivergent, mala_states))
+                _saem_progress_stats(sampling, kernel, nprior, nrw, ncw,
+                    ncw_proposed, moved, ndivergent, mala_states))
             θ_before, σ_before = copy(θ), copy(σ)
-            θ, σ, ω, θ_kept = _saem_mstep(numeric_update, model, ids, layout, θ, σ, ω,
+            mmodel = plan === nothing ? model : _IntegratedModel(model, integrated, ω)
+            θ, σ, ω, θ_kept = _saem_mstep(numeric_update, mmodel, ids, layout, θ, σ, ω,
                 indices, design, free, bank, weights, mean_phi, second_phi,
                 options, γ, constraints, map_objective, active;
-                identified)
+                identified, anneal = sampling)
             if mala_cache !== nothing && any(mala_cache.valid)
-                if θ == θ_before && σ == σ_before
-                    _saem_mala_refresh_prior!(mala_cache, H, prior,
-                        _re_prior(layout, ω), ids)
+                if plan === nothing && θ == θ_before && σ == σ_before
+                    _saem_mala_refresh_prior!(mala_cache, eH, eprior,
+                        _re_prior(layout, ω), eids)
                 else
                     mala_cache.valid .= false
                 end
@@ -1814,16 +1894,14 @@ function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel
         completed = k
         if phase !== nothing
             update_progress!(phase, k)
-            _saem_report!(phase, nothing, γ, loglikelihood, _saem_kernel_stats(kernel,
-                nprior, nrw, ncw, ncw_proposed, moved, ndivergent, mala_states))
+            _saem_report!(phase, nothing, γ, loglikelihood, _saem_progress_stats(sampling,
+                kernel, nprior, nrw, ncw, ncw_proposed, moved, ndivergent, mala_states))
         end
     end
     _saem_finish_phase!(phases.burnin)
     _saem_finish_phase!(phases.sa)
     interrupted && update_progress!(node, _saem_stop_message(completed, options))
     denom = moved
-    is_mh = kernel isa StandardSAEMMH
-    is_mala = kernel isa DualAveragingMALA
     final_lp = map_objective ? population_logprior(model, θ, σ, ω) : 0.0
     final_lp isa Real && isfinite(final_lp) || throw(DomainError(final_lp,
         "SAEM final population log prior must be finite"))
@@ -1832,12 +1910,13 @@ function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel
             random_walk = is_mh ? nrw / denom : missing,
             coordinates = is_mh ? ncw / ncw_proposed : missing),
         is_mh ? exp(logscale) : missing,
-        is_mh ? :standard_mh : is_mala ? :dual_averaging_mala : :warmuphmc_nuts,
+        !sampling ? :laplace_em : is_mh ? :standard_mh :
+            is_mala ? :dual_averaging_mala : :warmuphmc_nuts,
         ndivergent,
         is_mala ? exp.([s.log_stepsize for s in mala_states]) : missing,
         is_mala ? [s.accepted / s.count for s in mala_states] : missing,
         is_mala ? minimum(s -> s.count, mala_states) : 0,
         _saem_mode_name(numeric_mode), map_objective ? :MAP : :ML,
         final_lp, map_objective ? population_prior_provenance(model) : nothing,
-        completed, interrupted)
+        completed, interrupted, integrated)
 end

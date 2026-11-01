@@ -22,7 +22,7 @@ export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
     occasions_exact_nested, occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly,
     SparseDeclared, NestedWells, nested_wells, QuadraticEta, occasions_pattern, occasions_sparse, OccasionsBlocks, PoissonOccasions,
-    poisson_model, poisson_sparse, poisson_exact
+    poisson_model, poisson_sparse, poisson_exact, LinearIntegrated
 
 # The promised configuration: Enzyme reverse mode with static activity analysis (DI
 # selects forward-over-reverse for Hessians of `AutoEnzyme()`). The package's own
@@ -679,6 +679,152 @@ function occasions_model(; seed = 9, n = 8, gaussian = false, units = nothing)
         end
     end
     return RaggedOccasions(y; gaussian)
+end
+
+
+# A model linear and Gaussian in its random effects that integrates any set of
+# its covariance families itself, the shape of a joint program with an embedded
+# Laplace approximation (BRM): given the sampled effects s, subject i's
+# observations are Gaussian with mean μ₀ + Z_s s and covariance v I + Z_u D Z_uᵀ,
+# where D is the integrated instances' prior covariance. Its Laplace
+# conditionals, modes and covariance blocks are then exact closed forms; the
+# population gradient is ForwardDiff's. Everything else forwards to `inner`.
+# `shift`, `scale` and `inflate` distort the values, the sampled gradients and the
+# covariance blocks for check_protocol's negative controls; `calls` counts the
+# calls of each method.
+struct LinearIntegrated{M}
+    inner::M
+    integrated::Vector{Int}
+    shift::Float64
+    scale::Float64
+    inflate::Float64
+    calls::Dict{Symbol, Int}
+end
+LinearIntegrated(inner, integrated; shift = 0.0, scale = 1.0, inflate = 1.0) =
+    LinearIntegrated(inner, collect(Int, integrated), shift, scale, inflate, Dict{Symbol, Int}())
+for f in (:nsubjects, :nlme_layout, :mu_referencing)
+    @eval NE.$f(m::LinearIntegrated) = NE.$f(m.inner)
+end
+NE.conditional_loglikelihood(m::LinearIntegrated, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood(m.inner, i, θ, σ, η)
+NE.conditional_loglikelihood_and_gradient(m::LinearIntegrated, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood_and_gradient(m.inner, i, θ, σ, η)
+NE.conditional_loglikelihood_and_population_gradient(m::LinearIntegrated, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood_and_population_gradient(m.inner, i, θ, σ, η)
+NE.population_logprior(m::LinearIntegrated, θ, σ, ω) = NE.population_logprior(m.inner, θ, σ, ω)
+NE.ad_backend(::LinearIntegrated) = AutoForwardDiff()
+NE.integrated_families(m::LinearIntegrated) = m.integrated
+
+counted!(m, what) = (m.calls[what] = get(m.calls, what, 0) + 1)
+
+# Subject i's observations y, their mean μ₀ at η = 0, the design Z of η and the
+# residual variance v.
+function linear_parts(m::RaggedOccasions, i, θ, σ)
+    sizes = length.(m.y[i])
+    Z = zeros(sum(sizes), 1 + length(sizes))
+    Z[:, 1] .= 1
+    offset = 0
+    for (j, s) in enumerate(sizes)
+        Z[offset+1:offset+s, 1+j] .= 1
+        offset += s
+    end
+    return reduce(vcat, m.y[i]), fill(θ[1], sum(sizes)), Z, exp(2σ[1])
+end
+function linear_parts(m::LinearGrowth, i, θ, σ)
+    Z = hcat(ones(length(m.t[i])), m.t[i])
+    return m.y[i], Z * θ, Z, exp(2σ[1])
+end
+
+family_covariances(layout::RaggedNLMELayout, ω) = omega_matrix(layout, ω)
+family_covariances(layout::NLMELayout, ω) = [omega_matrix(NLMELayout(0, 0, [k]), ω[r])
+    for (k, r) in zip(layout.eta_blocks, last(NE._block_ranges(layout)))]
+
+# Subject i's integrated entries U, sampled entries S, the observations' mean μ
+# given the sampled effects and covariance C with the integrated ones integrated
+# out, and the integrated instances' prior covariance D.
+function integrated_parts(m::LinearIntegrated, F, i, θ, σ, ω, η)
+    layout = NE.nlme_layout(m)
+    y, μ0, Z, v = linear_parts(m.inner, i, θ, σ)
+    Ωf = family_covariances(layout, ω)
+    blocks = [(f, r) for (f, r) in NE._subject_blocks(layout, i) if f in F]
+    U = reduce(vcat, [collect(r) for (_, r) in blocks]; init = Int[])
+    S = setdiff(eachindex(η), U)
+    T = promote_type(eltype(μ0), typeof(v), eltype(ω), eltype(η))
+    D = zeros(T, length(U), length(U))
+    offset = 0
+    for (f, r) in blocks
+        D[offset .+ (1:length(r)), offset .+ (1:length(r))] = Ωf[f]
+        offset += length(r)
+    end
+    μ = μ0 .+ Z[:, S] * η[S]
+    C = v * I + Z[:, U] * D * Z[:, U]'
+    return (; y, μ, C, Z, U, S, D, v, blocks)
+end
+
+function integrated_value(m, F, i, θ, σ, ω, η)
+    p = integrated_parts(m, F, i, θ, σ, ω, η)
+    L = cholesky(Symmetric(p.C)).L
+    z = L \ (p.y .- p.μ)
+    return -(length(z) * log(2π) + 2sum(log, diag(L)) + dot(z, z)) / 2
+end
+
+function NE.laplace_conditionals_and_gradients(m::LinearIntegrated, F, subjects, θ, σ, ω, H)
+    counted!(m, :gradients)
+    layout = NE.nlme_layout(m)
+    values = Float64[]
+    gradients = Vector{Float64}[]
+    for (k, i) in enumerate(subjects)
+        η = NE._eta_column(H, k)
+        p = integrated_parts(m, F, i, θ, σ, ω, η)
+        g = zeros(length(η))
+        g[p.S] = m.scale .* (p.Z[:, p.S]' * (cholesky(Symmetric(p.C)) \ (p.y .- p.μ)))
+        push!(values, integrated_value(m, F, i, θ, σ, ω, η) + m.shift)
+        push!(gradients, g)
+    end
+    return values, NE._eta_batch(layout, gradients)
+end
+
+function NE.laplace_conditionals(m::LinearIntegrated, F, subjects, θ, σ, ω, H)
+    counted!(m, :values)
+    return [integrated_value(m, F, i, θ, σ, ω, NE._eta_column(H, k)) + m.shift
+        for (k, i) in enumerate(subjects)]
+end
+
+function NE.laplace_conditional_moments(m::LinearIntegrated, F, subjects, θ, σ, ω, H)
+    counted!(m, :moments)
+    layout = NE.nlme_layout(m)
+    values = Float64[]
+    modes = Vector{Float64}[]
+    covariances = Vector{Matrix{Float64}}[]
+    for (k, i) in enumerate(subjects)
+        η = Vector{Float64}(NE._eta_column(H, k))
+        p = integrated_parts(m, F, i, θ, σ, ω, η)
+        ZU = p.Z[:, p.U]
+        Σ = inv(Symmetric(ZU' * ZU / p.v + inv(Symmetric(p.D))))
+        η[p.U] = Σ * (ZU' * (p.y .- p.μ)) / p.v
+        offset = 0
+        blocks = map(p.blocks) do (_, r)
+            b = offset .+ (1:length(r))
+            offset += length(r)
+            m.inflate .* Matrix(Σ[b, b])
+        end
+        push!(values, integrated_value(m, F, i, θ, σ, ω, η) + m.shift)
+        push!(modes, η)
+        push!(covariances, blocks)
+    end
+    return values, NE._eta_batch(layout, modes), covariances
+end
+
+function NE.laplace_conditionals_and_population_gradient(m::LinearIntegrated, F, subjects,
+        θ, σ, ω, H)
+    counted!(m, :population)
+    nθ, nσ = length(θ), length(σ)
+    total(x) = sum(integrated_value(m, F, i, x[1:nθ], x[nθ+1:nθ+nσ], x[nθ+nσ+1:end],
+        NE._eta_column(H, k)) for (k, i) in enumerate(subjects))
+    x = vcat(θ, σ, ω)
+    g = ForwardDiff.gradient(total, x)
+    values = NE.laplace_conditionals(m, F, subjects, θ, σ, ω, H)
+    return values, g[1:nθ], g[nθ+1:nθ+nσ], g[nθ+nσ+1:end]
 end
 
 end
