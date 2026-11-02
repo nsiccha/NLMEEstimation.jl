@@ -24,11 +24,10 @@ failing or silently behaving differently at run time.
   floor, the block returned its start, and the prior moved neither the
   mu-referenced θ nor Ω in that M-step. On a 3-subject test model with a 4 × 4
   Ω (`bench/saem_map_block.jl`) that was every M-step at `omega_floor = 0.05`,
-  each ending 0.01–0.15 below the block's maximum, and 11 to 40 of 40 M-steps at
-  the default floor, ending 1–5 below it. The block now ends at that maximum
-  (within 1e-13 at 0.05, 1e-7 at the default floor, in the SA phase); while
-  γ = 1 at the default floor it can end on another local maximum, up to 0.03
-  below.
+  up to 0.15 below the block's maximum, and 11 to 40 of 40 M-steps at the
+  default floor, up to 5 below it. In the SA phase the block now ends within
+  1e-13 (at 0.05) and 1e-7 (default floor) of that maximum; while γ = 1 at the
+  default floor it can end on another local maximum, up to 0.03 below.
 - The block calls `population_logprior_and_gradient` about twice per M-step,
   plus `2d` at a fit's first (d the mu-referenced θ and free Ω coordinates), and
   `population_logprior` not at all. It maximizes the Gaussian term plus a
