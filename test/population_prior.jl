@@ -356,3 +356,187 @@ end
         @test vcat(gθ, gω)[j] ≈ (f(x + dx) - f(x - dx)) / 2e-6 atol = 1e-6
     end
 end
+
+@testset "population prior: the MAP block's floor-free coordinates" begin
+    # Ω_f = floor·I + L Lᵀ with L any square matrix: every value holds the floor,
+    # the map inverts, and its gradient is the chain rule's.
+    layout = NLMELayout(0, 0, [2, 3])
+    constraints = NE._omega_constraints(layout, [1 => FixedOmega(sd = [0.3, nothing])])
+    for (c, nμ) in ((nothing, 2), (constraints, 1))
+        families, nx = NE._map_block_families(layout, c, nμ)
+        @test [f[1] for f in families] == (c === nothing ? [true, true] : [false, true])
+        nz = last(last(families)[2])
+        @test nx == nμ + sum(f -> f[1] ? f[4]^2 : length(f[2]), families)
+        rng = Xoshiro(3)
+        z = 0.3 .* randn(rng, nz)
+        floor = 0.05
+        for (free, rz, rx, k) in families
+            free || continue
+            # an Ω_f well above the floor
+            z[rz] = omega_parameters(NLMELayout(0, 0, [k]), Matrix(0.4I, k, k) +
+                0.1 * ones(k, k))
+        end
+        x = NE._map_block_floor_free(z, families, floor, nx)
+        @test length(x) == nx
+        @test NE._map_block_coordinates(x, families, floor, nz) ≈ z
+        f(z) = sum(sin, z) + dot(z, z) / 3
+        gz(z) = cos.(z) + 2z / 3
+        F(x) = f(NE._map_block_coordinates(x, families, floor, nz))
+        # a point whose square factors are not triangular
+        xs = x + 0.05 .* randn(rng, nx)
+        zs = NE._map_block_coordinates(xs, families, floor, nz)
+        gx = NE._map_block_floor_free_gradient(xs, zs, gz(zs), families)
+        for j in eachindex(xs)
+            dx = zeros(nx)
+            dx[j] = 1e-6
+            @test gx[j] ≈ (F(xs + dx) - F(xs - dx)) / 2e-6 atol = 1e-7
+        end
+        # Any coordinates hold the floor: L = 0 is Ω_f = floor·I.
+        for (free, rz, rx, k) in families, entries in (zeros(k^2), 30 .* randn(rng, k^2))
+            free || continue
+            xs = copy(x)
+            xs[rx] = entries
+            Ω = NE.omega_matrix(NLMELayout(0, 0, [k]),
+                NE._map_block_coordinates(xs, families, floor, nz)[rz])
+            @test eigmin(Symmetric(Ω)) >= floor * (1 - 1e-10)
+        end
+    end
+end
+
+# A prior that pulls the mu-referenced θ towards 0.5 and ω towards 0, counting
+# its gradients.
+struct FloorPrior
+    gradients::Base.RefValue{Int}
+end
+NE.population_logprior(::FloorPrior, θ, σ, ω) = -sum(abs2, θ .- 0.5) / 2 - sum(abs2, ω) / 8
+function NE.population_logprior_and_gradient(m::FloorPrior, θ, σ, ω)
+    m.gradients[] += 1
+    return population_logprior(m, θ, σ, ω), -(θ .- 0.5), zeros(length(σ)), -ω ./ 4
+end
+
+@testset "population prior: the SAEM Gaussian block moves along an active Ω floor" begin
+    # Two subjects for a 3 × 3 Ω, from one draw each (γ = 1): the closed-form
+    # covariance has an eigenvalue on the floor. Before 0.2.7 every trial step
+    # of the block's search left the floor's admissible set and it returned its
+    # start, so the prior moved neither θ nor Ω.
+    layout = NLMELayout(3, 0, [3])
+    floor = 0.05
+    design = [Matrix{Float64}(I, 3, 3) for _ in 1:2]
+    mean_phi = [0.9 -0.3; 0.4 0.8; -0.6 0.2]
+    second_phi = zeros(3, 3, 2)
+    for k in 1:2
+        second_phi[:, :, k] = mean_phi[:, k] * mean_phi[:, k]'
+    end
+    θc, Ωc = NE._saem_gaussian_mstep(layout, zeros(3), Matrix(1.0I, 3, 3), 1:3, design,
+        mean_phi, second_phi, floor)
+    @test eigmin(Symmetric(Ωc)) ≈ floor
+    ωc = omega_parameters(layout, Ωc)
+    σ = Float64[]
+    objective(θ, ω) = first(NE._saem_gaussian_map_value_gradient(layout, θ, ω, 1:3,
+        design, mean_phi, second_phi)) + population_logprior(FloorPrior(Ref(0)), θ, σ, ω)
+    # Reference: the same objective with Ω = floor·I + L Lᵀ, L any 3 × 3 matrix.
+    function unpack(x)
+        L = reshape(x[4:12], 3, 3)
+        return x[1:3], omega_parameters(layout, Matrix(floor * I + L * L'))
+    end
+    E = eigen(Symmetric(Ωc - floor * I))
+    L0 = cholesky(Symmetric(E.vectors * Diagonal(max.(E.values, 1e-4)) * E.vectors')).L
+    x0 = vcat(θc, vec(Matrix(L0)))
+    reference = -Optim.minimum(Optim.optimize(x -> -objective(unpack(x)...), x0,
+        Optim.LBFGS(), Optim.Options(g_tol = 1e-10, iterations = 10_000)))
+    # The closed-form start is well short of it: a block that does not move fails.
+    @test objective(θc, ωc) < reference - 0.01
+    curvature = NE._SAEMPriorCurvature()
+    prior = FloorPrior(Ref(0))
+    θm, ωm = NE._saem_gaussian_map_block(prior, layout, θc, σ, ωc, 1:3, design,
+        mean_phi, second_phi, 1:2, floor, nothing; prior_curvature = curvature)
+    @test objective(θm, ωm) ≥ reference - 1e-7
+    @test eigmin(Symmetric(NE.omega_matrix(layout, ωm))) ≥ floor * (1 - 1e-8)
+    # The curvature takes 2d prior gradients at a fit's first MAP M-step (d = 9),
+    # and is carried: the same M-step again takes a few.
+    @test prior.gradients[] <= 2 * 9 + 6
+    prior.gradients[] = 0
+    θ2, ω2 = NE._saem_gaussian_map_block(prior, layout, θc, σ, ωc, 1:3, design,
+        mean_phi, second_phi, 1:2, floor, nothing; prior_curvature = curvature)
+    @test prior.gradients[] <= 4
+    @test objective(θ2, ω2) ≥ reference - 1e-7
+    # The ragged layout's block is the same problem.
+    ragged = RaggedNLMELayout(ntheta = 3, nsigma = 0, family_sizes = [3],
+        subject_families = [[1], [1]])
+    θr, ωr = NE._saem_gaussian_map_block(FloorPrior(Ref(0)), ragged, θc, σ, ωc, 1:3,
+        design, collect(eachcol(mean_phi)), [[second_phi[:, :, k]] for k in 1:2], 1:2,
+        floor, nothing)
+    @test θr ≈ θm atol = 1e-6
+    @test ωr ≈ ωm atol = 1e-6
+end
+
+# Three subjects, a dense 2 × 2 Ω, an intercept with an indicator and two
+# exactly collinear standardized covariates on the first random effect (one
+# combination the designs do not identify), and a residual SD: d = 5 + 3.
+struct CollinearGrowth
+    t::Vector{Float64}
+    w::Matrix{Float64}
+    y::Vector{Vector{Float64}}
+    prior_gradients::Base.RefValue{Int}
+    population_gradients::Base.RefValue{Int}
+end
+function collinear_growth_model(; seed = 2)
+    rng = Xoshiro(seed)
+    standardize(x) = (x .- sum(x) / 3) ./ sqrt(sum(abs2, x .- sum(x) / 3) / 2)
+    w = hcat([0.0, 1.0, 1.0], standardize([2.0, 5.0, 3.0]), standardize([8.0, 5.0, 7.0]))
+    t = [0.5, 1.0, 2.0, 4.0]
+    y = [(1.0 + dot([0.3, -0.2, 0.1], w[i, :]) + 0.4randn(rng)) .+
+        (0.5 + 0.2randn(rng)) .* t .+ 0.1 .* randn(rng, 4) for i in 1:3]
+    return CollinearGrowth(t, w, y, Ref(0), Ref(0))
+end
+NE.nsubjects(m::CollinearGrowth) = 3
+NE.nlme_layout(::CollinearGrowth) = NLMELayout(5, 1, [2])
+NE.mu_referencing(m::CollinearGrowth) = MuReferencing(collect(1:5),
+    [[1.0 m.w[i, 1] m.w[i, 2] m.w[i, 3] 0.0; 0.0 0.0 0.0 0.0 1.0] for i in 1:3])
+collinear_residuals(m, i, θ, η) = m.y[i] .-
+    (θ[1] + dot(view(θ, 2:4), view(m.w, i, :)) + η[1]) .- (θ[5] + η[2]) .* m.t
+function NE.conditional_loglikelihood(m::CollinearGrowth, i, θ, σ, η)
+    r = collinear_residuals(m, i, θ, η)
+    return -sum(abs2, r) / (2exp(2σ[1])) - length(r) * (log(2π) / 2 + σ[1])
+end
+function NE.conditional_loglikelihood_and_gradient(m::CollinearGrowth, i::Integer, θ, σ, η)
+    r = collinear_residuals(m, i, θ, η)
+    return NE.conditional_loglikelihood(m, i, θ, σ, η), [sum(r), dot(r, m.t)] ./ exp(2σ[1])
+end
+function NE.conditional_loglikelihood_and_population_gradient(m::CollinearGrowth, i, θ, σ, η)
+    m.population_gradients[] += 1
+    r = collinear_residuals(m, i, θ, η)
+    v = exp(2σ[1])
+    return NE.conditional_loglikelihood(m, i, θ, σ, η),
+        vcat(sum(r), m.w[i, :] .* sum(r), dot(r, m.t)) ./ v, [sum(abs2, r) / v - length(r)]
+end
+NE.population_logprior(::CollinearGrowth, θ, σ, ω) = -sum(abs2, vcat(θ, σ, ω)) / 8
+function NE.population_logprior_and_gradient(m::CollinearGrowth, θ, σ, ω)
+    m.prior_gradients[] += 1
+    return population_logprior(m, θ, σ, ω), -θ ./ 4, -σ ./ 4, -ω ./ 4
+end
+
+@testset "population prior: SAEM MAP M-steps take a few prior gradients each" begin
+    # Before 0.2.7 each M-step on this design took 2d + 1 = 17 prior gradients
+    # for its Gaussian block's starting curvature alone.
+    N = nullspace(reduce(vcat, NE.mu_referencing(collinear_growth_model()).design))
+    θ0 = [1.0, 0.0, 0.4, 0.4, 0.5]   # the unidentified combination off the prior mode
+    @test abs(only(N' * θ0)) > 0.5
+    for kernel in (StandardSAEMMH(), WarmupHMCNUTS()), floor in (1e-8, 0.05)
+        counts = map((20, 40)) do iterations
+            model = collinear_growth_model()
+            fit = saem(model, θ0, [log(0.2)], [log(0.5), 0.0, log(0.5)];
+                rng = Xoshiro(1), kernel, options = SAEMOptions(; iterations,
+                    burnin = 10, mcmc_burnin = 5, omega_floor = floor))
+            @test fit.objective == :MAP
+            @test all(isfinite, vcat(fit.theta, fit.sigma, fit.omega))
+            # the prior alone sets the combination the designs do not identify
+            @test abs(only(N' * fit.theta)) < 1e-4
+            # the numerical block takes one prior gradient per population gradient
+            # round over the three subjects; the rest are the Gaussian block's
+            (model.prior_gradients[] - model.population_gradients[] ÷ 3, fit)
+        end
+        per_iteration = (counts[2][1] - counts[1][1]) / 20
+        @test per_iteration <= 4
+    end
+end

@@ -14,6 +14,32 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.7
+
+- SAEM's MAP M-step (a model with a `population_logprior`) now moves the
+  mu-referenced θ and Ω along an `omega_floor` the data press against. Where the
+  closed-form update left a covariance eigenvalue on the floor (a family
+  estimated from fewer subjects than its dimension, or a floor above what the
+  data support), every trial step of the Gaussian block's search left the
+  floor, the block returned its start, and the prior moved neither the
+  mu-referenced θ nor Ω in that M-step. On a 3-subject test model with a 4 × 4
+  Ω (`bench/saem_map_block.jl`) that was every M-step at `omega_floor = 0.05`,
+  each ending 0.01–0.15 below the block's maximum, and 11 to 40 of 40 M-steps at
+  the default floor, ending 1–5 below it. The block now ends at that maximum
+  (within 1e-13 at 0.05, 1e-7 at the default floor, in the SA phase); while
+  γ = 1 at the default floor it can end on another local maximum, up to 0.03
+  below.
+- The block calls `population_logprior_and_gradient` about twice per M-step,
+  plus `2d` at a fit's first (d the mu-referenced θ and free Ω coordinates), and
+  `population_logprior` not at all. It maximizes the Gaussian term plus a
+  quadratic model of the prior, which calls nothing, then evaluates the prior
+  once at that maximizer, and it carries the prior's curvature from one M-step
+  to the next. It took `2d + 1` prior gradients per M-step on designs that leave
+  a combination of mu-referenced θ unidentified (79 on a 3-subject joint PK/QT
+  BRM model with 11 mu-referenced θ and a 7 × 7 Ω), and up to 100 more prior
+  gradients and values wherever its search moved.
+- Seeded MAP fits differ from 0.2.6. Maximum-likelihood fits are unchanged.
+
 ## 0.2.6
 
 - `SAEMOptions(numeric_mstep = :score)` is a numerical M-step for θ without a

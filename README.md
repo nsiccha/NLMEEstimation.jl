@@ -275,7 +275,8 @@ When a population prior is present, SAEM includes it once in its M-step, which
 keeps the two blocks of the maximum-likelihood step described below. The
 mu-referenced fixed effects and Ω move from their closed-form update to the
 maximizer of the running Gaussian random-effect statistics plus the prior, a
-search that evaluates only the prior; the remaining θ and σ take the numerical
+search that evaluates only the prior, about twice per M-step, and moves along an
+Ω eigenvalue floor the data press against; the remaining θ and σ take the numerical
 update with the prior added. Priors on mu-referenced fixed effects and
 covariance coordinates therefore affect the estimate, and a prior adds no model
 evaluations to the step. A combination of mu-referenced fixed effects that no
