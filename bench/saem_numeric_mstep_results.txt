@@ -1,0 +1,131 @@
+SAEM numerical M-step benchmark: 8 seeds, Julia 1.10.12, 1 threads, NLMEEstimation 5f20ca8
+growth: exact MLE log-likelihood -147.838515, standard errors 0.124, 0.0811, 0.0706, 0.142, 0.0916, 0.14
+wide: exact MLE log-likelihood -138.285819 (largest gradient entry there 8.1e-04), standard errors 0.00022 to 2.1
+pk: AGHQ(3) maximum -287.699494 (Optim converged=true, 45 s), standard errors 0.0819, 0.0595, 0.0519, 0.342, 0.159, 0.0925, 0.172, 0.156, 0.159
+model	mode	resolved	seed	gap (log-lik units)	max |error|/SE	seconds	density evals	η-gradient evals	population-gradient evals
+growth	mixture	mixture	1	1.6822	1.24	1.41	1374320	0	1770320
+growth	mixture	mixture	2	2.4050	2.12	1.50	1394720	0	1790720
+growth	mixture	mixture	3	0.3800	0.66	1.40	1370920	0	1766920
+growth	mixture	mixture	4	1.1342	1.25	1.46	1385840	0	1781840
+growth	mixture	mixture	5	1.9321	1.71	1.40	1399000	0	1795000
+growth	mixture	mixture	6	4.8279	2.19	1.94	1388280	0	1784280
+growth	mixture	mixture	7	2.5987	2.01	1.42	1363640	0	1759640
+growth	mixture	mixture	8	1.7392	1.56	1.39	1396680	0	1792680
+growth	online	online	1	1.7746	1.41	0.10	128360	0	77360
+growth	online	online	2	2.5489	2.16	0.08	127960	0	76960
+growth	online	online	3	0.3787	0.65	0.09	129360	0	78360
+growth	online	online	4	1.0830	1.15	0.09	129480	0	78480
+growth	online	online	5	2.1925	1.94	0.10	127680	0	76680
+growth	online	online	6	4.9613	2.27	0.09	128560	0	77560
+growth	online	online	7	2.6159	1.93	0.09	128080	0	77080
+growth	online	online	8	1.9367	1.73	0.10	128760	0	77760
+growth	score	score	1	0.8949	0.99	0.04	75240	0	14160
+growth	score	score	2	6.0418	3.32	0.04	75240	0	14160
+growth	score	score	3	0.9356	1.24	0.04	75240	0	14160
+growth	score	score	4	1.1368	1.25	0.05	75240	0	14160
+growth	score	score	5	2.1435	1.90	0.04	75240	0	14160
+growth	score	score	6	1.3313	1.10	0.04	75240	0	14160
+growth	score	score	7	3.1973	2.15	0.04	75240	0	14160
+growth	score	score	8	0.1475	0.44	0.05	75240	0	14160
+pk-exponent	mixture	mixture	1	0.0341	0.25	1.74	925512	0	1155576
+pk-exponent	mixture	mixture	2	0.0825	0.34	1.73	918168	0	1148232
+pk-exponent	mixture	mixture	3	0.9538	1.39	1.73	909960	0	1140024
+pk-exponent	mixture	mixture	4	0.2391	0.62	1.78	930000	0	1160064
+pk-exponent	mixture	mixture	5	0.0692	0.31	1.77	939816	0	1169880
+pk-exponent	mixture	mixture	6	0.5443	0.99	1.76	921048	0	1151112
+pk-exponent	mixture	mixture	7	0.0597	0.19	1.78	924888	0	1154952
+pk-exponent	mixture	mixture	8	0.0255	0.20	1.89	908856	0	1138896
+pk-exponent	online	online	1	0.1313	0.31	0.15	95328	0	57192
+pk-exponent	online	online	2	0.1979	0.49	0.15	95856	0	57720
+pk-exponent	online	online	3	1.1521	1.44	0.14	94488	0	56352
+pk-exponent	online	online	4	0.3747	0.76	0.15	95400	0	57264
+pk-exponent	online	online	5	0.1176	0.42	0.18	95472	0	57336
+pk-exponent	online	online	6	0.4588	0.74	0.15	95496	0	57360
+pk-exponent	online	online	7	0.0660	0.23	0.15	95424	0	57288
+pk-exponent	online	online	8	0.0237	0.15	0.15	95568	0	57408
+pk-exponent	score	score	1	0.1097	0.34	0.08	52824	0	9792
+pk-exponent	score	score	2	0.4130	0.90	0.08	52872	0	9792
+pk-exponent	score	score	3	0.2576	0.55	0.08	52848	0	9792
+pk-exponent	score	score	4	0.0862	0.25	0.08	52824	0	9792
+pk-exponent	score	score	5	0.0890	0.30	0.08	52824	0	9792
+pk-exponent	score	score	6	0.1805	0.41	0.08	52824	0	9792
+pk-exponent	score	score	7	0.0605	0.23	0.09	52824	0	9792
+pk-exponent	score	score	8	0.0397	0.18	0.09	52848	0	9792
+pk-none	mixture	mixture	1	0.2164	0.39	1.73	912528	0	1142592
+pk-none	mixture	mixture	2	1.6402	1.15	1.94	912672	0	1142736
+pk-none	mixture	mixture	3	0.6662	0.81	2.18	920928	0	1150992
+pk-none	mixture	mixture	4	0.3535	0.62	1.86	931728	0	1161792
+pk-none	mixture	mixture	5	0.2005	0.43	1.71	917928	0	1147992
+pk-none	mixture	mixture	6	0.3697	0.69	1.72	921096	0	1151160
+pk-none	mixture	mixture	7	0.9472	0.93	1.65	932040	0	1162104
+pk-none	mixture	mixture	8	0.8140	0.95	1.62	922176	0	1152216
+pk-none	online	online	1	0.2886	0.46	0.11	94800	0	56664
+pk-none	online	online	2	1.3600	1.03	0.11	95328	0	57192
+pk-none	online	online	3	0.7736	0.71	0.11	95040	0	56904
+pk-none	online	online	4	0.5809	0.78	0.12	95664	0	57528
+pk-none	online	online	5	0.2078	0.44	0.11	95160	0	57024
+pk-none	online	online	6	0.5130	0.73	0.12	95712	0	57576
+pk-none	online	online	7	1.2187	1.16	0.12	95568	0	57432
+pk-none	online	online	8	0.9856	1.06	0.11	94944	0	56784
+pk-none	score	score	1	0.7569	0.70	0.06	52824	0	9792
+pk-none	score	score	2	0.4722	0.91	0.04	52824	0	9792
+pk-none	score	score	3	1.2408	1.19	0.04	52848	0	9792
+pk-none	score	score	4	0.9954	0.95	0.04	52824	0	9792
+pk-none	score	score	5	0.5472	0.80	0.05	52824	0	9792
+pk-none	score	score	6	0.4411	0.80	0.05	52824	0	9792
+pk-none	score	score	7	0.7284	0.92	0.05	52824	0	9792
+pk-none	score	score	8	0.9463	1.16	0.05	52848	0	9792
+wide	mixture	mixture	1	0.4606	0.47	2.02	1382220	0	1679910
+wide	mixture	mixture	2	0.2359	0.36	2.26	1457430	0	1754940
+wide	mixture	mixture	3	0.2378	0.31	1.94	1373160	0	1670790
+wide	mixture	mixture	4	0.2613	0.34	2.18	1417260	0	1714920
+wide	mixture	mixture	5	0.2836	0.33	2.36	1487190	0	1784880
+wide	mixture	mixture	6	0.2188	0.22	2.31	1446510	0	1743990
+wide	mixture	mixture	7	0.3203	0.49	1.85	1281900	0	1579380
+wide	mixture	mixture	8	0.1869	0.31	1.95	1426710	0	1724190
+wide	online	online	1	0.5139	0.60	0.16	116370	0	78750
+wide	online	online	2	0.2712	0.40	0.16	117870	0	80160
+wide	online	online	3	0.2600	0.32	0.15	116700	0	79050
+wide	online	online	4	0.2791	0.36	0.17	117600	0	80040
+wide	online	online	5	0.3727	0.32	0.18	117780	0	80130
+wide	online	online	6	0.2388	0.36	0.16	118800	0	81000
+wide	online	online	7	0.6888	0.61	0.16	117240	0	79440
+wide	online	online	8	0.0999	0.18	0.16	116730	0	78990
+wide	score	score	1	0.3092	0.42	0.08	56790	0	21420
+wide	score	score	2	0.2096	0.40	0.08	56700	0	21420
+wide	score	score	3	0.2199	0.35	0.08	57720	0	21420
+wide	score	score	4	0.3584	0.34	0.08	56700	0	21420
+wide	score	score	5	0.2492	0.36	0.07	56910	0	21420
+wide	score	score	6	0.2151	0.27	0.07	56820	0	21420
+wide	score	score	7	0.4126	0.46	0.08	56790	0	21420
+wide	score	score	8	0.1702	0.29	0.08	56940	0	21420
+
+per-SA-iteration population-gradient (and density) subject evaluations by window
+model	mode	SA 2–51	SA 52–101	SA 102–151
+growth	mixture	4381.6 (3521.6)	11901.6 (9041.6)	18832.0 (13972.0)
+growth	online	258.4 (418.4)	256.0 (416.0)	263.2 (423.2)
+growth	score	40.0 (240.0)	40.0 (240.0)	44.8 (240.0)
+pk-exponent	mixture	2991.8 (2499.8)	7629.1 (5937.1)	12210.7 (9318.7)
+pk-exponent	online	191.0 (311.0)	193.0 (313.0)	193.9 (313.9)
+pk-exponent	score	24.0 (168.0)	24.0 (168.0)	29.8 (168.0)
+pk-none	mixture	2873.8 (2381.8)	7557.1 (5865.1)	12144.0 (9252.0)
+pk-none	online	190.6 (310.6)	193.0 (313.0)	186.7 (306.7)
+pk-none	score	24.0 (168.0)	24.0 (168.0)	29.8 (168.0)
+wide	mixture	4228.2 (3583.2)	11065.2 (8920.2)	17903.4 (14258.4)
+wide	online	235.8 (355.8)	239.4 (359.4)	249.0 (369.0)
+wide	score	30.0 (180.0)	30.0 (180.0)	57.6 (180.0)
+
+means over seeds
+model	mode	mean gap	max gap	mean max|error|/SE	mean seconds	mean population evals	mean density evals
+growth	mixture	2.0874	4.8279	1.59	1.49	1780175	1384175
+growth	online	2.1865	4.9613	1.65	0.09	77530	128530
+growth	score	1.9786	6.0418	1.55	0.04	14160	75240
+pk-exponent	mixture	0.2510	0.9538	0.54	1.77	1152342	922281
+pk-exponent	online	0.3153	1.1521	0.57	0.15	57240	95379
+pk-exponent	score	0.1545	0.4130	0.40	0.08	9792	52836
+pk-none	mixture	0.6510	1.6402	0.75	1.80	1151448	921387
+pk-none	online	0.7410	1.3600	0.80	0.11	57138	95277
+pk-none	score	0.7660	1.2408	0.93	0.05	9792	52830
+wide	mixture	0.2757	0.4606	0.35	2.11	1706625	1409048
+wide	online	0.3406	0.6888	0.39	0.16	79695	117386
+wide	score	0.2680	0.4126	0.36	0.08	21420	56921
