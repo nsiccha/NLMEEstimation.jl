@@ -6,7 +6,9 @@ using Statistics: var
 using DelimitedFiles
 using ADTypes
 using Enzyme
+import ForwardDiff
 import NLMEEstimation as NE
+import Optim
 isdefined(@__MODULE__, :TestCommon) || include("common.jl")
 using .TestCommon
 
@@ -391,8 +393,82 @@ end
     @test length(historical) == 2
     @test historical_weights ≈ [0.75, 0.25]
     @test NE._saem_mode_name(NE._saem_numeric_mode(:auto, [2], 1)) == :online
-    @test NE._saem_mode_name(NE._saem_numeric_mode(:auto, [1, 2], 1)) == :mixture
+    @test NE._saem_mode_name(NE._saem_numeric_mode(:auto, [1, 2], 1)) == :score
+    NE._saem_record!(Val(:score), bank, weights, Φ .+ 2, 0.1)
+    @test length(bank) == 1 && bank[1] ≈ Φ .+ 2 && weights == [1.0]
     @test_throws ArgumentError NE._saem_check_options(SAEMOptions(numeric_mstep=:other))
+end
+
+# y_ij = θ₁ + η_i + θ₂ x_ij + ε_ij: the slope θ₂ has no random effect, so no
+# closed-form update, and `numeric_mstep = :auto` resolves to `:score`. Its
+# marginal likelihood is exact (`shared_slope_exact`, x = [θ; σ; ω]).
+struct SharedSlope
+    x::Vector{Vector{Float64}}
+    y::Vector{Vector{Float64}}
+    population_gradients::Base.RefValue{Int}
+end
+NE.nsubjects(m::SharedSlope) = length(m.y)
+NE.nlme_layout(::SharedSlope) = NLMELayout(2, 1, [1])
+NE.mu_referencing(m::SharedSlope) = MuReferencing([1], [ones(1, 1) for _ in m.y])
+shared_slope_residuals(m, i, θ, η) = m.y[i] .- (θ[1] + η[1]) .- θ[2] .* m.x[i]
+function NE.conditional_loglikelihood(m::SharedSlope, i::Integer, θ, σ, η)
+    r = shared_slope_residuals(m, i, θ, η)
+    return -sum(abs2, r) / (2exp(2σ[1])) - length(r) * (log(2π) / 2 + σ[1])
+end
+function NE.conditional_loglikelihood_and_population_gradient(m::SharedSlope, i::Integer,
+        θ, σ, η)
+    m.population_gradients[] += 1
+    r = shared_slope_residuals(m, i, θ, η)
+    v = exp(2σ[1])
+    return NE.conditional_loglikelihood(m, i, θ, σ, η), [sum(r), dot(r, m.x[i])] ./ v,
+        [sum(abs2, r) / v - length(r)]
+end
+function shared_slope_exact(m, x)
+    return sum(eachindex(m.y)) do i
+        n = length(m.y[i])
+        L = cholesky(Symmetric(exp(2x[4]) .* ones(n, n) + exp(2x[3]) * I)).L
+        z = L \ (m.y[i] .- x[1] .- x[2] .* m.x[i])
+        -(n * log(2π) + 2sum(log, diag(L)) + dot(z, z)) / 2
+    end
+end
+
+@testset "SAEM :score M-step: about one population gradient per iteration" begin
+    rng = Xoshiro(3)
+    x = [sort(4 .* rand(rng, 6)) for _ in 1:40]
+    y = [(1.0 + 0.5randn(rng)) .+ 0.7 .* xi .+ 0.3 .* randn(rng, 6) for xi in x]
+    model = SharedSlope(x, y, Ref(0))
+    exact(z) = shared_slope_exact(model, z)
+    oracle = Optim.optimize(z -> -exact(z), (G, z) -> (G .= .-ForwardDiff.gradient(exact, z)),
+        [1.0, 0.7, log(0.3), log(0.5)], Optim.LBFGS(), Optim.Options(g_tol = 1e-10))
+    @test Optim.converged(oracle)
+    x̂, best = Optim.minimizer(oracle), -Optim.minimum(oracle)
+    se = sqrt.(diag(inv(-ForwardDiff.hessian(exact, x̂))))
+    θ0, σ0, ω0 = [0.0, 0.0], [0.0], [0.0]
+    # The default fit ends at the maximum, as the retained-draw mixture does.
+    for seed in (1, 2)
+        fit = saem(model, θ0, σ0, ω0; rng = Xoshiro(seed))
+        @test fit.numeric_mstep == :score
+        point = vcat(fit.theta, fit.sigma, fit.omega)
+        @test best - exact(point) < 0.05
+        @test maximum(abs.(point - x̂) ./ se) < 0.5
+    end
+    # Population gradients per subject and SA iteration in SA iterations 2–21 and
+    # 22–41: the difference of fits stopped after 1, 21 and 41 of them. :score
+    # takes one per iteration plus its curvature estimates (2 per coordinate at
+    # M-steps 1, 2, 4, …, so one in the first window); the mixture's grow with the
+    # draws it retains.
+    per_iteration(mode) = diff(collect(map((1, 21, 41)) do k
+        model.population_gradients[] = 0
+        saem(model, θ0, σ0, ω0; rng = Xoshiro(1),
+            options = SAEMOptions(numeric_mstep = mode, iterations = 20 + k, burnin = 20))
+        model.population_gradients[]
+    end)) ./ (20 * length(y))
+    score, mixture = per_iteration(:auto), per_iteration(:mixture)
+    @test score ≈ [1 + 6 / 20, 1]
+    @test mixture[2] > 2mixture[1] > 20score[1]
+    # It is the minibatch update with every subject in the batch.
+    @test NE._saem_full_batch_update(Val(:score)) isa NE._SAEMScoreStep{Val{:score}}
+    @test NE._saem_full_batch_update(Val(:score)).share == 1
 end
 
 @testset "SAEM M-step search reaches its optimum through rounding" begin

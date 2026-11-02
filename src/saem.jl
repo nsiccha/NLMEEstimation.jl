@@ -30,14 +30,21 @@ whose proposals follow Ω cannot leave it. `omega_annealing=0` turns it off
 and reproduces fits from before it was introduced.
 `numeric_mstep=:auto` uses an online update for remaining σ coordinates when
 all θ coordinates have a closed-form `MuReferencing` update; otherwise it uses
-the historical running-mixture objective. Either numerical update also moves
-the mu-referenced θ, holding each sampled η fixed. `:online` explicitly applies
-the online update to every remaining θ and σ coordinate: it optimizes the
-current complete-data conditional likelihood, then moves toward that optimizer by
-the SA step size, retaining one sampled latent-effect matrix. Its use for a
-structural θ without a declared sufficient statistic is an approximation.
-`:mixture` optimizes the exact running conditional-density mixture and retains
-every sampled matrix. The default
+`:score`. Every numerical update also moves the mu-referenced θ, holding each
+sampled η fixed. `:online` applies the online update to every remaining θ and σ
+coordinate: it optimizes the current complete-data conditional likelihood, then
+moves toward that optimizer by the SA step size, retaining one sampled
+latent-effect matrix. Its use for a structural θ without a declared sufficient
+statistic is an approximation. `:score` takes one Robbins–Monro step `γ M ĝ`
+per M-step along the score `ĝ` of the current draw's objective, with `M` its
+inverse curvature estimated from every subject's chain at M-steps 1, 2, 4, 8, …
+(the minibatch update below with every subject); `numeric_maxiter` is unused.
+An iteration then costs about one population gradient, and the estimates
+converge where the observed-data score vanishes, as `:mixture`'s do. `:mixture`
+optimizes the exact running conditional-density mixture and retains every
+sampled matrix; its search evaluates every retained matrix, so the k-th SA
+iteration's M-step costs k times a one-draw search (`:auto`'s choice for
+structural θ before NLMEEstimation 0.2.6). The default
 `mstep_interval=1` updates population parameters every SA iteration; a larger
 interval is an approximate, lower-frequency variant in `:online` mode.
 With `DualAveragingMALA`, each round makes one batched MALA proposal and
@@ -772,8 +779,8 @@ function _saem_check_options(o::SAEMOptions; schedule::Bool = true)
     0.5 < o.step_exponent <= 1 || throw(ArgumentError("require 0.5 < step_exponent ≤ 1"))
     o.numeric_maxiter > 0 || throw(ArgumentError("numeric_maxiter must be positive"))
     o.mstep_interval > 0 || throw(ArgumentError("mstep_interval must be positive"))
-    o.numeric_mstep in (:auto, :online, :mixture) ||
-        throw(ArgumentError("numeric_mstep must be :auto, :online, or :mixture"))
+    o.numeric_mstep in (:auto, :online, :score, :mixture) ||
+        throw(ArgumentError("numeric_mstep must be :auto, :online, :score, or :mixture"))
     isfinite(o.omega_floor) && o.omega_floor > 0 || throw(ArgumentError("omega_floor must be finite and positive"))
     0 <= o.omega_annealing < 1 || throw(ArgumentError("omega_annealing must be in [0, 1)"))
     o.minibatch_size === nothing || o.minibatch_size > 0 ||
@@ -1138,7 +1145,7 @@ end
 
 # Practical SAEM stores only the current latent draw. The optimizer itself is
 # updated stochastically when the M-step is due.
-function _saem_record!(::Union{Val{:online}, Val{:minibatch}}, bank, weights, Φ, γ)
+function _saem_record!(::Union{Val{:online}, Val{:score}, Val{:minibatch}}, bank, weights, Φ, γ)
     empty!(bank)
     empty!(weights)
     push!(bank, copy(Φ))
@@ -1147,7 +1154,7 @@ function _saem_record!(::Union{Val{:online}, Val{:minibatch}}, bank, weights, Φ
 end
 
 _saem_numeric_mode(mode::Symbol, free, ntheta) =
-    Val(mode === :auto ? (any(i -> i <= ntheta, free) ? :mixture : :online) : mode)
+    Val(mode === :auto ? (any(i -> i <= ntheta, free) ? :score : :online) : mode)
 _saem_mode_name(::Val{M}) where {M} = M
 
 # Minibatch SAEM has its own numerical update (`_SAEMScoreStep`), which needs no
@@ -1405,14 +1412,17 @@ end
 # The numerical update of minibatch SAEM, built like `_SAEMNumericUpdate` once
 # per fit. `share` is the batch's fraction of the fitted subjects; `metric`
 # holds the quasi-Newton metric across M-steps and `steps` counts them
-# (`_saem_score_step`).
-struct _SAEMScoreStep <: Function
+# (`_saem_score_step`). `mode` is the numerical mode the model's
+# `saem_population_gradient_style` receives: `Val(:online)` under minibatches,
+# whose objective holds one draw, and `Val(:score)` for the full-batch `:score`.
+struct _SAEMScoreStep{M<:Val} <: Function
     share::Float64
     metric::Base.RefValue{Union{Nothing, Matrix{Float64}}}
     steps::Base.RefValue{Int}
+    mode::M
 end
-_SAEMScoreStep(share::Real) =
-    _SAEMScoreStep(share, Ref{Union{Nothing, Matrix{Float64}}}(nothing), Ref(0))
+_SAEMScoreStep(share::Real, mode::Val = Val(:online)) =
+    _SAEMScoreStep(share, Ref{Union{Nothing, Matrix{Float64}}}(nothing), Ref(0), mode)
 
 function (step::_SAEMScoreStep)(model, subjects, θ, σ, free, indices, design,
         bank, weights, maxiter, γ, ω = nothing, active = eachindex(subjects))
@@ -1450,14 +1460,14 @@ function _saem_score_step(model, subjects, θ, σ, free, indices, design, bank,
     step.steps[] += 1
     if ispow2(step.steps[])
         full(z) = _saem_numeric_value_gradient(z, model, subjects, θ, σ, free,
-            indices, design, bank, weights, Val(:online), ω)
+            indices, design, bank, weights, step.mode, ω)
         step.metric[] = _saem_search_metric(full, z0)
     end
     batch_subjects, batch_design = subjects[active], design[active]
     batch = [_columns(H, active) for H in bank]
     scaled = (length(subjects) / length(active)) .* weights
     objective(z) = _saem_numeric_value_gradient(z, model, batch_subjects, θ, σ, free,
-        indices, batch_design, batch, scaled, Val(:online), ω)
+        indices, batch_design, batch, scaled, step.mode, ω)
     screen(z) = _saem_numeric_objective(z, model, batch_subjects, θ, σ, free, indices,
         batch_design, batch, scaled, ω)
     value, gradient = objective(z0)
@@ -1484,6 +1494,33 @@ function _saem_score_step(model, subjects, θ, σ, free, indices, design, bank,
     x[free] = z
     return x[1:length(θ)], x[length(θ)+1:end]
 end
+
+# `:score`, the full-batch numerical update for θ without a closed-form update
+# (`:auto`'s choice for them): the minibatch update above with every subject, so
+# its gain is γ itself. Each M-step takes one Robbins–Monro step γ M ĝ along the
+# score ĝ of the current draw's objective, M that objective's inverse absolute
+# curvature from every chain at M-steps 1, 2, 4, 8, … (Gu & Kong 1998's
+# stochastic approximation with MCMC). Its mean is γ M times the observed-data
+# score (Fisher's identity), so the estimates converge where that score
+# vanishes, as `:mixture`'s do: the mixture objective
+# Q_k = (1 - γ) Q_{k-1} + γ ℓ(·; η_k) has its maximum at
+# θ_{k-1} + γ (-∇²Q)⁻¹ ∇ℓ(θ_{k-1}; η_k) to first order in γ when θ_{k-1}
+# maximized Q_{k-1}. The mixture instead evaluates every retained draw at every
+# point of its search, k of them at the k-th SA iteration, so an iteration's cost
+# grew with k and a fit's with k²: on a 3-subject BRM model, 329 whole-cohort
+# evaluations per SA iteration 21–40 against 10 for the NUTS kernel (snag
+# `saem-numerical-m-e4b044d2`). On four exact-likelihood test models with 3 to 23
+# numerically updated coordinates, standard errors spanning four orders of
+# magnitude in one, the step ended as close to the maximum as the mixture, mean
+# gaps 0.15–1.98 log-likelihood units against 0.25–2.09 over 8 seeds, with about
+# 1% of its population gradients (`bench/saem_numeric_mstep.jl`). Keeping the
+# search to the current draw's optimum while γ = 1 (the mixture's update then)
+# and stepping only afterwards matched it as well over 24 seeds, at three times
+# the population gradients.
+
+# The numerical update of a full-batch fit, for its resolved mode.
+_saem_full_batch_update(mode::Val) = _SAEMNumericUpdate(mode)
+_saem_full_batch_update(::Val{:score}) = _SAEMScoreStep(1.0, Val(:score))
 
 # Simulated annealing of Ω during SAEM's exploration phase (as in Monolix and
 # saemix): no covariance family shrinks by more than the factor τ per M-step in
@@ -1699,10 +1736,13 @@ effect then moves together with it. Its quasi-Newton search starts from a
 difference estimate of the objective's curvature, carried from one M-step to
 the next. By default, σ coordinates are updated
 online only when all structural θ coordinates have a `MuReferencing`
-sufficient-statistic update. Otherwise the historical running
-conditional-density objective is used and retains one latent-effect matrix
-per SA iteration. Set `numeric_mstep=:online` to force an online update for
-undeclared structural θ as a model-specific approximation.
+sufficient-statistic update. Otherwise the update is `:score`: one
+Robbins–Monro step along the current draw's score per iteration (see
+[`SAEMOptions`](@ref)). `numeric_mstep=:mixture` selects the
+running conditional-density objective, which retains one latent-effect matrix
+per SA iteration and evaluates them all at every point of its search. Set
+`numeric_mstep=:online` to force an online update for undeclared structural θ
+as a model-specific approximation.
 `SAEMResult.numeric_mstep` records the selected mode. `kernel` selects the
 standard lockstep MH proposals, batched continuously adapted MALA proposals,
 or per-subject in-memory WarmupHMC NUTS transitions.
@@ -1847,7 +1887,7 @@ function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel
     batch = _saem_minibatch(options.minibatch_size, length(ids))
     numeric_mode = _saem_numeric_mode(options.numeric_mstep, free, layout.ntheta, batch)
     numeric_update = batch === nothing ?
-        Base.invokelatest(_SAEMNumericUpdate, numeric_mode)::Function :
+        Base.invokelatest(_saem_full_batch_update, numeric_mode)::Function :
         Base.invokelatest(_SAEMScoreStep, batch / length(ids))::Function
     mean_phi, second_phi = _saem_statistics(layout, ids, H)
     logscale = log(options.rw_scale)

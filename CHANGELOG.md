@@ -14,6 +14,28 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.6
+
+- `SAEMOptions(numeric_mstep = :score)` is a numerical M-step for θ without a
+  closed-form `MuReferencing` update whose cost does not grow with the iterations.
+  Each M-step takes one Robbins–Monro step `γ M ĝ` along the score of the current
+  draw's objective, with `M` its inverse curvature from every subject's chain,
+  re-estimated at M-steps 1, 2, 4, 8, …: minibatch SAEM's update with every subject
+  in the batch. An iteration costs about one population gradient over the
+  subjects, and the estimates converge where the observed-data score vanishes, as
+  `:mixture`'s do. `numeric_maxiter` is unused.
+- `numeric_mstep = :auto` now resolves to `:score` where it resolved to `:mixture`
+  (a fitted θ that is not mu-referenced). `:mixture` evaluates every draw it has
+  retained at every point of its search, so the k-th SA iteration's M-step cost k
+  times the γ = 1 search: on a 3-subject joint PK/QT model 329 whole-cohort
+  evaluations per iteration at iterations 21–40, against 10 for the NUTS kernel.
+  On four exact-likelihood test models with 3 to 23 numerically updated
+  coordinates, `:score` ends as close to the maximum as `:mixture` with about 1%
+  of its population gradients, 20 to 40 times faster (`bench/saem_numeric_mstep.jl`). Seeded fits of these models therefore change;
+  `numeric_mstep = :mixture` reproduces them.
+- `saem_population_gradient_style(model, Val(:score))` selects the gradient route
+  for the new mode; by default it is the one-argument style, as for the others.
+
 ## 0.2.5
 
 - `WarmupHMCNUTS(threads = true)` runs each subject's NUTS chain in its own task on

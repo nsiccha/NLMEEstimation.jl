@@ -281,10 +281,13 @@ SAEM sums those subject values and gradients. This choice affects only that
 M-step gradient. Likelihood, η-gradient, and η-Hessian evaluation continue to
 use `evaluation_style(model)`.
 
-The optional second argument is `Val(:online)` or `Val(:mixture)`, the resolved
-SAEM numerical M-step mode. Override it when one gradient route is efficient
-for online updates but costly for the retained-draw mixture. By default both
-modes use the one-argument style, preserving existing model methods.
+The optional second argument is `Val(:online)`, `Val(:score)` or `Val(:mixture)`,
+the resolved SAEM numerical M-step mode (minibatch SAEM passes `Val(:online)`).
+`:online` and `:score` evaluate one draw per objective (`:online` a search of
+up to `numeric_maxiter` gradients per M-step, `:score` about one gradient);
+`:mixture` evaluates every retained draw. Override it when one gradient route is efficient for single-draw
+updates but costly for the retained-draw mixture. By default every mode uses the
+one-argument style, preserving existing model methods.
 """
 saem_population_gradient_style(model) = evaluation_style(model)
 saem_population_gradient_style(model, ::Val) = saem_population_gradient_style(model)
