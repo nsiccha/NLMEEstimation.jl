@@ -26,17 +26,19 @@ failing or silently behaving differently at run time.
   Ω (`bench/saem_map_block.jl`) that was every M-step at `omega_floor = 0.05`,
   up to 0.15 below the block's maximum, and 11 to 40 of 40 M-steps at the
   default floor, up to 5 below it. In the SA phase the block now ends within
-  1e-13 (at 0.05) and 1e-7 (default floor) of that maximum; while γ = 1 at the
-  default floor it can end on another local maximum, up to 0.03 below.
-- The block calls `population_logprior_and_gradient` about twice per M-step,
-  plus `2d` at a fit's first (d the mu-referenced θ and free Ω coordinates), and
-  `population_logprior` not at all. It maximizes the Gaussian term plus a
-  quadratic model of the prior, which calls nothing, then evaluates the prior
-  once at that maximizer, and it carries the prior's curvature from one M-step
-  to the next. It took `2d + 1` prior gradients per M-step on designs that leave
-  a combination of mu-referenced θ unidentified (79 on a 3-subject joint PK/QT
-  BRM model with 11 mu-referenced θ and a 7 × 7 Ω), and up to 100 more prior
-  gradients and values wherever its search moved.
+  1e-13 (at 0.05) and, in all but one of the scored M-steps, 3e-8 (default
+  floor) of that maximum; while γ = 1 at the default floor it can end on another
+  local maximum, up to 0.23 below.
+- The block's quasi-Newton search runs in coordinates in which every point
+  holds the floor (each family's Ω = floor·I + L Lᵀ, L a square matrix) and
+  carries its metric from one M-step to the next; the first M-step takes a
+  difference estimate. Each trial takes one `population_logprior_and_gradient`,
+  and the block calls `population_logprior` not at all. Before, every M-step
+  took a fresh difference curvature: on designs that leave a combination of
+  mu-referenced θ unidentified, `2d + 1` prior gradients (d the mu-referenced θ
+  and free Ω coordinates; 79 on a 3-subject joint PK/QT BRM model with 11
+  mu-referenced θ and a 7 × 7 Ω), and wherever it moved up to 100 more
+  iterations of a prior value and gradient each.
 - Seeded MAP fits differ from 0.2.6. Maximum-likelihood fits are unchanged.
 
 ## 0.2.6

@@ -446,19 +446,20 @@ end
         Optim.LBFGS(), Optim.Options(g_tol = 1e-10, iterations = 10_000)))
     # The closed-form start is well short of it: a block that does not move fails.
     @test objective(θc, ωc) < reference - 0.01
-    curvature = NE._SAEMPriorCurvature()
+    metric = NE._SAEMMAPMetric()
     prior = FloorPrior(Ref(0))
     θm, ωm = NE._saem_gaussian_map_block(prior, layout, θc, σ, ωc, 1:3, design,
-        mean_phi, second_phi, 1:2, floor, nothing; prior_curvature = curvature)
+        mean_phi, second_phi, 1:2, floor, nothing; metric)
     @test objective(θm, ωm) ≥ reference - 1e-7
     @test eigmin(Symmetric(NE.omega_matrix(layout, ωm))) ≥ floor * (1 - 1e-8)
-    # The curvature takes 2d prior gradients at a fit's first MAP M-step (d = 9),
-    # and is carried: the same M-step again takes a few.
-    @test prior.gradients[] <= 2 * 9 + 6
+    # The first search's metric takes two prior gradients per floor-free
+    # coordinate (3 mu-referenced θ and a 3 × 3 factor: 12) and is carried: the
+    # same M-step again takes a few, far fewer than another difference metric.
+    @test prior.gradients[] <= 2 * 12 + 10
     prior.gradients[] = 0
     θ2, ω2 = NE._saem_gaussian_map_block(prior, layout, θc, σ, ωc, 1:3, design,
-        mean_phi, second_phi, 1:2, floor, nothing; prior_curvature = curvature)
-    @test prior.gradients[] <= 4
+        mean_phi, second_phi, 1:2, floor, nothing; metric)
+    @test prior.gradients[] <= 8
     @test objective(θ2, ω2) ≥ reference - 1e-7
     # The ragged layout's block is the same problem.
     ragged = RaggedNLMELayout(ntheta = 3, nsigma = 0, family_sizes = [3],
@@ -516,9 +517,11 @@ function NE.population_logprior_and_gradient(m::CollinearGrowth, θ, σ, ω)
     return population_logprior(m, θ, σ, ω), -θ ./ 4, -σ ./ 4, -ω ./ 4
 end
 
-@testset "population prior: SAEM MAP M-steps take a few prior gradients each" begin
+@testset "population prior: SAEM MAP M-steps carry the Gaussian block's metric" begin
     # Before 0.2.7 each M-step on this design took 2d + 1 = 17 prior gradients
-    # for its Gaussian block's starting curvature alone.
+    # for its Gaussian block's starting curvature alone (d = 5 mu-referenced θ
+    # + 3 ω), before its search; a difference metric in the floor-free
+    # coordinates (5 + a 2 × 2 factor) would take 18.
     N = nullspace(reduce(vcat, NE.mu_referencing(collinear_growth_model()).design))
     θ0 = [1.0, 0.0, 0.4, 0.4, 0.5]   # the unidentified combination off the prior mode
     @test abs(only(N' * θ0)) > 0.5
@@ -537,6 +540,8 @@ end
             (model.prior_gradients[] - model.population_gradients[] ÷ 3, fit)
         end
         per_iteration = (counts[2][1] - counts[1][1]) / 20
-        @test per_iteration <= 4
+        # Away from a near-singular Ω the whole search takes fewer prior gradients
+        # than one difference metric would.
+        floor == 0.05 && @test per_iteration < 18
     end
 end
