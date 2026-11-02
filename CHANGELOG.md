@@ -14,6 +14,33 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.7
+
+- SAEM's MAP M-step (a model with a `population_logprior`) now moves the
+  mu-referenced θ and Ω along an `omega_floor` the data press against. Where the
+  closed-form update left a covariance eigenvalue on the floor (a family
+  estimated from fewer subjects than its dimension, or a floor above what the
+  data support), every trial step of the Gaussian block's search left the
+  floor, the block returned its start, and the prior moved neither the
+  mu-referenced θ nor Ω in that M-step. On a 3-subject test model with a 4 × 4
+  Ω (`bench/saem_map_block.jl`) that was every M-step at `omega_floor = 0.05`,
+  up to 0.15 below the block's maximum, and 11 to 40 of 40 M-steps at the
+  default floor, up to 5 below it. In the SA phase the block now ends within
+  1e-13 (at 0.05) and, in all but one of the scored M-steps, 3e-8 (default
+  floor) of that maximum; while γ = 1 at the default floor it can end on another
+  local maximum, up to 0.23 below.
+- The block's quasi-Newton search runs in coordinates in which every point
+  holds the floor (each family's Ω = floor·I + L Lᵀ, L a square matrix) and
+  carries its metric from one M-step to the next; the first M-step takes a
+  difference estimate. Each trial takes one `population_logprior_and_gradient`,
+  and the block calls `population_logprior` not at all. Before, every M-step
+  took a fresh difference curvature: on designs that leave a combination of
+  mu-referenced θ unidentified, `2d + 1` prior gradients (d the mu-referenced θ
+  and free Ω coordinates; 79 on a 3-subject joint PK/QT BRM model with 11
+  mu-referenced θ and a 7 × 7 Ω), and wherever it moved up to 100 more
+  iterations of a prior value and gradient each.
+- Seeded MAP fits differ from 0.2.6. Maximum-likelihood fits are unchanged.
+
 ## 0.2.6
 
 - `SAEMOptions(numeric_mstep = :score)` is a numerical M-step for θ without a

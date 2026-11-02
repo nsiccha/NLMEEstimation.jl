@@ -1290,47 +1290,212 @@ function _saem_omega_above_floor(layout, ω, floor)
     return all(r -> _factor_above_floor(L[r, r], floor), ranges)
 end
 
+# What the MAP Gaussian block carries from one M-step to the next: the
+# inverse-Hessian approximation its last search ended with, in the floor-free
+# coordinates (`_map_block_families`), which starts the next search. The block's
+# objective changes little from one M-step to the next, so a carried
+# approximation saves the difference estimate (two prior gradients per
+# coordinate) that the first M-step takes.
+struct _SAEMMAPMetric
+    inverse_hessian::Base.RefValue{Union{Nothing, Matrix{Float64}}}
+end
+_SAEMMAPMetric() = _SAEMMAPMetric(Ref{Union{Nothing, Matrix{Float64}}}(nothing))
+
 # The Gaussian block of a MAP M-step: the mu-referenced θ and the free Ω
 # coordinates (`_free_omega`) maximize the expected Gaussian random-effect
-# density plus the population prior at the current remaining θ and σ. Neither
-# term evaluates the model. The search starts where the Gaussian term's
-# closed-form updates (`_saem_gaussian_mstep`) stopped, with that term's inverse
-# curvature as its quasi-Newton matrix, so a prior that is weak against the data
-# moves it in a few steps. Along combinations that the designs do not identify
-# (`_saem_identified`) the Gaussian term has no curvature, and only the prior
-# gives the search a scale there, so it starts with the whole objective's.
+# density plus the population prior at the current remaining θ and σ, subject
+# to the Ω floor, without evaluating the conditional model. One BFGS search
+# from the closed-form update, in floor-free coordinates: an unconstrained
+# family's Ω_f = floor·I + L_f L_fᵀ with L_f any square matrix, so the search
+# moves along a floor it presses against. Its inverse-Hessian approximation is
+# carried between M-steps (`metric`). Every trial takes one prior value and
+# gradient: a value-only screen would take two calls for every accepted step
+# to save one per rejected trial, which a carried approximation makes rare.
+#
+# Before 0.2.7 the search ran in the block's own coordinates, rejecting trials
+# below the floor, with a new difference curvature at every M-step. On designs
+# that leave a combination of mu-referenced θ unidentified that curvature took
+# 2d prior gradients per M-step, d the mu-referenced θ and free Ω coordinates:
+# 78 on a 3-subject joint PK/QT model with 11 mu-referenced θ and a 7 × 7 Ω.
+# Where the start had an eigenvalue on the floor (a covariance family estimated
+# from fewer subjects than its dimension, or a floor the data press against),
+# every trial left the admissible set and the search returned its start, so
+# the prior moved neither the mu-referenced θ nor Ω; elsewhere it took up to
+# 100 iterations of a prior value and gradient each (snag
+# `saem-population-1ff48ec8`).
 function _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
-        mean_phi, second_phi, subjects, floor, constraints;
-        identified = _saem_identified(design, indices))
+        mean_phi, second_phi, subjects, floor, constraints; metric = _SAEMMAPMetric())
     nμ = length(indices)
     function point(z)
         θz = copy(θ)
         θz[indices] = view(z, 1:nμ)
         return θz, Vector{Float64}(_constrained_omega(constraints, view(z, nμ+1:length(z))))
     end
-    function gaussian(z)
-        θz, ωz = point(z)
-        value, gμ, gω = _saem_gaussian_map_value_gradient(layout, θz, ωz, indices,
-            design, mean_phi, second_phi, subjects)
-        return value, vcat(gμ, _free_omega_gradient(constraints, ωz, gω))
-    end
-    function objective(z)
-        θz, ωz = point(z)
-        value, gradient = gaussian(z)
-        lp, gθ, _, gω = _saem_prior_terms(model, θz, σ, ωz)
-        return value + lp, gradient + vcat(gθ[indices],
-            _free_omega_gradient(constraints, ωz, gω))
-    end
-    function screen(z)
-        θz, ωz = point(z)
-        return first(gaussian(z)) + _saem_prior_value(model, θz, σ, ωz)
-    end
-    admissible(z) = _omega_admissible(layout, constraints, last(point(z)), floor)
     z0 = vcat(θ[indices], _free_omega(constraints, ω))
-    curvature = identified === nothing ? gaussian : objective
-    z = _bfgs_ascent(objective, z0, 100, admissible; screen,
-        inverse_hessian = _saem_inverse_curvature(curvature, z0))
-    return point(z)
+    isempty(z0) && return point(z0)
+    families, nx = _map_block_families(layout, constraints, nμ)
+    nz = length(z0)
+    function objective(x)
+        z = _map_block_coordinates(x, families, floor, nz)
+        z === nothing && return -Inf, zeros(nx)
+        θz, ωz = point(z)
+        gv, gμ, gω = _saem_gaussian_map_value_gradient(layout, θz, ωz, indices, design,
+            mean_phi, second_phi, subjects)
+        pv, gθ, _, gp = _saem_prior_terms(model, θz, σ, ωz)
+        gz = vcat(gμ + gθ[indices], _free_omega_gradient(constraints, ωz, gω + gp))
+        return gv + pv, _map_block_floor_free_gradient(x, z, gz, families)
+    end
+    function admissible(x)
+        z = _map_block_coordinates(x, families, floor, nz)
+        return z !== nothing &&
+            _partial_families_admissible(layout, constraints, last(point(z)), floor)
+    end
+    x0 = _map_block_floor_free(z0, families, floor, nx)
+    M = metric.inverse_hessian[]
+    (M === nothing || size(M, 1) != nx) && (M = _saem_search_metric(objective, x0))
+    x, B = _bfgs_ascent_state(objective, x0, 200, admissible; inverse_hessian = M,
+        decrement = _map_block_decrement, what = "SAEM MAP M-step")
+    metric.inverse_hessian[] = B
+    # A search that took no step leaves the closed-form update exactly as it was.
+    x == x0 && return point(z0)
+    return point(_map_block_coordinates(x, families, floor, nz))
+end
+
+# Where the gradient's own rounding exceeds the search's tolerance (1e-6, as
+# before 0.2.7; a near-singular covariance scales the gradient by its inverse),
+# the search ends once a step predicts a gain of at most this fraction of the
+# objective, a few times its rounding.
+const _map_block_decrement = 1.0e-15
+
+# The MAP Gaussian block's families, in the layout's order: whether a family's
+# coordinates are floor-free (an unconstrained family), their ranges in the
+# block's coordinates z and in the floor-free coordinates x, and the family's
+# size. A partially fixed family keeps its free coordinates (`_free_omega`), the
+# same in z and x, and its floor test (`_omega_admissible`); a fully fixed one
+# has none. Returns the families and the length of x.
+function _map_block_families(layout, constraints, nμ)
+    families = Tuple{Bool, UnitRange{Int}, UnitRange{Int}, Int}[]
+    cz = cx = nμ
+    for (f, k) in enumerate(_omega_family_sizes(layout))
+        fam = _omega_family(constraints, f)
+        wz = _family_free_width(fam, k)
+        wx = fam === nothing ? k^2 : wz
+        push!(families, (fam === nothing, (cz + 1):(cz + wz), (cx + 1):(cx + wx), k))
+        cz += wz
+        cx += wx
+    end
+    return families, cx
+end
+
+# The block's coordinates z of floor-free coordinates x: Ω_f = floor·I + L Lᵀ
+# for a floor-free family, the entries of the k × k matrix L in x (column-major,
+# unconstrained). Every L holds the floor. An eigenvalue on the floor is a
+# direction L maps to zero, where the objective is smooth, rather than a
+# log-Cholesky coordinate at -∞, which a search only approaches. L is square
+# rather than triangular because a column of L that is zero has a zero gradient:
+# a triangular factor whose first column is zero keeps the floored direction at
+# the first coordinate axis, while a square one can turn another column into
+# it. `nothing` where an Ω_f is not finite or not positive definite (a trial
+# step overflowed).
+function _map_block_coordinates(x, families, floor, nz)
+    z = Vector{Float64}(undef, nz)
+    nμ = nz - sum(f -> length(f[2]), families; init = 0)
+    z[1:nμ] = view(x, 1:nμ)
+    for (free, rz, rx, k) in families
+        if free
+            L = reshape(view(x, rx), k, k)
+            Ω = L * L' + floor * I
+            all(isfinite, Ω) || return nothing
+            F = cholesky(Symmetric(Ω); check = false)
+            issuccess(F) || return nothing
+            z[rz] = _factor_segment(F.L)
+        else
+            z[rz] = view(x, rx)
+        end
+    end
+    return z
+end
+
+# The floor-free coordinates of z, inverting `_map_block_coordinates` with L the
+# Cholesky factor of Ω_f - floor·I. That is singular where Ω_f has an
+# eigenvalue on the floor, as the closed-form step leaves it; such an
+# eigenvalue starts a thousandth of the floor above it, so that a search can
+# also leave the floor where the prior pulls the eigenvalue up.
+function _map_block_floor_free(z, families, floor, nx)
+    x = Vector{Float64}(undef, nx)
+    nμ = length(z) - sum(f -> length(f[2]), families; init = 0)
+    x[1:nμ] = view(z, 1:nμ)
+    for (free, rz, rx, k) in families
+        if free
+            Ψ = Symmetric(omega_matrix(NLMELayout(0, 0, [k]), view(z, rz)) - floor * I)
+            E = eigen(Ψ)
+            δ = max(floor / 1000, sqrt(eps()) * maximum(E.values))
+            F = cholesky(Ψ; check = false)
+            if minimum(E.values) < δ || !issuccess(F)
+                F = cholesky(Symmetric(E.vectors * Diagonal(max.(E.values, δ)) * E.vectors'))
+            end
+            x[rx] = vec(Matrix(F.L))
+        else
+            x[rx] = view(z, rz)
+        end
+    end
+    return x
+end
+
+# The gradient in floor-free coordinates x from the gradient gz in the block's
+# coordinates z = `_map_block_coordinates(x, …)`: a floor-free family's
+# log-Cholesky gradient is carried back through Ω_f's Cholesky factor to Ω_f,
+# and on to L in Ω_f = floor·I + L Lᵀ (2 Ω̄ L).
+function _map_block_floor_free_gradient(x, z, gz, families)
+    gx = Vector{Float64}(undef, length(x))
+    nμ = length(z) - sum(f -> length(f[2]), families; init = 0)
+    gx[1:nμ] = view(gz, 1:nμ)
+    for (free, rz, rx, k) in families
+        if free
+            C = omega_cholesky(NLMELayout(0, 0, [k]), view(z, rz))
+            Ω̄ = _cholesky_adjoint(C, _segment_factor_gradient(view(gz, rz), C))
+            gx[rx] = vec(2 * Ω̄ * reshape(view(x, rx), k, k))
+        else
+            gx[rx] = view(gz, rz)
+        end
+    end
+    return gx
+end
+
+# The log-Cholesky segment of a lower-triangular factor L with positive
+# diagonal, in `omega_cholesky`'s order (log diagonal, plain off-diagonal).
+function _factor_segment(L)
+    k = size(L, 1)
+    s = Vector{Float64}(undef, k * (k + 1) ÷ 2)
+    c = 0
+    for j in 1:k, l in 1:j
+        c += 1
+        s[c] = j == l ? log(L[j, j]) : L[j, l]
+    end
+    return s
+end
+
+# ∂f/∂L from f's gradient g in the log-Cholesky segment of L.
+function _segment_factor_gradient(g, L)
+    k = size(L, 1)
+    L̄ = zeros(k, k)
+    c = 0
+    for j in 1:k, l in 1:j
+        c += 1
+        L̄[j, l] = j == l ? g[c] / L[j, j] : g[c]
+    end
+    return L̄
+end
+
+# The symmetric gradient of f(Ω) from ∂f/∂L, L the Cholesky factor of Ω:
+# L⁻ᵀ Φ(Lᵀ L̄) L⁻¹, symmetrized, Φ the lower triangle with half its diagonal
+# (I. Murray, "Differentiation of the Cholesky decomposition", 2016).
+function _cholesky_adjoint(L, L̄)
+    M = Matrix(L)' * L̄
+    Φ = tril(M) - Diagonal(diag(M)) / 2
+    T = LowerTriangular(Matrix(L))
+    Ω̄ = T' \ (Φ / T)
+    return (Ω̄ + Ω̄') / 2
 end
 
 # Minus the Hessian of a value-and-gradient function at z, symmetrized, from
@@ -1349,16 +1514,6 @@ function _saem_difference_curvature(f, z; step = 1.0e-5)
     end
     C = Symmetric(-(H + H') / 2)
     return all(isfinite, C) ? C : nothing
-end
-
-# The inverse of that curvature; `nothing` (the identity) where it is not
-# positive definite or not available.
-function _saem_inverse_curvature(f, z; step = 1.0e-5)
-    isempty(z) && return nothing
-    C = _saem_difference_curvature(f, z; step)
-    C === nothing && return nothing
-    F = cholesky(C; check = false)
-    return issuccess(F) ? inv(F) : nothing
 end
 
 # A positive-definite quasi-Newton metric from that curvature: the inverse of
@@ -1574,7 +1729,8 @@ _saem_closed_form_mstep(layout::NLMELayout, θ, Ω, indices, design, mean_phi,
 function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indices,
         design, free, bank, weights, mean_phi, second_phi, options, γ,
         constraints, map_objective, active = eachindex(subjects);
-        identified = _saem_identified(design, indices), anneal::Bool = true)
+        identified = _saem_identified(design, indices), anneal::Bool = true,
+        map_metric = _SAEMMAPMetric())
     ω_previous = ω
     θ, Ω = _saem_closed_form_mstep(layout, θ, omega_matrix(layout, ω), indices,
         design, mean_phi, second_phi, options.omega_floor, subjects, constraints;
@@ -1582,7 +1738,8 @@ function _saem_mstep(numeric_update, model, subjects, layout, θ, σ, ω, indice
     ω = _apply_omega_constraints(constraints, omega_parameters(layout, Ω))
     if map_objective
         θ, ω = _saem_gaussian_map_block(model, layout, θ, σ, ω, indices, design,
-            mean_phi, second_phi, subjects, options.omega_floor, constraints; identified)
+            mean_phi, second_phi, subjects, options.omega_floor, constraints;
+            metric = map_metric)
     end
     if anneal && options.omega_annealing > 0 && γ == 1
         ω = _saem_anneal(layout, ω_previous, ω, options.omega_annealing, constraints)
@@ -1748,11 +1905,13 @@ standard lockstep MH proposals, batched continuously adapted MALA proposals,
 or per-subject in-memory WarmupHMC NUTS transitions.
 When [`population_logprior`](@ref) is supplied, the M-step maximizes the same
 objectives plus the prior, added once. The mu-referenced θ and Ω move on from
-their closed-form update to the maximizer with the prior, a search that does
-not evaluate the model, and the numerical update of the remaining θ and σ
-includes the prior; so a prior adds no model evaluations to the step. The
-model supplies a population-prior gradient or an AD backend from which to
-derive it.
+their closed-form update to the maximizer with the prior, a search that calls
+only the prior (one value and gradient per iteration) and moves along an
+`omega_floor` the data press against, and the numerical update of the remaining
+θ and σ
+includes the prior; so a prior adds no conditional-likelihood evaluations to the
+step. The model supplies a population-prior gradient or an AD backend from
+which to derive it.
 Covariance families declared by [`fixed_omega`](@ref) keep their fixed parts:
 a fully fixed family is not updated, and a partially fixed family maximizes
 the expected Gaussian random-effect density over its estimated standard
@@ -1889,6 +2048,7 @@ function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel
     numeric_update = batch === nothing ?
         Base.invokelatest(_saem_full_batch_update, numeric_mode)::Function :
         Base.invokelatest(_SAEMScoreStep, batch / length(ids))::Function
+    map_metric = _SAEMMAPMetric()
     mean_phi, second_phi = _saem_statistics(layout, ids, H)
     logscale = log(options.rw_scale)
     component_logscales = fill(log(options.rw_scale),
@@ -1998,7 +2158,7 @@ function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel
             θ, σ, ω, θ_kept = _saem_mstep(numeric_update, mmodel, ids, layout, θ, σ, ω,
                 indices, design, free, bank, weights, mean_phi, second_phi,
                 options, γ, constraints, map_objective, active;
-                identified, anneal = sampling)
+                identified, anneal = sampling, map_metric)
             if mala_cache !== nothing && any(mala_cache.valid)
                 if plan === nothing && θ == θ_before && σ == σ_before
                     _saem_mala_refresh_prior!(mala_cache, eH, eprior,

@@ -310,7 +310,7 @@ function _constrained_omega(c::_OmegaConstraints, z)
         elseif fam.fully_fixed
             ω[r] = fam.segment
         else
-            width = count(!, fam.sd_fixed) + (fam.correlation_fixed ? 0 : length(fam.m))
+            width = _family_free_width(fam, c.sizes[f])
             ω[r] = _family_assemble(fam, view(z, (cursor + 1):(cursor + width)), c.sizes[f])
             cursor += width
         end
@@ -335,6 +335,13 @@ function _free_omega_gradient(c::_OmegaConstraints, ω, g)
 end
 
 _apply_omega_constraints(c, ω) = _constrained_omega(c, _free_omega(c, ω))
+
+# The number of free coordinates of a family of size k: its whole log-Cholesky
+# segment when unconstrained, the estimated log standard deviations and
+# correlation coordinates when partially fixed, none when fully fixed.
+_family_free_width(::Nothing, k) = k * (k + 1) ÷ 2
+_family_free_width(fam::_FixedFamily, k) = fam.fully_fixed ? 0 :
+    count(!, fam.sd_fixed) + (fam.correlation_fixed ? 0 : length(fam.m))
 
 _omega_family(::Nothing, f) = nothing
 _omega_family(c::_OmegaConstraints, f) = c.families[f]
@@ -377,6 +384,19 @@ function _check_fixed_omega(violation, model, layout, ω)
     f === nothing || violation(
         "ω does not hold covariance family $f at its fixed_omega(model) value; see apply_fixed_omega")
     return nothing
+end
+
+# `_omega_admissible` for the partially fixed families alone: the MAP Gaussian
+# block's floor-free coordinates hold the floor of the others by construction.
+_partial_families_admissible(layout, ::Nothing, ω, floor) = all(isfinite, ω)
+function _partial_families_admissible(layout, c::_OmegaConstraints, ω, floor)
+    all(isfinite, ω) || return false
+    for (f, fam) in enumerate(c.families)
+        (fam === nothing || fam.fully_fixed) && continue
+        _partial_family_admissible(fam, view(ω, c.ranges[f]), c.sizes[f], floor) ||
+            return false
+    end
+    return true
 end
 
 # The SAEM covariance floor applies to estimated parts only: the eigenvalues of
@@ -452,6 +472,13 @@ end
 # be predicted to gain less than f resolves; as in the EBE solver (`_accepts`),
 # such a step is judged by its prediction and f only rejects a drop beyond that
 # resolution, instead of halving to the minimum step through rounding noise.
+# `decrement`, if positive, also stops the search once the quasi-Newton step
+# predicts a gain of at most `decrement · max(1, |f|)`: where the gradient's
+# own rounding exceeds `gtol` (a near-singular covariance scales it by its
+# inverse) only that test ends the search before `maxiter`. It applies once the
+# search has updated its approximation with a step of its own: a supplied
+# `inverse_hessian` from a different problem can underestimate the inverse
+# curvature, and with it the gain still to be made.
 _bfgs_ascent(objective, x0, maxiter, admissible; kwargs...) =
     first(_bfgs_ascent_state(objective, x0, maxiter, admissible; kwargs...))
 
@@ -459,7 +486,8 @@ _bfgs_ascent(objective, x0, maxiter, admissible; kwargs...) =
 # that a caller solving a sequence of similar problems can start the next
 # search from it.
 function _bfgs_ascent_state(objective, x0, maxiter, admissible; screen = nothing,
-        gtol = 1.0e-6, inverse_hessian = nothing, what = "SAEM MAP M-step")
+        gtol = 1.0e-6, inverse_hessian = nothing, what = "SAEM MAP M-step",
+        decrement = 0.0)
     x = copy(x0)
     isempty(x) && return x, inverse_hessian
     value, gradient = objective(x)
@@ -468,6 +496,7 @@ function _bfgs_ascent_state(objective, x0, maxiter, admissible; screen = nothing
     B0 = inverse_hessian === nothing ? Matrix{Float64}(I, length(x), length(x)) :
         Matrix{Float64}(inverse_hessian)
     B = copy(B0)
+    updated = false
     for _ in 1:maxiter
         maximum(abs, gradient) < gtol && break
         direction = B * gradient
@@ -475,6 +504,8 @@ function _bfgs_ascent_state(objective, x0, maxiter, admissible; screen = nothing
             direction = B0 * gradient
             B = copy(B0)
         end
+        decrement > 0 && updated &&
+            dot(direction, gradient) / 2 <= decrement * max(1, abs(value)) && break
         step = 1.0
         accepted = false
         while step >= 1.0e-8
@@ -498,6 +529,7 @@ function _bfgs_ascent_state(objective, x0, maxiter, admissible; screen = nothing
                     ρ = inv(ys)
                     C = Matrix{Float64}(I, length(x), length(x)) - ρ * s * y'
                     B = C * B * C' + ρ * s * s'
+                    updated = true
                 end
                 x, value, gradient = candidate, next_value, next_gradient
                 accepted = true
