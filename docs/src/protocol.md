@@ -30,11 +30,13 @@ subject-level population gradients in SAEM. Implement
 declare `saem_population_gradient_style(model) = PerSubjectEvaluation()`. SAEM
 then sums those subject values and gradients for the numerical M-step. This
 choice does not change `evaluation_style(model)` or any other estimator step.
-For different routes in the two numerical M-step modes, define
-`saem_population_gradient_style(model, ::Val{:online})` or
+For different routes in the numerical M-step modes, define
+`saem_population_gradient_style(model, ::Val{:online})`,
+`saem_population_gradient_style(model, ::Val{:score})` or
 `saem_population_gradient_style(model, ::Val{:mixture})`. A missing mode-specific
 method uses the one-argument style. This lets a model use compact subject-cell
-gradients for the bounded-memory online update and a batched gradient for the
+gradients for the single-draw updates (`:online`, and `:score`, which takes
+about one gradient per iteration) and a batched gradient for the
 retained-draw mixture.
 
 A model can hold a random-effect covariance family, or part of one, at a known value by declaring `fixed_omega(model)`. It returns `family => FixedOmega(…)` pairs, where a family is an `eta_blocks` entry of `NLMELayout` (or a `family_sizes` entry of `RaggedNLMELayout`) by position. `FixedOmega(Ω)` fixes the whole family, matching nlmixr2's `fix()` on an ω block and NONMEM's `OMEGA … FIX`. `FixedOmega(sd = [0.3, nothing], correlation = nothing)` fixes the listed standard deviations, and `FixedOmega(correlation = R)` fixes the correlation, in `Ω = D R D` terms. FOCE(I) searches only the free Ω coordinates. SAEM leaves a fully fixed family unchanged and maximizes the expected Gaussian random-effect density over a partially fixed family's free standard deviations and correlation. Both report the fixed values in `omega` and `omega_matrix`. Their starting `ω0` must hold the fixed values; `apply_fixed_omega(model, ω)` moves a vector onto them. `empirical_bayes` evaluates at the `ω` it is given.

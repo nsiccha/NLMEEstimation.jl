@@ -294,8 +294,11 @@ Without a population prior, `mu_referencing(model)` lets the M-step update its
 coordinates and σ use first-order AD. The `:mixture` numerical mode retains
 weighted latent draws, so its memory and evaluation cost grow with iterations.
 The `:online` mode keeps the current draw and applies the SA gain to its
-numerical update. `:auto` selects between them from the declared
-mu-referencing coverage. `mstep_interval` can reduce evaluation frequency.
+numerical update. The `:score` mode keeps the current draw too and takes one Robbins–Monro step
+along its score per iteration, which converges where the observed-data score
+vanishes, as `:mixture` does. `:auto` selects `:online` when every fitted θ is
+mu-referenced and `:score` otherwise (`:mixture` before 0.2.6).
+`mstep_interval` can reduce evaluation frequency.
 SAEM estimates depend on the RNG stream and run length, so assess recovery
 across starts for a new model. While the SA step size is one, Ω is annealed as
 in Monolix and saemix (`SAEMOptions(omega_annealing = 0.95)`): an M-step may

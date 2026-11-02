@@ -182,7 +182,7 @@ end
     full(z) = NE._saem_numeric_value_gradient(z, model, 1:n, θ, σ, [3], Int[], design,
         [H], [1.0], Val(:online))
     step(share, metric) = NE._SAEMScoreStep(share,
-        Ref{Union{Nothing, Matrix{Float64}}}(metric), Ref(4))
+        Ref{Union{Nothing, Matrix{Float64}}}(metric), Ref(4), Val(:online))
     score_step(γ, s) = NE._saem_score_step(model, 1:n, θ, σ, [3], Int[], design, [H],
         [1.0], γ, nothing, active, s)
     _, g = batch(σ)

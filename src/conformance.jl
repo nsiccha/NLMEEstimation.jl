@@ -93,7 +93,7 @@ function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
         violation("evaluation_style returned $(repr(evaluation_style(model))); expected an EvaluationStyle")
     saem_population_gradient_style(model) isa EvaluationStyle ||
         violation("saem_population_gradient_style returned $(repr(saem_population_gradient_style(model))); expected an EvaluationStyle")
-    for mode in (Val(:online), Val(:mixture))
+    for mode in (Val(:online), Val(:score), Val(:mixture))
         saem_population_gradient_style(model, mode) isa EvaluationStyle ||
             violation("saem_population_gradient_style with $mode returned $(repr(saem_population_gradient_style(model, mode))); expected an EvaluationStyle")
     end
