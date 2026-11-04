@@ -1,6 +1,7 @@
 using Test
 using NLMEEstimation
 using Random
+using LinearAlgebra
 import NLMEEstimation as NE
 import Enzyme
 import Treebars
@@ -25,6 +26,45 @@ same_chains(a, b) = a.theta == b.theta && a.sigma == b.sigma && a.omega == b.ome
 
 threads_fit(model, start, kernel; options = THREADS_OPTIONS, kwargs...) =
     saem(model, start...; rng = Xoshiro(5), options, kernel, kwargs...)
+
+# A nonlinear, five-effect MAP model with structural θ. Both evaluation routes
+# use exactly the same arithmetic, including away from the starting point.
+# Equality at just the start is insufficient: last-bit gradient differences can
+# change Pathfinder's path and the subsequent NUTS draws.
+struct NonlinearThreadToy
+    y::Vector{Vector{Float64}}
+end
+NE.nsubjects(m::NonlinearThreadToy) = length(m.y)
+NE.nlme_layout(::NonlinearThreadToy) = NLMELayout(2, 1, [5])
+NE.evaluation_style(::NonlinearThreadToy) = BatchedEvaluation()
+NE.saem_population_gradient_style(::NonlinearThreadToy) = PerSubjectEvaluation()
+function thread_toy_residual(m, i, θ, σ, η)
+    r = m.y[i] .- (θ[1] .+ θ[2] .* η .+ 0.1 .* η .^ 2)
+    v = exp(2σ[1])
+    ℓ = -sum(abs2, r) / (2v) - length(r) * (log(2π) / 2 + σ[1])
+    return ℓ, r, v
+end
+NE.conditional_loglikelihood(m::NonlinearThreadToy, i, θ, σ, η) =
+    first(thread_toy_residual(m, i, θ, σ, η))
+function NE.conditional_loglikelihood_and_gradient(m::NonlinearThreadToy, i, θ, σ, η)
+    ℓ, r, v = thread_toy_residual(m, i, θ, σ, η)
+    return ℓ, r .* (θ[2] .+ 0.2 .* η) ./ v
+end
+function NE.conditional_loglikelihood_and_population_gradient(m::NonlinearThreadToy,
+        i, θ, σ, η)
+    ℓ, r, v = thread_toy_residual(m, i, θ, σ, η)
+    return ℓ, [sum(r), dot(r, η)] ./ v, [sum(abs2, r) / v - length(r)]
+end
+NE.conditional_loglikelihoods(m::NonlinearThreadToy, ids, θ, σ, H) =
+    [NE.conditional_loglikelihood(m, i, θ, σ, H[:, k]) for (k, i) in enumerate(ids)]
+function NE.conditional_loglikelihoods_and_gradients(m::NonlinearThreadToy, ids, θ, σ, H)
+    pairs = [NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, H[:, k])
+        for (k, i) in enumerate(ids)]
+    return first.(pairs), stack(last.(pairs))
+end
+NE.population_logprior(::NonlinearThreadToy, θ, σ, ω) = -sum(abs2, vcat(θ, σ, ω)) / 8
+NE.population_logprior_and_gradient(m::NonlinearThreadToy, θ, σ, ω) =
+    (NE.population_logprior(m, θ, σ, ω), -θ / 4, -σ / 4, -ω / 4)
 
 # Forwards to `inner`; subclasses of behaviour below overload one method each.
 abstract type Forwarding end
@@ -139,6 +179,23 @@ else
             lockstep = threads_fit(model, THREADS_GROWTH, SERIAL_NUTS)
             @test !isempty(gradient_batches(model))
             @test same_chains(threaded, lockstep)
+        end
+
+        @testset "nonlinear batched MAP, structural θ, no burn-in or adaptation delay" begin
+            data_rng = Xoshiro(71)
+            model = NonlinearThreadToy([randn(data_rng, 5) for _ in 1:2])
+            θ, σ = [0.2, 1.3], [log(0.7)]
+            ω = omega_parameters(nlme_layout(model), Matrix(0.7I, 5, 5))
+            options = SAEMOptions(iterations = 2, burnin = 1, mcmc_burnin = 0,
+                adapt_iterations = 0, numeric_maxiter = 2, omega_floor = 0.05)
+            for seed in (5, 20261013)
+                fit(threads) = saem(model, θ, σ, ω; options, rng = Xoshiro(seed),
+                    kernel = WarmupHMCNUTS(; threads))
+                serial, threaded = fit(false), fit(true)
+                @test serial.objective == threaded.objective == :MAP
+                @test serial.numeric_mstep == threaded.numeric_mstep == :score
+                @test same_chains(serial, threaded)
+            end
         end
 
         @testset "a chain's own error reaches the caller" begin

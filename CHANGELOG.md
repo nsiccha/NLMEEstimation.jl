@@ -14,6 +14,18 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.8
+
+- Clarify the seeded-equality contract of `WarmupHMCNUTS(threads = true)`:
+  with the same inputs and seed, serial and threaded fits are bit-identical when
+  their model values and gradients are bit-identical at every queried point.
+  Batched and one-subject evaluations can differ by roundoff, which can change
+  Pathfinder's path and subsequent NUTS draws. Equality at the start or a passing
+  `check_protocol` does not establish equality along the trajectories. Sampler
+  behavior, defaults and protocol tolerances are unchanged. Regression coverage
+  now includes a nonlinear batched MAP model with structural θ, zero MCMC burn-in
+  and adaptation delay, two iterations, and an Ω floor.
+
 ## 0.2.7
 
 - SAEM's MAP M-step (a model with a `population_logprior`) now moves the

@@ -243,7 +243,8 @@ fields are `missing`. A `BatchedEvaluation` model's chains run in lockstep: each
 leapfrog step of every subject whose trajectory is still growing reaches the model
 as one `conditional_loglikelihoods_and_gradients` call over those subjects, so a
 round of transitions costs as many batched calls as its longest trajectory, not
-the sum over subjects (NLMEEstimation 0.2.1). Those calls list, subject for
+the sum over subjects (NLMEEstimation 0.2.1). When both routes return bit-identical
+model values and gradients at every queried point, those calls list, subject for
 subject, the evaluations the per-subject route would make, with the same draws, so
 outside the domain-error fallback (a batch that throws is evaluated again one
 subject at a time) lockstep never asks a model for more subject evaluations; a
@@ -257,8 +258,13 @@ call: each chain is a task on Julia's threads (start Julia with `-t <n>`) making
 own one-subject model calls, whatever the model's evaluation style. A batched model
 therefore leaves lockstep for that call, which can cost much more where a one-subject
 call costs a whole-model sweep, and the model must accept concurrent calls for
-different subjects. `check_protocol(...; threads = true)` tries that out. The fit
-equals the serial one bit for bit (`test/saem_nuts_threads.jl`). On twelve subjects of
+different subjects. `check_protocol(...; threads = true)` tries that out. With the
+same seed and inputs, the fit equals the serial one bit for bit if both routes
+return bit-identical values and gradients at every queried point
+(`test/saem_nuts_threads.jl`). Batched and one-subject evaluations may differ by
+roundoff; even a last-bit difference can change Pathfinder's path and subsequent
+NUTS draws. Equality at the start, or a passing `check_protocol` (which uses
+tolerances at the checked points), does not establish this condition. On twelve subjects of
 3,294–35,783 nested units, two threads on two CPUs of a loaded host took a fit from
 20.9 s to 19.2 s, and the largest subject limits the gain to 3.6× on any number of
 threads (`bench/saem_nuts_threads.jl`).

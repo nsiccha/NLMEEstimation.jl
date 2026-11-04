@@ -366,7 +366,11 @@ leaves, for the whole fit, as θ, σ and Ω move. There is no warmup phase and n
 
 `threads = true` runs each subject's chain in its own task on Julia's threads
 (start Julia with `-t <n>`), for the call this kernel is passed to, Pathfinder start
-included. The fit equals the one `threads = false` gives. Each chain makes its own
+included. With the same seed and inputs, the fit equals the one `threads = false`
+gives bit for bit when both routes return bit-identical model values and gradients
+at every queried point. Equality only at the starting point is insufficient:
+roundoff differences can change Pathfinder's path and subsequent NUTS draws.
+Each chain makes its own
 one-subject model calls, whatever [`evaluation_style`](@ref) the model declares, so
 the model is called concurrently for different subjects. Passing `threads = true`
 states that it can be: [`check_protocol`](@ref)`(...; threads = true)` tries that
@@ -547,7 +551,8 @@ end
 
 # `WarmupHMCNUTS(threads = true)`: each chain in its own task on Julia's threads, with
 # its own model calls, whatever the evaluation style. A chain's draws depend only on
-# its own state, so the results are the serial route's. `stop` is checked as each chain
+# its own state and target evaluations; bit-identical evaluations give the serial
+# route's results. `stop` is checked as each chain
 # starts and `finished` runs under a lock. Every task ends before this returns, so no
 # chain still calls the model once its failure has reached the caller, and the failure
 # reported is the first in fit order, the chain's own exception.
