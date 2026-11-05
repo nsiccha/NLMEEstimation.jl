@@ -10,7 +10,7 @@ set -euo pipefail
 root=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
 brm_sha=${BRM_SHA:-7aee63944b7d04bde027f38085d6bda1013de197} # BRM 0.2.199, ns/devibe
 work=${BENCH_WORK:-${TMPDIR:-/tmp}/saem-threads-vs-lockstep}
-results=$root/bench/saem_threads_vs_lockstep_brm_results.txt
+results=${BENCH_RESULTS:-$root/bench/saem_threads_vs_lockstep_brm_results.txt}
 cpus=${KB_COMPUTE_CPUS:-2}
 sizes=${BENCH_SIZES:-"80:8 80:80"}
 mkdir -p "$work"
