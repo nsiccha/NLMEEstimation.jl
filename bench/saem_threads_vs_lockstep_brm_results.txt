@@ -1,0 +1,348 @@
+Host strato2, a grant of 2 CPUs, NLMEEstimation 9eb9a0b4962818461aa226faf33415bbd16c2800, BRM 7aee63944b7d04bde027f38085d6bda1013de197
+PINS ReparametrizableDistributions=8f7d382d PowerScaling=8d27c83f HTMX=0b8dc2f9 HTMXObjects=ee46e8d6 DynamicObjects=c84047be TreeArrays=53cfd1b1 AlgebraOfVega=73695d5d SelectedInversion=8b1ee107 Distributions=63b968ea StanBlocks=ea1d64f0 Treebars=44c37e60 WarmupHMC=8e1d45a7 SequentialMonteCarlo=d3a32239 ReactiveKernels=db6bca82 OutputSignatures=f971381f Enzyme=b2bb4cb6
+ENV_PKG BayesianRegressionModels version=0.2.199 source=/home/n/scratch/kb-agent-tmp/NLMEEstimation/saem-threads-vs-lockstep/brm-7aee63944b7d04bde027f38085d6bda1013de197
+ENV_PKG ReactiveKernels version=0.1.86 source=/home/n/scratch/kb-agent-tmp/NLMEEstimation/saem-threads-vs-lockstep/bootstrap/reactivekernels-db6bca825d25
+ENV_PKG NLMEEstimation version=0.2.8 source=/home/n/scratch/kb-fleet-exec/ef7e51a927454a90/work/checkout
+ENV_PKG Enzyme version=0.13.218 source=/home/n/scratch/kb-agent-tmp/NLMEEstimation/saem-threads-vs-lockstep/bootstrap/enzyme-b2bb4cb628cf
+ENV_PKG WarmupHMC version=0.2.11 source=/home/n/scratch/kb-agent-tmp/NLMEEstimation/saem-threads-vs-lockstep/bootstrap/warmuphmc-8e1d45a78b38
+LOAD before 80:8 at 1 threads: 3.20 3.74 3.78
+
+══ 80 subjects × 8 observations, 1 thread(s), 1 GC thread(s), a grant of 2 CPU(s) ══
+Julia 1.10.12, NLMEEstimation 0.2.8, WarmupHMC 0.2.11, BayesianRegressionModels 0.2.199, Enzyme 0.13.218
+
+A conditional_loglikelihoods_and_gradients call by the subjects it lists (median of 21)
+    1 subjects:       8.6 µs,    8.61 µs per subject
+    2 subjects:      17.3 µs,    8.64 µs per subject
+    4 subjects:      39.6 µs,    9.90 µs per subject
+   20 subjects:     202.9 µs,   10.15 µs per subject
+   79 subjects:    1128.9 µs,   14.29 µs per subject
+   80 subjects:      77.7 µs,    0.97 µs per subject
+
+The work in a round: 200 lockstep rounds at the starting point
+  evaluations per subject and round: mean 2.7, range 1–7
+  subject evaluations per round: 212; lockstep's batched calls per round: 6.3, of which every subject waiting: 1.0
+  the longest chain bounds threads at 33.7× on any number of threads
+
+Rounds: 30 pairs of 5 rounds from one start per route, after 20 warm rounds
+  pair  1  lockstep   46.117 ms ( 1088 evaluations)  threads   28.129 ms ( 1088 evaluations)
+  pair  2  lockstep   23.161 ms ( 1064 evaluations)  threads   27.148 ms ( 1064 evaluations)
+  pair  3  lockstep   22.142 ms ( 1100 evaluations)  threads   51.319 ms ( 1100 evaluations)
+  pair  4  lockstep   26.594 ms ( 1050 evaluations)  threads   28.641 ms ( 1050 evaluations)
+  pair  5  lockstep   21.893 ms ( 1028 evaluations)  threads   35.669 ms ( 1028 evaluations)
+  pair  6  lockstep   24.639 ms ( 1056 evaluations)  threads   26.943 ms ( 1056 evaluations)
+  pair  7  lockstep   24.023 ms ( 1064 evaluations)  threads   30.743 ms ( 1064 evaluations)
+  pair  8  lockstep   23.413 ms ( 1020 evaluations)  threads   36.421 ms ( 1020 evaluations)
+  pair  9  lockstep   21.332 ms ( 1076 evaluations)  threads   35.198 ms ( 1076 evaluations)
+  pair 10  lockstep   24.275 ms ( 1062 evaluations)  threads   39.293 ms ( 1062 evaluations)
+  pair 11  lockstep   21.941 ms ( 1048 evaluations)  threads   28.826 ms ( 1048 evaluations)
+  pair 12  lockstep   24.124 ms ( 1048 evaluations)  threads   38.522 ms ( 1048 evaluations)
+  pair 13  lockstep   21.085 ms ( 1032 evaluations)  threads   27.767 ms ( 1032 evaluations)
+  pair 14  lockstep   30.453 ms ( 1066 evaluations)  threads   28.147 ms ( 1066 evaluations)
+  pair 15  lockstep   24.739 ms ( 1078 evaluations)  threads   29.087 ms ( 1078 evaluations)
+  pair 16  lockstep   23.332 ms ( 1064 evaluations)  threads   28.680 ms ( 1064 evaluations)
+  pair 17  lockstep   32.377 ms ( 1094 evaluations)  threads   30.395 ms ( 1094 evaluations)
+  pair 18  lockstep   26.163 ms ( 1044 evaluations)  threads   28.107 ms ( 1044 evaluations)
+  pair 19  lockstep   20.687 ms ( 1076 evaluations)  threads   35.497 ms ( 1076 evaluations)
+  pair 20  lockstep   22.892 ms ( 1036 evaluations)  threads   26.331 ms ( 1036 evaluations)
+  pair 21  lockstep   21.124 ms ( 1066 evaluations)  threads   37.356 ms ( 1066 evaluations)
+  pair 22  lockstep   24.377 ms ( 1108 evaluations)  threads   28.554 ms ( 1108 evaluations)
+  pair 23  lockstep   21.198 ms ( 1070 evaluations)  threads   28.034 ms ( 1070 evaluations)
+  pair 24  lockstep   24.425 ms ( 1072 evaluations)  threads   36.099 ms ( 1072 evaluations)
+  pair 25  lockstep   22.788 ms ( 1072 evaluations)  threads   29.288 ms ( 1072 evaluations)
+  pair 26  lockstep   24.678 ms ( 1062 evaluations)  threads   37.840 ms ( 1062 evaluations)
+  pair 27  lockstep   20.348 ms ( 1056 evaluations)  threads   27.837 ms ( 1056 evaluations)
+  pair 28  lockstep   32.705 ms ( 1050 evaluations)  threads   27.216 ms ( 1050 evaluations)
+  pair 29  lockstep   21.315 ms ( 1056 evaluations)  threads   27.979 ms ( 1056 evaluations)
+  pair 30  lockstep   24.395 ms ( 1060 evaluations)  threads   27.410 ms ( 1060 evaluations)
+  per round              lockstep     4.74 ms, threads     5.75 ms (medians); lockstep/threads 0.77 (quartiles 0.65–0.88), threads no slower in 4 of 30 pairs
+  per evaluation         lockstep    22.34 µs, threads    27.13 µs (medians); lockstep/threads 0.77 (quartiles 0.65–0.88), threads no slower in 4 of 30 pairs
+
+The Pathfinder start: 12 pairs, a new seed per pair
+  pair  1  lockstep   162.97 ms  threads   176.92 ms
+  pair  2  lockstep   149.28 ms  threads   166.14 ms
+  pair  3  lockstep   150.06 ms  threads   227.65 ms
+  pair  4  lockstep   126.94 ms  threads   161.81 ms
+  pair  5  lockstep   138.62 ms  threads   160.98 ms
+  pair  6  lockstep   127.78 ms  threads   143.91 ms
+  pair  7  lockstep   128.44 ms  threads   146.59 ms
+  pair  8  lockstep   125.04 ms  threads   139.23 ms
+  pair  9  lockstep   121.42 ms  threads   154.01 ms
+  pair 10  lockstep   130.52 ms  threads   142.84 ms
+  pair 11  lockstep   127.92 ms  threads   147.77 ms
+  pair 12  lockstep   125.77 ms  threads   155.87 ms
+  start                  lockstep   128.18 ms, threads   154.94 ms (medians); lockstep/threads 0.87 (quartiles 0.80–0.90), threads no slower in 0 of 12 pairs
+
+A fit of 20 burn-in and 20 SA iterations (5 MCMC burn-in sweeps): 12 pairs, the same seed within a pair
+  pair  1  lockstep    785.0 ms (GC   73.3)  threads    841.1 ms (GC   68.5)  largest |Δθ| 6.99e-13  |Δσ| 6.22e-15
+  pair  2  lockstep    753.5 ms (GC   67.1)  threads    881.8 ms (GC   72.7)  largest |Δθ| 6.45e-13  |Δσ| 1.44e-15
+  pair  3  lockstep    820.8 ms (GC   72.6)  threads    989.0 ms (GC   77.7)  largest |Δθ| 1.37e-10  |Δσ| 3.48e-11
+  pair  4  lockstep    913.1 ms (GC   71.7)  threads    928.8 ms (GC   79.0)  largest |Δθ| 5.51e-13  |Δσ| 1.74e-14
+  pair  5  lockstep    796.4 ms (GC   70.5)  threads    868.6 ms (GC   72.7)  largest |Δθ| 1.64e-13  |Δσ| 4.88e-15
+  pair  6  lockstep    752.2 ms (GC   70.2)  threads    849.3 ms (GC   68.9)  largest |Δθ| 1.73e-14  |Δσ| 7.11e-15
+  pair  7  lockstep    689.7 ms (GC   62.7)  threads    836.6 ms (GC   80.4)  largest |Δθ| 5.01e-13  |Δσ| 4.55e-15
+  pair  8  lockstep    729.4 ms (GC   65.4)  threads    854.3 ms (GC   70.9)  largest |Δθ| 3.92e-12  |Δσ| 4.55e-15
+  pair  9  lockstep    857.3 ms (GC   72.4)  threads    914.8 ms (GC   72.3)  largest |Δθ| 7.64e-14  |Δσ| 2.44e-13
+  pair 10  lockstep    822.3 ms (GC   69.4)  threads    812.3 ms (GC   68.0)  largest |Δθ| 5.84e-12  |Δσ| 1.32e-13
+  pair 11  lockstep    785.2 ms (GC   69.9)  threads    899.4 ms (GC   70.8)  largest |Δθ| 8.20e-14  |Δσ| 1.11e-16
+  pair 12  lockstep    834.4 ms (GC   71.6)  threads    894.0 ms (GC   74.0)  largest |Δθ| 2.89e-15  |Δσ| 2.22e-16
+  fit                    lockstep   790.84 ms, threads   875.20 ms (medians); lockstep/threads 0.90 (quartiles 0.85–0.93), threads no slower in 1 of 12 pairs
+
+The kernel's share of the fit, start plus 45 rounds: lockstep 43%, threads 47%
+Evaluators the model's pool prepared: 1
+LOAD after 80:8 at 1 threads: 7.93 6.13 4.77
+LOAD before 80:8 at 2 threads: 7.93 6.13 4.77
+
+══ 80 subjects × 8 observations, 2 thread(s), 1 GC thread(s), a grant of 2 CPU(s) ══
+Julia 1.10.12, NLMEEstimation 0.2.8, WarmupHMC 0.2.11, BayesianRegressionModels 0.2.199, Enzyme 0.13.218
+
+A conditional_loglikelihoods_and_gradients call by the subjects it lists (median of 21)
+    1 subjects:       8.9 µs,    8.85 µs per subject
+    2 subjects:      16.5 µs,    8.27 µs per subject
+    4 subjects:      33.6 µs,    8.39 µs per subject
+   20 subjects:     154.0 µs,    7.70 µs per subject
+   79 subjects:    1103.8 µs,   13.97 µs per subject
+   80 subjects:      56.9 µs,    0.71 µs per subject
+
+The work in a round: 200 lockstep rounds at the starting point
+  evaluations per subject and round: mean 2.7, range 1–7
+  subject evaluations per round: 212; lockstep's batched calls per round: 6.3, of which every subject waiting: 1.0
+  the longest chain bounds threads at 33.7× on any number of threads
+
+Rounds: 30 pairs of 5 rounds from one start per route, after 20 warm rounds
+  pair  1  lockstep   22.325 ms ( 1088 evaluations)  threads   16.550 ms ( 1088 evaluations)
+  pair  2  lockstep   55.710 ms ( 1064 evaluations)  threads   20.715 ms ( 1064 evaluations)
+  pair  3  lockstep   22.327 ms ( 1100 evaluations)  threads   17.225 ms ( 1100 evaluations)
+  pair  4  lockstep   21.357 ms ( 1050 evaluations)  threads   14.990 ms ( 1050 evaluations)
+  pair  5  lockstep   19.823 ms ( 1028 evaluations)  threads   16.612 ms ( 1028 evaluations)
+  pair  6  lockstep   21.772 ms ( 1056 evaluations)  threads   15.520 ms ( 1056 evaluations)
+  pair  7  lockstep   19.906 ms ( 1064 evaluations)  threads   17.503 ms ( 1064 evaluations)
+  pair  8  lockstep   23.446 ms ( 1020 evaluations)  threads   52.162 ms ( 1020 evaluations)
+  pair  9  lockstep   21.200 ms ( 1076 evaluations)  threads   20.609 ms ( 1076 evaluations)
+  pair 10  lockstep   22.454 ms ( 1062 evaluations)  threads   19.916 ms ( 1062 evaluations)
+  pair 11  lockstep   19.652 ms ( 1048 evaluations)  threads   19.516 ms ( 1048 evaluations)
+  pair 12  lockstep   25.962 ms ( 1048 evaluations)  threads   18.968 ms ( 1048 evaluations)
+  pair 13  lockstep   22.448 ms ( 1032 evaluations)  threads   30.298 ms ( 1032 evaluations)
+  pair 14  lockstep   23.855 ms ( 1066 evaluations)  threads   15.765 ms ( 1066 evaluations)
+  pair 15  lockstep   23.485 ms ( 1078 evaluations)  threads   16.622 ms ( 1078 evaluations)
+  pair 16  lockstep   27.216 ms ( 1064 evaluations)  threads   16.161 ms ( 1064 evaluations)
+  pair 17  lockstep   32.798 ms ( 1094 evaluations)  threads   19.004 ms ( 1094 evaluations)
+  pair 18  lockstep   44.562 ms ( 1044 evaluations)  threads   17.780 ms ( 1044 evaluations)
+  pair 19  lockstep   21.203 ms ( 1076 evaluations)  threads   18.176 ms ( 1076 evaluations)
+  pair 20  lockstep   22.072 ms ( 1036 evaluations)  threads   14.474 ms ( 1036 evaluations)
+  pair 21  lockstep   22.709 ms ( 1066 evaluations)  threads   19.400 ms ( 1066 evaluations)
+  pair 22  lockstep   24.769 ms ( 1108 evaluations)  threads   18.138 ms ( 1108 evaluations)
+  pair 23  lockstep   27.706 ms ( 1070 evaluations)  threads   21.805 ms ( 1070 evaluations)
+  pair 24  lockstep   28.618 ms ( 1072 evaluations)  threads   36.362 ms ( 1072 evaluations)
+  pair 25  lockstep   30.007 ms ( 1072 evaluations)  threads   17.865 ms ( 1072 evaluations)
+  pair 26  lockstep   25.447 ms ( 1062 evaluations)  threads   16.367 ms ( 1062 evaluations)
+  pair 27  lockstep   23.760 ms ( 1056 evaluations)  threads   15.692 ms ( 1056 evaluations)
+  pair 28  lockstep   24.723 ms ( 1050 evaluations)  threads   16.471 ms ( 1050 evaluations)
+  pair 29  lockstep   20.902 ms ( 1056 evaluations)  threads   35.258 ms ( 1056 evaluations)
+  pair 30  lockstep   22.427 ms ( 1060 evaluations)  threads   14.030 ms ( 1060 evaluations)
+  per round              lockstep     4.62 ms, threads     3.56 ms (medians); lockstep/threads 1.37 (quartiles 1.14–1.52), threads no slower in 26 of 30 pairs
+  per evaluation         lockstep    21.77 µs, threads    16.56 µs (medians); lockstep/threads 1.37 (quartiles 1.14–1.52), threads no slower in 26 of 30 pairs
+
+The Pathfinder start: 12 pairs, a new seed per pair
+  pair  1  lockstep   136.81 ms  threads   101.67 ms
+  pair  2  lockstep   117.95 ms  threads   105.49 ms
+  pair  3  lockstep   149.34 ms  threads   114.74 ms
+  pair  4  lockstep   148.62 ms  threads   121.55 ms
+  pair  5  lockstep   128.15 ms  threads   109.56 ms
+  pair  6  lockstep   115.92 ms  threads    83.93 ms
+  pair  7  lockstep   147.44 ms  threads    93.81 ms
+  pair  8  lockstep   139.12 ms  threads    74.03 ms
+  pair  9  lockstep   124.54 ms  threads    89.45 ms
+  pair 10  lockstep   112.50 ms  threads   108.71 ms
+  pair 11  lockstep   123.30 ms  threads   103.96 ms
+  pair 12  lockstep   136.57 ms  threads    83.83 ms
+  start                  lockstep   132.36 ms, threads   102.82 ms (medians); lockstep/threads 1.32 (quartiles 1.18–1.44), threads no slower in 12 of 12 pairs
+
+A fit of 20 burn-in and 20 SA iterations (5 MCMC burn-in sweeps): 12 pairs, the same seed within a pair
+  pair  1  lockstep    867.9 ms (GC   85.8)  threads    729.0 ms (GC   84.7)  largest |Δθ| 6.99e-13  |Δσ| 6.22e-15
+  pair  2  lockstep    753.6 ms (GC   80.7)  threads    663.3 ms (GC   76.2)  largest |Δθ| 6.45e-13  |Δσ| 1.44e-15
+  pair  3  lockstep    764.5 ms (GC   79.2)  threads    689.7 ms (GC   78.8)  largest |Δθ| 1.37e-10  |Δσ| 3.48e-11
+  pair  4  lockstep    725.5 ms (GC   76.7)  threads    642.1 ms (GC   77.0)  largest |Δθ| 5.51e-13  |Δσ| 1.74e-14
+  pair  5  lockstep    748.7 ms (GC   77.2)  threads    651.9 ms (GC   80.1)  largest |Δθ| 1.64e-13  |Δσ| 4.88e-15
+  pair  6  lockstep    739.9 ms (GC   77.4)  threads    691.9 ms (GC   86.8)  largest |Δθ| 1.73e-14  |Δσ| 7.11e-15
+  pair  7  lockstep    738.1 ms (GC   77.9)  threads    725.8 ms (GC   89.7)  largest |Δθ| 5.01e-13  |Δσ| 4.55e-15
+  pair  8  lockstep    763.4 ms (GC   79.1)  threads    693.8 ms (GC   83.4)  largest |Δθ| 3.92e-12  |Δσ| 4.55e-15
+  pair  9  lockstep    717.6 ms (GC   76.8)  threads    669.3 ms (GC   78.9)  largest |Δθ| 7.64e-14  |Δσ| 2.44e-13
+  pair 10  lockstep    791.0 ms (GC   80.7)  threads    673.1 ms (GC   77.2)  largest |Δθ| 5.84e-12  |Δσ| 1.32e-13
+  pair 11  lockstep    834.2 ms (GC   85.0)  threads    696.9 ms (GC   83.3)  largest |Δθ| 8.20e-14  |Δσ| 1.11e-16
+  pair 12  lockstep    833.7 ms (GC   83.8)  threads    664.9 ms (GC   76.9)  largest |Δθ| 2.89e-15  |Δσ| 2.22e-16
+  fit                    lockstep   758.53 ms, threads   681.41 ms (medians); lockstep/threads 1.13 (quartiles 1.09–1.18), threads no slower in 12 of 12 pairs
+
+The kernel's share of the fit, start plus 45 rounds: lockstep 45%, threads 39%
+Evaluators the model's pool prepared: 2
+LOAD after 80:8 at 2 threads: 2.75 4.45 4.65
+LOAD before 80:80 at 1 threads: 2.75 4.45 4.65
+
+══ 80 subjects × 80 observations, 1 thread(s), 1 GC thread(s), a grant of 2 CPU(s) ══
+Julia 1.10.12, NLMEEstimation 0.2.8, WarmupHMC 0.2.11, BayesianRegressionModels 0.2.199, Enzyme 0.13.218
+
+A conditional_loglikelihoods_and_gradients call by the subjects it lists (median of 21)
+    1 subjects:      11.9 µs,   11.91 µs per subject
+    2 subjects:      21.8 µs,   10.92 µs per subject
+    4 subjects:      39.6 µs,    9.89 µs per subject
+   20 subjects:     198.0 µs,    9.90 µs per subject
+   79 subjects:     933.3 µs,   11.81 µs per subject
+   80 subjects:     258.6 µs,    3.23 µs per subject
+
+The work in a round: 200 lockstep rounds at the starting point
+  evaluations per subject and round: mean 2.6, range 1–7
+  subject evaluations per round: 207; lockstep's batched calls per round: 5.6, of which every subject waiting: 1.0
+  the longest chain bounds threads at 36.8× on any number of threads
+
+Rounds: 30 pairs of 5 rounds from one start per route, after 20 warm rounds
+  pair  1  lockstep   30.107 ms ( 1066 evaluations)  threads   36.086 ms ( 1066 evaluations)
+  pair  2  lockstep   28.036 ms ( 1034 evaluations)  threads   33.139 ms ( 1034 evaluations)
+  pair  3  lockstep   31.781 ms ( 1044 evaluations)  threads   59.114 ms ( 1044 evaluations)
+  pair  4  lockstep   32.217 ms ( 1056 evaluations)  threads   32.881 ms ( 1056 evaluations)
+  pair  5  lockstep   28.419 ms ( 1044 evaluations)  threads   40.952 ms ( 1044 evaluations)
+  pair  6  lockstep   28.292 ms ( 1034 evaluations)  threads   32.273 ms ( 1034 evaluations)
+  pair  7  lockstep   23.651 ms ( 1010 evaluations)  threads   33.177 ms ( 1010 evaluations)
+  pair  8  lockstep   27.459 ms ( 1044 evaluations)  threads   41.922 ms ( 1044 evaluations)
+  pair  9  lockstep   24.884 ms ( 1016 evaluations)  threads   32.109 ms ( 1016 evaluations)
+  pair 10  lockstep   24.716 ms ( 1000 evaluations)  threads   30.990 ms ( 1000 evaluations)
+  pair 11  lockstep   38.599 ms ( 1074 evaluations)  threads   33.349 ms ( 1074 evaluations)
+  pair 12  lockstep   29.666 ms ( 1030 evaluations)  threads   35.324 ms ( 1030 evaluations)
+  pair 13  lockstep   29.731 ms ( 1036 evaluations)  threads   48.345 ms ( 1036 evaluations)
+  pair 14  lockstep   27.529 ms ( 1022 evaluations)  threads   39.258 ms ( 1022 evaluations)
+  pair 15  lockstep   31.212 ms ( 1046 evaluations)  threads   38.114 ms ( 1046 evaluations)
+  pair 16  lockstep   28.896 ms ( 1032 evaluations)  threads   73.282 ms ( 1032 evaluations)
+  pair 17  lockstep   27.406 ms ( 1042 evaluations)  threads   41.771 ms ( 1042 evaluations)
+  pair 18  lockstep   38.465 ms ( 1032 evaluations)  threads   37.161 ms ( 1032 evaluations)
+  pair 19  lockstep   34.795 ms ( 1010 evaluations)  threads   37.112 ms ( 1010 evaluations)
+  pair 20  lockstep   33.136 ms ( 1032 evaluations)  threads   32.912 ms ( 1032 evaluations)
+  pair 21  lockstep   43.119 ms ( 1014 evaluations)  threads   39.955 ms ( 1014 evaluations)
+  pair 22  lockstep   27.495 ms ( 1030 evaluations)  threads   38.212 ms ( 1030 evaluations)
+  pair 23  lockstep   31.770 ms ( 1018 evaluations)  threads   44.223 ms ( 1018 evaluations)
+  pair 24  lockstep   29.782 ms ( 1022 evaluations)  threads   31.075 ms ( 1022 evaluations)
+  pair 25  lockstep   25.581 ms ( 1056 evaluations)  threads   31.448 ms ( 1056 evaluations)
+  pair 26  lockstep   27.283 ms ( 1008 evaluations)  threads   41.283 ms ( 1008 evaluations)
+  pair 27  lockstep   25.143 ms ( 1042 evaluations)  threads   33.456 ms ( 1042 evaluations)
+  pair 28  lockstep   37.002 ms ( 1044 evaluations)  threads   30.986 ms ( 1044 evaluations)
+  pair 29  lockstep   26.095 ms ( 1032 evaluations)  threads   32.033 ms ( 1032 evaluations)
+  pair 30  lockstep   25.817 ms ( 1022 evaluations)  threads   31.859 ms ( 1022 evaluations)
+  per round              lockstep     5.73 ms, threads     7.14 ms (medians); lockstep/threads 0.81 (quartiles 0.70–0.92), threads no slower in 5 of 30 pairs
+  per evaluation         lockstep    27.68 µs, threads    34.07 µs (medians); lockstep/threads 0.81 (quartiles 0.70–0.92), threads no slower in 5 of 30 pairs
+
+The Pathfinder start: 12 pairs, a new seed per pair
+  pair  1  lockstep   176.10 ms  threads   221.92 ms
+  pair  2  lockstep   201.45 ms  threads   211.17 ms
+  pair  3  lockstep   189.31 ms  threads   214.31 ms
+  pair  4  lockstep   180.89 ms  threads   211.16 ms
+  pair  5  lockstep   198.44 ms  threads   213.40 ms
+  pair  6  lockstep   201.32 ms  threads   201.67 ms
+  pair  7  lockstep   226.36 ms  threads   215.56 ms
+  pair  8  lockstep   182.67 ms  threads   204.67 ms
+  pair  9  lockstep   210.09 ms  threads   238.53 ms
+  pair 10  lockstep   195.67 ms  threads   219.73 ms
+  pair 11  lockstep   192.53 ms  threads   220.44 ms
+  pair 12  lockstep   201.12 ms  threads   230.52 ms
+  start                  lockstep   197.06 ms, threads   214.93 ms (medians); lockstep/threads 0.89 (quartiles 0.87–0.94), threads no slower in 1 of 12 pairs
+
+A fit of 20 burn-in and 20 SA iterations (5 MCMC burn-in sweeps): 12 pairs, the same seed within a pair
+  pair  1  lockstep    928.2 ms (GC   71.0)  threads   1010.2 ms (GC   74.2)  largest |Δθ| 8.19e-14  |Δσ| 0.00e+00
+  pair  2  lockstep    917.4 ms (GC   86.6)  threads    948.1 ms (GC   69.5)  largest |Δθ| 2.78e-16  |Δσ| 1.11e-16
+  pair  3  lockstep    868.1 ms (GC   66.9)  threads    959.2 ms (GC   71.8)  largest |Δθ| 1.05e-15  |Δσ| 1.11e-16
+  pair  4  lockstep    950.2 ms (GC   69.7)  threads   1008.6 ms (GC   74.2)  largest |Δθ| 0.00e+00  |Δσ| 1.11e-16
+  pair  5  lockstep    896.4 ms (GC   66.8)  threads    886.0 ms (GC   69.5)  largest |Δθ| 1.73e-14  |Δσ| 1.11e-16
+  pair  6  lockstep    923.6 ms (GC   69.8)  threads    897.6 ms (GC   67.1)  largest |Δθ| 7.22e-16  |Δσ| 1.11e-16
+  pair  7  lockstep   1011.2 ms (GC   70.2)  threads    938.3 ms (GC   69.4)  largest |Δθ| 8.44e-15  |Δσ| 0.00e+00
+  pair  8  lockstep    830.7 ms (GC   64.7)  threads   1002.4 ms (GC   71.2)  largest |Δθ| 1.82e-14  |Δσ| 1.11e-16
+  pair  9  lockstep    866.9 ms (GC   67.1)  threads    902.5 ms (GC   67.0)  largest |Δθ| 8.88e-16  |Δσ| 0.00e+00
+  pair 10  lockstep    857.9 ms (GC   66.3)  threads    989.4 ms (GC   70.8)  largest |Δθ| 2.78e-15  |Δσ| 0.00e+00
+  pair 11  lockstep    881.6 ms (GC   66.3)  threads    878.0 ms (GC   66.4)  largest |Δθ| 4.44e-16  |Δσ| 0.00e+00
+  pair 12  lockstep    915.0 ms (GC   72.8)  threads    879.2 ms (GC   66.2)  largest |Δθ| 1.85e-14  |Δσ| 1.11e-16
+  fit                    lockstep   905.72 ms, threads   943.20 ms (medians); lockstep/threads 0.96 (quartiles 0.92–1.02), threads no slower in 5 of 12 pairs
+
+The kernel's share of the fit, start plus 45 rounds: lockstep 50%, threads 57%
+Evaluators the model's pool prepared: 1
+LOAD after 80:80 at 1 threads: 3.83 3.99 4.32
+LOAD before 80:80 at 2 threads: 3.83 3.99 4.32
+
+══ 80 subjects × 80 observations, 2 thread(s), 1 GC thread(s), a grant of 2 CPU(s) ══
+Julia 1.10.12, NLMEEstimation 0.2.8, WarmupHMC 0.2.11, BayesianRegressionModels 0.2.199, Enzyme 0.13.218
+
+A conditional_loglikelihoods_and_gradients call by the subjects it lists (median of 21)
+    1 subjects:      10.7 µs,   10.70 µs per subject
+    2 subjects:      20.1 µs,   10.04 µs per subject
+    4 subjects:      39.1 µs,    9.78 µs per subject
+   20 subjects:     195.4 µs,    9.77 µs per subject
+   79 subjects:     769.9 µs,    9.75 µs per subject
+   80 subjects:     339.0 µs,    4.24 µs per subject
+
+The work in a round: 200 lockstep rounds at the starting point
+  evaluations per subject and round: mean 2.6, range 1–7
+  subject evaluations per round: 207; lockstep's batched calls per round: 5.6, of which every subject waiting: 1.0
+  the longest chain bounds threads at 36.8× on any number of threads
+
+Rounds: 30 pairs of 5 rounds from one start per route, after 20 warm rounds
+  pair  1  lockstep   31.391 ms ( 1066 evaluations)  threads   24.211 ms ( 1066 evaluations)
+  pair  2  lockstep   31.243 ms ( 1034 evaluations)  threads   28.007 ms ( 1034 evaluations)
+  pair  3  lockstep   58.934 ms ( 1044 evaluations)  threads   20.254 ms ( 1044 evaluations)
+  pair  4  lockstep   28.327 ms ( 1056 evaluations)  threads   18.857 ms ( 1056 evaluations)
+  pair  5  lockstep   27.527 ms ( 1044 evaluations)  threads   17.716 ms ( 1044 evaluations)
+  pair  6  lockstep   64.362 ms ( 1034 evaluations)  threads   17.204 ms ( 1034 evaluations)
+  pair  7  lockstep   24.910 ms ( 1010 evaluations)  threads   21.487 ms ( 1010 evaluations)
+  pair  8  lockstep   29.112 ms ( 1044 evaluations)  threads   20.786 ms ( 1044 evaluations)
+  pair  9  lockstep   25.938 ms ( 1016 evaluations)  threads   16.808 ms ( 1016 evaluations)
+  pair 10  lockstep   30.644 ms ( 1000 evaluations)  threads   32.011 ms ( 1000 evaluations)
+  pair 11  lockstep   29.847 ms ( 1074 evaluations)  threads   21.953 ms ( 1074 evaluations)
+  pair 12  lockstep   28.024 ms ( 1030 evaluations)  threads   19.066 ms ( 1030 evaluations)
+  pair 13  lockstep   26.769 ms ( 1036 evaluations)  threads   31.652 ms ( 1036 evaluations)
+  pair 14  lockstep   32.004 ms ( 1022 evaluations)  threads   17.205 ms ( 1022 evaluations)
+  pair 15  lockstep   26.930 ms ( 1046 evaluations)  threads   20.640 ms ( 1046 evaluations)
+  pair 16  lockstep   27.669 ms ( 1032 evaluations)  threads   17.695 ms ( 1032 evaluations)
+  pair 17  lockstep   39.125 ms ( 1042 evaluations)  threads   19.932 ms ( 1042 evaluations)
+  pair 18  lockstep   31.092 ms ( 1032 evaluations)  threads   16.334 ms ( 1032 evaluations)
+  pair 19  lockstep   36.091 ms ( 1010 evaluations)  threads   17.892 ms ( 1010 evaluations)
+  pair 20  lockstep   27.131 ms ( 1032 evaluations)  threads   17.256 ms ( 1032 evaluations)
+  pair 21  lockstep   38.973 ms ( 1014 evaluations)  threads   18.956 ms ( 1014 evaluations)
+  pair 22  lockstep   36.514 ms ( 1030 evaluations)  threads   18.172 ms ( 1030 evaluations)
+  pair 23  lockstep   31.595 ms ( 1018 evaluations)  threads   19.222 ms ( 1018 evaluations)
+  pair 24  lockstep   43.008 ms ( 1022 evaluations)  threads   16.821 ms ( 1022 evaluations)
+  pair 25  lockstep   27.458 ms ( 1056 evaluations)  threads   19.148 ms ( 1056 evaluations)
+  pair 26  lockstep   25.767 ms ( 1008 evaluations)  threads   18.315 ms ( 1008 evaluations)
+  pair 27  lockstep   23.321 ms ( 1042 evaluations)  threads   19.972 ms ( 1042 evaluations)
+  pair 28  lockstep   26.487 ms ( 1044 evaluations)  threads   38.151 ms ( 1044 evaluations)
+  pair 29  lockstep   32.622 ms ( 1032 evaluations)  threads   22.640 ms ( 1032 evaluations)
+  pair 30  lockstep   25.614 ms ( 1022 evaluations)  threads   17.142 ms ( 1022 evaluations)
+  per round              lockstep     5.90 ms, threads     3.82 ms (medians); lockstep/threads 1.50 (quartiles 1.32–1.89), threads no slower in 27 of 30 pairs
+  per evaluation         lockstep    27.84 µs, threads    18.60 µs (medians); lockstep/threads 1.50 (quartiles 1.32–1.89), threads no slower in 27 of 30 pairs
+
+The Pathfinder start: 12 pairs, a new seed per pair
+  pair  1  lockstep   182.05 ms  threads   117.73 ms
+  pair  2  lockstep   225.30 ms  threads   130.13 ms
+  pair  3  lockstep   224.06 ms  threads   130.17 ms
+  pair  4  lockstep   190.68 ms  threads   124.94 ms
+  pair  5  lockstep   207.88 ms  threads   119.38 ms
+  pair  6  lockstep   201.58 ms  threads   114.27 ms
+  pair  7  lockstep   217.34 ms  threads   131.90 ms
+  pair  8  lockstep   181.01 ms  threads   116.21 ms
+  pair  9  lockstep   195.77 ms  threads   115.28 ms
+  pair 10  lockstep   190.73 ms  threads   118.59 ms
+  pair 11  lockstep   187.33 ms  threads   120.79 ms
+  pair 12  lockstep   203.41 ms  threads   139.35 ms
+  start                  lockstep   198.68 ms, threads   120.09 ms (medians); lockstep/threads 1.63 (quartiles 1.55–1.72), threads no slower in 12 of 12 pairs
+
+A fit of 20 burn-in and 20 SA iterations (5 MCMC burn-in sweeps): 12 pairs, the same seed within a pair
+  pair  1  lockstep    799.0 ms (GC   63.3)  threads    748.1 ms (GC   75.0)  largest |Δθ| 8.19e-14  |Δσ| 0.00e+00
+  pair  2  lockstep    879.1 ms (GC   81.0)  threads    765.0 ms (GC   72.4)  largest |Δθ| 2.78e-16  |Δσ| 1.11e-16
+  pair  3  lockstep    828.2 ms (GC   64.6)  threads    724.0 ms (GC   66.3)  largest |Δθ| 1.05e-15  |Δσ| 1.11e-16
+  pair  4  lockstep    877.1 ms (GC   65.8)  threads    769.6 ms (GC   72.2)  largest |Δθ| 0.00e+00  |Δσ| 1.11e-16
+  pair  5  lockstep    859.5 ms (GC   68.1)  threads    778.5 ms (GC   71.7)  largest |Δθ| 1.73e-14  |Δσ| 1.11e-16
+  pair  6  lockstep    843.3 ms (GC   63.2)  threads    721.6 ms (GC   71.3)  largest |Δθ| 7.22e-16  |Δσ| 1.11e-16
+  pair  7  lockstep    808.5 ms (GC   63.9)  threads    741.8 ms (GC   69.7)  largest |Δθ| 8.44e-15  |Δσ| 0.00e+00
+  pair  8  lockstep    841.3 ms (GC   64.8)  threads    758.0 ms (GC   70.8)  largest |Δθ| 1.82e-14  |Δσ| 1.11e-16
+  pair  9  lockstep    837.4 ms (GC   64.4)  threads    780.2 ms (GC   69.0)  largest |Δθ| 8.88e-16  |Δσ| 0.00e+00
+  pair 10  lockstep    880.0 ms (GC   66.1)  threads    713.8 ms (GC   66.9)  largest |Δθ| 2.78e-15  |Δσ| 0.00e+00
+  pair 11  lockstep    815.5 ms (GC   63.3)  threads    745.4 ms (GC   70.0)  largest |Δθ| 4.44e-16  |Δσ| 0.00e+00
+  pair 12  lockstep    801.4 ms (GC   63.3)  threads    751.1 ms (GC   70.2)  largest |Δθ| 1.85e-14  |Δσ| 1.11e-16
+  fit                    lockstep   839.35 ms, threads   749.60 ms (medians); lockstep/threads 1.11 (quartiles 1.09–1.15), threads no slower in 12 of 12 pairs
+
+The kernel's share of the fit, start plus 45 rounds: lockstep 55%, threads 39%
+Evaluators the model's pool prepared: 2
+LOAD after 80:80 at 2 threads: 5.86 5.57 5.04
+Run conditions: fleet job ef7e51a927454a90 on strato2, 8 logical CPUs, 4 cores; HOST_LOAD at=grant 2.60/2.10/3.01, at=release 5.86/5.57/5.04; CPU_CAP cpus=2.
