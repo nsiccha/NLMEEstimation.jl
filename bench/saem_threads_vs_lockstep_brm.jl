@@ -197,8 +197,9 @@ measure_work()
 round_times = measure_rounds()
 start_times = measure_starts()
 fit_times = measure_fits()
-kernel = start_times .+ (OPTIONS.iterations + OPTIONS.mcmc_burnin) .* round_times
+kernel_times = start_times .+ (OPTIONS.iterations + OPTIONS.mcmc_burnin) .* round_times
 report(@sprintf("\nThe kernel's share of the fit, start plus %d rounds: lockstep %.0f%%, threads %.0f%%",
-    OPTIONS.iterations + OPTIONS.mcmc_burnin, 100kernel[1] / fit_times[1], 100kernel[2] / fit_times[2]))
+    OPTIONS.iterations + OPTIONS.mcmc_burnin, 100kernel_times[1] / fit_times[1],
+    100kernel_times[2] / fit_times[2]))
 report("Evaluators the model's pool prepared: ", MODEL.cell_gradient.evaluators.count[])
 close(OUTPUT)
