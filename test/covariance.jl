@@ -180,6 +180,58 @@ end
     end
 end
 
+@testset "check_protocol: a model's own Laplace at another local mode" begin
+    # With b_i ∈ {0.05, 0.1} a subject's complete-data density has local modes
+    # near 0.75 and -0.65 (b_i = 0.2 only the first). The model's own search starts
+    # at η = 1 and ends at the higher mode; the package's from η = -0.5 at the lower.
+    b = [0.05, 0.1, 0.2]
+    for layout in (NLMELayout(0, 0, [1]), RaggedNLMELayout(ntheta = 0, nsigma = 0,
+            family_sizes = [1], subject_families = [[1], [1], [1]]))
+        well = DoubleWell(layout, 1.5, b)
+        θ, σ = Float64[], Float64[]
+        ω = omega_parameters(layout, layout isa NLMELayout ? [1.0;;] : [[1.0;;]])
+        @test ω == [0.0]   # the prior variance exp(2ω₁) ModeHooked assumes
+        low = layout isa NLMELayout ? fill(-0.5, 1, 3) : [[-0.5] for _ in 1:3]
+        lower = empirical_bayes(well, θ, σ, ω; η0 = low)
+        higher = [first(TestCommon.well_laplace(ModeHooked(well), i, ω)) for i in 1:3]
+        @test all(k -> only(NE._eta_column(lower.modes, k)) < 0, 1:2)
+        @test all(>(0), higher)
+
+        # laplace_conditional_moments reports the model's modes: the reference
+        # starts there.
+        @test check_protocol(ModeHooked(well), θ, σ, ω; η = low)
+        @test check_protocol(ModeHooked(well), θ, σ, ω)
+
+        # Without it the reference starts from η, and a mismatch names the cause.
+        err = try
+            check_protocol(ModeHooked(well; moments = false), θ, σ, ω; η = low)
+        catch e
+            e
+        end
+        @test err isa ProtocolViolation
+        @test occursin("subject 1: laplace_marginals_and_gradient value", err.message)
+        @test occursin("several local modes", err.message)
+        @test check_protocol(ModeHooked(well; moments = false), θ, σ, ω)   # η = 0
+        near = layout isa NLMELayout ? fill(0.5, 1, 3) : [[0.5] for _ in 1:3]
+        @test check_protocol(ModeHooked(well; moments = false), θ, σ, ω; η = near)
+
+        # Wrong values at the right modes, values the two methods disagree on, and
+        # reported modes that are not modes.
+        message(model) = try
+            check_protocol(model, θ, σ, ω; η = low)
+            ""
+        catch e
+            e isa ProtocolViolation || rethrow()
+            e.message
+        end
+        @test occursin("at the model's own mode", message(ModeHooked(well; shift = 1e-3)))
+        @test occursin("both are the subject's Laplace marginal",
+            message(ModeHooked(well; drift = 1e-3)))
+        @test occursin("is not a mode of the complete-data density",
+            message(ModeHooked(well; misplace = 0.2)))
+    end
+end
+
 @testset "covariance step: one-compartment FOCEI" begin
     model, _ = simulated_model(seed = 21, nsubjects = 16)
     ω = omega_parameters(nlme_layout(model), Ω_SIM)

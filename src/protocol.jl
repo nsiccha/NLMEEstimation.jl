@@ -371,7 +371,12 @@ With [`provides_laplace_gradient`](@ref), a `covariance_step` with
 `AdaptiveGaussHermite(nodes = 1)` calls only this method and the population
 prior: `2p + 1` calls for `p` coordinates, with no mode search and no conditional
 evaluation of its own. [`check_protocol`](@ref) compares its values with the
-package's Laplace approximation and its gradient with a central difference.
+package's Laplace approximation and its gradient with a central difference. Where
+a subject's complete-data density has several local modes, `η̂_i` is the one the
+model's search reaches from `H`, and `check_protocol` compares at it when the
+model reports its modes through [`laplace_conditional_moments`](@ref) with every
+family integrated; without that method the package's search starts from the
+checked η, and can end at another mode.
 
 It is [`laplace_conditionals_and_population_gradient`](@ref) with every family
 integrated, which is the default: a model that implements that method only
