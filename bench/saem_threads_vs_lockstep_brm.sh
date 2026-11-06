@@ -8,7 +8,7 @@
 #       -- bash bench/saem_threads_vs_lockstep_brm.sh
 set -euo pipefail
 root=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
-brm_sha=${BRM_SHA:-7aee63944b7d04bde027f38085d6bda1013de197} # BRM 0.2.199, ns/devibe
+brm_sha=${BRM_SHA:-352e01fe3c9df0d398e6d909ea0ac144565ab3b7} # BRM 0.2.216, ns/devibe
 work=${BENCH_WORK:-${TMPDIR:-/tmp}/saem-threads-vs-lockstep}
 results=${BENCH_RESULTS:-$root/bench/saem_threads_vs_lockstep_brm_results.txt}
 cpus=${KB_COMPUTE_CPUS:-2}
