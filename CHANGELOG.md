@@ -14,6 +14,24 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.9
+
+- `check_protocol` compares a model's own Laplace marginals
+  (`provides_laplace_gradient`, `laplace_marginals_and_gradient`) with the
+  package's at the model's own modes. A subject whose complete-data density has
+  several local modes has a Laplace value at each, and the reference used to start
+  its search from the checked `η` alone, so a correct hook whose own search ended
+  at another mode failed with `laplace_marginals_and_gradient value … differs from
+  the package's Laplace approximation …` (a BRM model, one subject of ten, with
+  modes 2.36 apart in η at complete-data log-densities -77.90 and -79.68). A
+  model that implements `laplace_conditional_moments` for every family
+  integrated, as BRM's does, now has the reference started at the modes it
+  reports there; `check_protocol` also checks that those modes are modes and that
+  its values equal the hook's. Without
+  that method the reference still starts from `η`, and the mismatch message now
+  names the mode the package reached and the two ways to compare at the model's
+  modes. Values, gradients and every other check are unchanged.
+
 ## 0.2.8
 
 - Clarify the seeded-equality contract of `WarmupHMCNUTS(threads = true)`:

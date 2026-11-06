@@ -19,6 +19,7 @@ import Optim
 export θ_SIM, σ_SIM, Ω_SIM, simulated_model, θ_THEOPH, σ_THEOPH, Ω_THEOPH, theoph_model,
     JointView, joint_reference, joint_logdensity, joint_conditional, REVERSE, RUNTIME_REVERSE, RUNTIME_HESSIAN, JOINT_HESSIAN,
     LinearGrowth, GROWTH_LAYOUT, growth_model, growth_exact, growth_exact_subject, LaplaceHooked,
+    ModeHooked,
     RaggedOccasions, occasions_model, occasions_exact, occasions_exact_subject,
     occasions_exact_nested, occasions_unit_posterior, DoubleWell, SteepWell, GradientOnly,
     SparseDeclared, NestedWells, nested_wells, QuadraticEta, occasions_pattern, occasions_sparse, OccasionsBlocks, PoissonOccasions,
@@ -380,6 +381,66 @@ function NE.laplace_marginals_and_gradient(m::LaplaceHooked, subjects, θ, σ, �
     g = m.scale .* ForwardDiff.gradient(y -> sum(i -> m.marginal(m.inner, i, y), subjects), x)
     nθ, nσ = length(θ), length(σ)
     return values, g[1:nθ], g[nθ+1:nθ+nσ], g[nθ+nσ+1:end]
+end
+
+# A `DoubleWell` (one η per subject, two local modes of the complete-data density
+# where b_i is small) behind its own Laplace marginals (`provides_laplace_gradient`),
+# as a joint program with its own mode search supplies them: Newton's method from
+# η = `from` whatever start it is given, so its mode can be another local mode than
+# the one the package's search reaches from the checked η. `ModeHooked{true}` also
+# reports its modes through `laplace_conditional_moments` with every family
+# integrated, `ModeHooked{false}` implements no such method. For check_protocol's
+# negative controls `shift` distorts the values, `drift` only the values the
+# moments report and `misplace` the modes they report. The prior variance of the
+# one family is exp(2ω₁).
+struct ModeHooked{Moments, L}
+    inner::DoubleWell{L}
+    from::Float64
+    shift::Float64
+    drift::Float64
+    misplace::Float64
+end
+ModeHooked(inner::DoubleWell{L}; moments = true, from = 1.0, shift = 0.0, drift = 0.0,
+    misplace = 0.0) where {L} = ModeHooked{moments, L}(inner, from, shift, drift, misplace)
+NE.nsubjects(m::ModeHooked) = NE.nsubjects(m.inner)
+NE.nlme_layout(m::ModeHooked) = NE.nlme_layout(m.inner)
+NE.provides_eta_hessian(::ModeHooked) = true
+NE.conditional_loglikelihood(m::ModeHooked, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood(m.inner, i, θ, σ, η)
+NE.conditional_loglikelihood_and_gradient(m::ModeHooked, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood_and_gradient(m.inner, i, θ, σ, η)
+NE.conditional_loglikelihood_gradient_and_hessian(m::ModeHooked, i::Integer, θ, σ, η) =
+    NE.conditional_loglikelihood_gradient_and_hessian(m.inner, i, θ, σ, η)
+NE.provides_laplace_gradient(::ModeHooked) = true
+
+# Subject i's mode by Newton's method from `m.from`, its Laplace marginal and the
+# Laplace variance at the mode.
+function well_laplace(m::ModeHooked, i, ω)
+    Ω = exp(2ω[1])
+    η = m.from + zero(Ω)
+    for _ in 1:100
+        _, g, H = NE.conditional_loglikelihood_gradient_and_hessian(m.inner, i, (), (), [η])
+        η -= (g[1] - η / Ω) / (H[1, 1] - 1 / Ω)
+    end
+    curvature = 1 / Ω - last(NE.conditional_loglikelihood_gradient_and_hessian(
+        m.inner, i, (), (), [η]))[1, 1]
+    complete = NE.conditional_loglikelihood(m.inner, i, (), (), [η]) - η^2 / (2Ω) -
+        log(2π * Ω) / 2
+    return η, complete + log(2π) / 2 - log(curvature) / 2 + m.shift, 1 / curvature
+end
+
+function NE.laplace_marginals_and_gradient(m::ModeHooked, subjects, θ, σ, ω, H)
+    values = [well_laplace(m, i, ω)[2] for i in subjects]
+    g = ForwardDiff.gradient(w -> sum(i -> well_laplace(m, i, w)[2], subjects), collect(ω))
+    return values, zeros(length(θ)), zeros(length(σ)), g
+end
+
+function NE.laplace_conditional_moments(m::ModeHooked{true}, F, subjects, θ, σ, ω, H)
+    F == [1] || throw(ArgumentError("ModeHooked has one family; integrated = $F"))
+    parts = [well_laplace(m, i, ω) for i in subjects]
+    return [p[2] + m.drift for p in parts],
+        NE._eta_batch(NE.nlme_layout(m), [[p[1] + m.misplace] for p in parts]),
+        [[fill(p[3], 1, 1)] for p in parts]
 end
 
 # Nested intercepts with unequal subject sizes: one subject-level effect a_i and

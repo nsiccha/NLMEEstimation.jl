@@ -48,7 +48,13 @@ subject):
   returns one value per subject and gradients of the lengths of θ, σ and ω, its
   values equal `marginal_loglikelihood` with `AdaptiveGaussHermite(nodes = 1)`
   (within `max(rtol, 1e-6)`), and its gradient along a random direction equals a
-  central difference of its values (within `max(rtol, 1e-5)`);
+  central difference of its values (within `max(rtol, 1e-5)`). A subject's
+  complete-data density can have several local modes, each with its own Laplace
+  value, so the reference is taken at the model's own modes where the model
+  implements [`laplace_conditional_moments`](@ref) for every family integrated:
+  its values must equal the hook's, and its modes must be modes (the package's
+  search from them stays within `max(rtol, 1e-5)`). Otherwise the reference
+  starts its search from `η`;
 - with `integrated` families (by default [`integrated_families`](@ref)):
   [`laplace_conditionals_and_gradients`](@ref), [`laplace_conditionals`](@ref)
   and [`laplace_conditional_moments`](@ref) agree in their values and shapes; the
@@ -243,12 +249,39 @@ function _check_laplace_gradient(violation, model, subjects, θ, σ, ω, H, rtol
         "laplace_marginals_and_gradient returned gradients of lengths " *
         "$(map(length, (gθ, gσ, gω))); expected $(map(length, (θ, σ, ω)))")
     tol = max(rtol, 1.0e-6)
-    reference = marginal_loglikelihood(model, θ, σ, ω; subjects = ids, η0 = H,
+    # A subject whose complete-data density has several local modes has a Laplace
+    # value at each, so the reference starts where the model's own search ended
+    # when the model reports it, and from the checked η otherwise.
+    modes = _laplace_hook_modes(violation, model, ids, θ, σ, ω, H, terms, tol)
+    ebe = empirical_bayes(model, θ, σ, ω; subjects = ids,
+        η0 = modes === nothing ? H : modes)
+    reference = marginal_loglikelihood(model, θ, σ, ω; subjects = ids, η0 = ebe,
         approximation = AdaptiveGaussHermite(nodes = 1)).subject_loglikelihoods
+    mtol = max(rtol, 1.0e-5)
     for (k, i) in enumerate(ids)
-        isapprox(terms[k], reference[k]; rtol = tol, atol = tol) || violation(
+        modes === nothing && continue
+        m, e = _column(modes, k), _eta_column(ebe.modes, k)
+        isapprox(e, m; rtol = mtol, atol = mtol) || violation(
+            "subject $i: the mode laplace_conditional_moments reports for every family " *
+            "integrated is not a mode of the complete-data density: the package's search " *
+            "from it moved by up to $(maximum(abs, e - m)), from complete-data log-density " *
+            "$(complete_data_loglikelihood(model, i, θ, σ, ω, m)) to " *
+            "$(ebe.complete_data_loglikelihood[k])")
+    end
+    for (k, i) in enumerate(ids)
+        isapprox(terms[k], reference[k]; rtol = tol, atol = tol) && continue
+        modes === nothing || violation(
             "subject $i: laplace_marginals_and_gradient value $(terms[k]) differs from the " *
-            "package's Laplace approximation $(reference[k])")
+            "package's Laplace approximation $(reference[k]) at the model's own mode " *
+            "(from laplace_conditional_moments, complete-data log-density " *
+            "$(ebe.complete_data_loglikelihood[k]))")
+        violation("subject $i: laplace_marginals_and_gradient value $(terms[k]) differs " *
+            "from the package's Laplace approximation $(reference[k]) at the mode its search " *
+            "reached from the checked η (complete-data log-density " *
+            "$(ebe.complete_data_loglikelihood[k])). Where the complete-data density has " *
+            "several local modes, the model's search may have ended at another one: a model " *
+            "that implements laplace_conditional_moments for every family integrated is " *
+            "compared at its own modes, and otherwise η can start the check near them")
     end
     rng = Xoshiro(0)
     dθ, dσ, dω = randn(rng, length(θ)), randn(rng, length(σ)), randn(rng, length(ω))
@@ -262,6 +295,29 @@ function _check_laplace_gradient(violation, model, subjects, θ, σ, ω, H, rtol
         "laplace_marginals_and_gradient's gradient along a random direction is " *
         "$directional, but a central difference of its values gives $difference")
     return nothing
+end
+
+# The modes behind a model's own Laplace marginals, where it reports them:
+# `laplace_conditional_moments` with every family integrated, whose values are
+# the same marginals. `nothing` for a model that does not implement it.
+function _laplace_hook_modes(violation, model, ids, θ, σ, ω, H, terms, tol)
+    args = (model, _families(nlme_layout(model)), ids, θ, σ, ω, H)
+    which(laplace_conditional_moments, Tuple{map(typeof, args)...}) ===
+        which(laplace_conditional_moments, NTuple{length(args), Any}) && return nothing
+    values, modes, _ = laplace_conditional_moments(args...)
+    length(values) == _nchains(modes) == length(ids) || violation(
+        "laplace_conditional_moments with every family integrated returned " *
+        "$(length(values)) values and $(_nchains(modes)) modes for $(length(ids)) subjects")
+    for (k, i) in enumerate(ids)
+        length(_column(modes, k)) == length(_column(H, k)) || violation(
+            "subject $i: laplace_conditional_moments returned a mode of length " *
+            "$(length(_column(modes, k))); expected $(length(_column(H, k)))")
+        isapprox(values[k], terms[k]; rtol = tol, atol = tol) || violation(
+            "subject $i: laplace_conditional_moments with every family integrated gives " *
+            "$(values[k]), laplace_marginals_and_gradient gives $(terms[k]); with every " *
+            "family integrated both are the subject's Laplace marginal")
+    end
+    return modes
 end
 
 _check_block_shapes(violation, agrees, ::Nothing, subjects, m) = nothing
