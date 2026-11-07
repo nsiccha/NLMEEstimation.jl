@@ -68,7 +68,7 @@ export NormalREPrior, RaggedNormalREPrior, re_prior, re_logprior, re_logprior_gr
     complete_data_loglikelihood, complete_data_loglikelihood_gradient_and_hessian
 export check_protocol, ProtocolViolation
 export empirical_bayes, posthoc, EBEMethod, NewtonEBE, QuasiNewtonEBE, default_ebe_method,
-    EBEOptions, EBEResult, RaggedEBEResult, EBEConvergenceError, ebe_covariances
+    EBEOptions, EBEResult, RaggedEBEResult, EBEConvergenceError, NonsmoothModeError, ebe_covariances
 export focei, focei_evaluate, FOCEOptions, FOCEResult, FOCEEvaluation
 export covariance_step, CovarianceResult, CovarianceStepError, FOCEApproximation,
     delta_method, omega_elements
@@ -86,6 +86,7 @@ include("matrixfree_curvature.jl")
 include("fixed_omega.jl")
 include("conformance.jl")
 include("empirical_bayes.jl")
+include("kinks.jl")
 include("focei.jl")
 include("saem.jl")
 include("ragged.jl")

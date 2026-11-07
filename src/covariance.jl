@@ -36,8 +36,8 @@ function _prepare_marginal(approximation::FOCEApproximation, model, θ, σ, ω, 
         "FOCEApproximation requires observation_model(model) = GaussianObservations()"))
     method = approximation.ebe_method === nothing ? default_ebe_method(model) :
         approximation.ebe_method
-    center = _run_empirical_bayes(model, θ, σ, ω, subjects, η0, method,
-        approximation.ebe_options, true, progress, false)
+    center = _smooth_modes(_run_empirical_bayes(model, θ, σ, ω, subjects, η0, method,
+        approximation.ebe_options, true, progress, false), "FOCEApproximation")
     return _PreparedFOCE(model, approximation, method, center)
 end
 

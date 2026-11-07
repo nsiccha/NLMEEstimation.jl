@@ -88,23 +88,30 @@ end
 default_ebe_method(model) = _reports_eta_hessians(model) ? NewtonEBE() : QuasiNewtonEBE()
 
 """
-    EBEOptions(; maxiter = 200, decrement_tol = 1e-14, gtol = 1e-8, max_backtracks = 30)
+    EBEOptions(; maxiter = 200, decrement_tol = 1e-14, gtol = 1e-8, max_backtracks = 30,
+               nonsmooth = true)
 
 Settings of [`empirical_bayes`](@ref).
 
-- `maxiter`: maximum number of iterations (accepted steps) per subject.
+- `maxiter`: maximum number of iterations (accepted steps) per subject, and again for
+  the search of a mode at a kink.
 - `decrement_tol`: [`NewtonEBE`](@ref) convergence, half the Newton decrement in
   log-density units.
 - `gtol`: [`QuasiNewtonEBE`](@ref) convergence, the standardized gradient `‖Lᵀg‖∞`.
 - `max_backtracks`: maximum trust-region reductions ([`NewtonEBE`](@ref)) or step
   halvings ([`QuasiNewtonEBE`](@ref)) per iteration before a subject is reported as
-  not converged.
+  not converged (or, with `nonsmooth`, searched for a mode at a kink).
+- `nonsmooth`: search for, and certify, a mode on a kink of the complete-data
+  log-density where the method finds no step that increases it (section "Modes at
+  kinks" of [`empirical_bayes`](@ref)). With `false` such a subject is reported as not
+  converged, as before NLMEEstimation 0.2.10.
 """
 Base.@kwdef struct EBEOptions
     maxiter::Int = 200
     decrement_tol::Float64 = 1.0e-14
     gtol::Float64 = 1.0e-8
     max_backtracks::Int = 30
+    nonsmooth::Bool = true
 end
 
 abstract type AbstractEBEResult end
@@ -124,6 +131,13 @@ subject `subjects[k]`.
   at η̂_i.
 - `converged`, `iterations`: per-subject solver diagnostics.
 - `gradient_norm`: the standardized complete-data gradient `‖Lᵀg‖∞` at η̂_i.
+- `nonsmooth`: `true` where η̂_i is a certified mode on a kink of the complete-data
+  log-density (section "Modes at kinks" of [`empirical_bayes`](@ref)), which has no
+  gradient or curvature there. Its `gradient_norm` is then the standardized norm of
+  the element nearest zero of the convex hull of the gradients sampled within 1e-6
+  prior standard deviations of η̂_i, and its `hessians` entry the Hessian the model
+  reports at η̂_i, which is that of one smooth piece. Computations that need the
+  curvature at the mode refuse such a subject with a [`NonsmoothModeError`](@ref).
 - `method`: the [`EBEMethod`](@ref) used.
 """
 struct EBEResult{T <: Real, HS <: Union{Nothing, Vector{Matrix{T}}, Vector{SparseMatrixCSC{T, Int}}},
@@ -136,6 +150,7 @@ struct EBEResult{T <: Real, HS <: Union{Nothing, Vector{Matrix{T}}, Vector{Spars
     converged::Vector{Bool}
     iterations::Vector{Int}
     gradient_norm::Vector{T}
+    nonsmooth::Vector{Bool}
     method::M
 end
 
@@ -145,7 +160,7 @@ end
 Empirical Bayes result for a [`RaggedNLMELayout`](@ref). `modes[k]` and
 `hessians[k]` have the actual dimension of `subjects[k]`, without padding; the
 Hessians are `SparseMatrixCSC`s when the model declares
-[`eta_hessian_sparsity`](@ref).
+[`eta_hessian_sparsity`](@ref). The other fields are [`EBEResult`](@ref)'s.
 """
 struct RaggedEBEResult{T <: Real, M <: EBEMethod} <: AbstractEBEResult
     subjects::Vector{Int}
@@ -156,6 +171,7 @@ struct RaggedEBEResult{T <: Real, M <: EBEMethod} <: AbstractEBEResult
     converged::Vector{Bool}
     iterations::Vector{Int}
     gradient_norm::Vector{T}
+    nonsmooth::Vector{Bool}
     method::M
 end
 
@@ -180,6 +196,34 @@ function Base.showerror(io::IO, e::EBEConvergenceError)
             print(io, "; the density is not concave there (its η Hessian is not negative definite)")
     end
     print(io, "\nPass `require_convergence = false` to inspect the partial result, or a warm start `η0`.")
+end
+
+"""
+    NonsmoothModeError(subjects, result, purpose)
+
+Thrown where a computation needs a subject's complete-data log-density to be smooth
+at its mode, and [`empirical_bayes`](@ref) found that mode on a kink of it
+(`result.nonsmooth`), where the density has no curvature: a Laplace approximation or
+adaptive Gauss–Hermite quadrature, importance sampling from a proposal scaled by that
+curvature, FOCE(I), CWRES, or [`ebe_covariances`](@ref). `purpose` names the
+computation; `result` holds every subject's mode.
+"""
+struct NonsmoothModeError{R <: AbstractEBEResult} <: Exception
+    subjects::Vector{Int}
+    result::R
+    purpose::String
+end
+function Base.showerror(io::IO, e::NonsmoothModeError)
+    print(io, "NonsmoothModeError: ", e.purpose, " needs the complete-data log-density to be ",
+        "smooth at each subject's mode, but the mode of subject(s) ", e.subjects, " lies on a kink ",
+        "of it, where it has no curvature (`nonsmooth` in the EBEResult `result`, which holds the modes).")
+end
+
+# The result, if no subject's mode lies on a kink; else a NonsmoothModeError for `purpose`.
+function _smooth_modes(result::AbstractEBEResult, purpose)
+    kinked = result.subjects[result.nonsmooth]
+    isempty(kinked) || throw(NonsmoothModeError(kinked, result, purpose))
+    return result
 end
 
 """
@@ -214,6 +258,32 @@ sums terms much larger than itself, such as observations far from zero with a sm
 residual SD. Near a mode, a full step whose predicted increase is below
 `√eps · max(1, |f|)` is therefore accepted unless f decreases by more than that. The
 convergence tests use gradients and Hessian blocks, which stay accurate there.
+
+# Modes at kinks
+
+A density that is only piecewise smooth (a running minimum, thresholds ordered by
+`min`, a clamp) can have its maximum on a kink, where it is the minimum of smooth
+pieces and its gradient does not vanish. There every step the method's local model
+predicts to climb crosses the kink, and the search stops with no step accepted. With
+`options.nonsmooth` (the default) such a subject is searched further by gradient
+sampling with the method's own metric (Burke, Lewis & Overton 2005; Curtis & Que
+2015): at each point gradients are sampled within a ball of 0.1 down to 1e-6 prior
+standard deviations, and the step comes from the combination of them that the
+method's metric makes smallest, which follows the kinks between the sampled pieces
+instead of crossing them. Each step makes `neta + 1` batched gradient calls for its
+samples, and Newton one batched Hessian call, while the search lasts.
+
+A point where that search stops is a mode on a kink (`result.nonsmooth`) when the
+second-order sufficient condition of the smooth problem `max t subject to t ≤ f_i`
+holds there: zero is in the convex hull of the sampled pieces' gradients, and the
+weighted sum of their Hessians is negative definite along the kinks (on the
+directions along which all of them change alike). The Hessians are the model's or
+those of its declared [`eta_hessian_sparsity`](@ref); a gradient-only model's are
+forward differences of its gradients. That check is exact for at most 36 such
+directions. Last, the density is evaluated 1e-3 prior standard deviations from the
+point along each coordinate, each sampled gradient and a few random directions, both
+ways, and a higher point restarts the search. A subject whose search ends on a smooth
+mode is reported as a smooth mode, and one that ends without either is not converged.
 
 `progress` is a Treebars node (or a backend symbol such as `:term`) under which an
 `Empirical Bayes (Newton)` or `(BFGS)` node reports the solver's iteration and how
@@ -272,10 +342,11 @@ const posthoc = empirical_bayes
 
 The Laplace (Gaussian) approximation of each subject's η posterior covariance,
 `(-H_i)⁻¹`, from the Hessians at the modes. Throws if the result carries no
-Hessians or some `-H_i` is not positive definite.
+Hessians or some `-H_i` is not positive definite, and a [`NonsmoothModeError`](@ref)
+if some mode lies on a kink.
 """
-ebe_covariances(result::EBEResult) = _ebe_covariances(result.hessians)
-ebe_covariances(result::RaggedEBEResult) = _ebe_covariances(result.hessians)
+ebe_covariances(result::AbstractEBEResult) =
+    _ebe_covariances(_smooth_modes(result, "ebe_covariances").hessians)
 _ebe_covariances(hessians::Vector) = [_laplace_covariance(H) for H in hessians]
 _laplace_covariance(H::AbstractMatrix) = inv(cholesky(Symmetric(-H)))
 # Dense: the covariance of a subject with a sparse Hessian is in general dense.
@@ -328,6 +399,7 @@ function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, op
     curvature = _initial_curvature(method, model, subjects, θ, σ, prior, H, G)
     converged = falses(n)
     failed = falses(n)
+    stalled = falses(n)
     iterations = zeros(Int, n)
     sweep = 0
     while true
@@ -352,6 +424,7 @@ function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, op
         accepted, trials, gains, rejected = _search_steps(method, model, subjects, θ, σ, prior, H, f, G,
             curvature, active, opt)
         failed[rejected] .= true
+        stalled[rejected] .= true
         isempty(accepted) && continue
         previous_G = _columns(G, accepted)
         Ha = _from_columns(H, [_column(H, k) + trial.step for (k, trial) in zip(accepted, trials)])
@@ -364,10 +437,25 @@ function _ebe_lockstep(method::EBEMethod, model, subjects, θ, σ, prior, H0, op
         _update_curvature!(method, curvature, model, subjects, θ, σ, prior, H, accepted,
             trials, gains, previous_G, Ga)
     end
-    hessians = _final_hessians(method, curvature, model, subjects, θ, σ, prior, H)
     gradient_norm = [_standardized_norm(prior, i, _column(G, k)) for (k, i) in enumerate(subjects)]
+    nonsmooth = falses(n)
+    ks = findall(stalled)
+    if opt.nonsmooth && !isempty(ks)
+        outcomes, norms = _kink_search!(method, curvature, model, subjects, θ, σ, prior, H, ℓ, f, G, ks,
+            iterations, opt, progress)
+        for (k, outcome, z) in zip(ks, outcomes, norms)
+            outcome === :none && continue
+            converged[k], failed[k] = true, false
+            nonsmooth[k] = outcome === :kink
+            gradient_norm[k] = outcome === :kink ? z : _standardized_norm(prior, subjects[k], _column(G, k))
+        end
+        for k in ks
+            converged[k] || (gradient_norm[k] = _standardized_norm(prior, subjects[k], _column(G, k)))
+        end
+    end
+    hessians = _final_hessians(method, curvature, model, subjects, θ, σ, prior, H)
     return _ebe_result(H, collect(subjects), hessians, ℓ, f, collect(converged), iterations,
-        gradient_norm, method)
+        gradient_norm, collect(nonsmooth), method)
 end
 
 # Trial steps for the active subjects: a step each, then batched value calls until
@@ -412,13 +500,14 @@ _set_columns!(X::AbstractVector{<:AbstractVector}, ks, Y) = (X[ks] = Y; X)
 _set_column!(X::AbstractMatrix, k, y) = (X[:, k] = y; X)
 _set_column!(X::AbstractVector{<:AbstractVector}, k, y) = (X[k] = y; X)
 
-_ebe_result(H::AbstractMatrix, subjects, hessians, ℓ, f, converged, iterations, gradient_norm, method) =
-    EBEResult(subjects, H, hessians, ℓ, f, converged, iterations, gradient_norm, method)
+_ebe_result(H::AbstractMatrix, subjects, hessians, ℓ, f, converged, iterations, gradient_norm,
+        nonsmooth, method) =
+    EBEResult(subjects, H, hessians, ℓ, f, converged, iterations, gradient_norm, nonsmooth, method)
 function _ebe_result(H::AbstractVector{<:AbstractVector}, subjects, hessians, ℓ, f, converged,
-        iterations, gradient_norm, method)
+        iterations, gradient_norm, nonsmooth, method)
     T = _eta_eltype(H)
     return RaggedEBEResult(subjects, H, hessians, Vector{T}(ℓ), Vector{T}(f), converged, iterations,
-        Vector{T}(gradient_norm), method)
+        Vector{T}(gradient_norm), nonsmooth, method)
 end
 
 # The lower Cholesky factor L of the prior covariance of subject i's η, Ω_i = LLᵀ;
@@ -734,21 +823,24 @@ function _update_curvature!(::QuasiNewtonEBE, state, model, subjects, θ, σ, pr
             _restart!(state, k)
             continue
         end
-        s = trials[j].step
-        y = _column(previous_G, j) - _column(Ga, j)
-        sy = dot(s, y)
-        if sy <= 0
+        _store_pair!(state, k, trials[j].step, _column(previous_G, j) - _column(Ga, j)) ||
             push!(upward, j)
-            continue
-        end
-        state.scales[k] = sy / dot(y, _covariance_times(state.priors[k], y))
-        pairs = state.pairs[k]
-        length(pairs) == state.memory && popfirst!(pairs)
-        push!(pairs, (copy(s), y, 1 / sy))
     end
     ks = accepted[upward]
     _store_hessians!(state, model, subjects, θ, σ, prior, ks, _columns(H, ks), _columns(Ga, upward))
     return state
+end
+
+# Stores subject k's pair (s, y), dropping the oldest beyond `memory`, and rescales γ,
+# if sᵀy > 0; returns whether it did.
+function _store_pair!(state::BFGSState, k, s, y)
+    sy = dot(s, y)
+    sy > 0 || return false
+    state.scales[k] = sy / dot(y, _covariance_times(state.priors[k], y))
+    pairs = state.pairs[k]
+    length(pairs) == state.memory && popfirst!(pairs)
+    push!(pairs, (copy(s), y, 1 / sy))
+    return true
 end
 
 # Once no subject iterates, the converged subjects whose curvature is not yet known
