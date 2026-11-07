@@ -14,6 +14,30 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.10
+
+- `empirical_bayes` finds and certifies modes on kinks of a piecewise-smooth
+  complete-data log-density (a running minimum, thresholds ordered by `min`, a
+  clamp), where the gradient does not vanish. Such a subject used to raise
+  `EBEConvergenceError: no mode found` after every step the method's model
+  predicted to climb crossed the kink (Bruno's joint PK/QT/TGI model with RECIST's
+  tumour-category law: 4 of 24 subjects under `NewtonEBE` and `QuasiNewtonEBE`).
+  Where no step is accepted, the subject is now searched further by gradient
+  sampling with the method's own metric, and a point where it stops is reported
+  as a mode with the new `nonsmooth` field of `EBEResult` / `RaggedEBEResult` set
+  when it passes the second-order sufficient condition of the kink and one-sided
+  probes. A subject the smooth search settles is unchanged, bit for bit.
+  `EBEOptions(nonsmooth = false)` restores the old behaviour.
+- New `NonsmoothModeError`: the computations that need the curvature or the
+  derivatives of a subject's density at its mode refuse a mode on a kink by
+  subject: `marginal_loglikelihood` with `ImportanceSampling` or
+  `AdaptiveGaussHermite` (so the Laplace and quadrature covariance steps),
+  `focei_evaluate`, `FOCEApproximation`, `residual_diagnostics` and
+  `ebe_covariances`. `focei`'s search scores such a point as infeasible, as it
+  scored the `EBEConvergenceError` before.
+- **Breaking** only for code that constructs `EBEResult` or `RaggedEBEResult`
+  positionally: both gained `nonsmooth` before `method`.
+
 ## 0.2.9
 
 - `check_protocol` compares a model's own Laplace marginals

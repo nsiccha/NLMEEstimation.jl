@@ -104,8 +104,8 @@ function _focei_evaluate(model, θ, σ, ω, subjects, η0, interaction, ebe_meth
     _require_focei_layout(nlme_layout(model))
     observation_model(model) isa GaussianObservations || throw(ArgumentError(
         "FOCE(I) requires observation_model(model) = GaussianObservations()"))
-    ebes = _run_empirical_bayes(model, θ, σ, ω, subjects, η0, ebe_method, ebe_options,
-        true, progress, transient)
+    ebes = _smooth_modes(_run_empirical_bayes(model, θ, σ, ω, subjects, η0, ebe_method, ebe_options,
+        true, progress, transient), "FOCE(I)")
     parts = observation_moments_and_jacobians(model, ebes.subjects, θ, σ, ebes.modes)
     length(parts) == length(ebes.subjects) || throw(DimensionMismatch(
         "observation_moments_and_jacobians returned $(length(parts)) entries for $(length(ebes.subjects)) subjects"))
@@ -224,7 +224,7 @@ function focei(model, θ0::AbstractVector, σ0::AbstractVector, ω0::AbstractVec
                 evaluate(θx, σx, ωx, warm[])
             catch err
                 err isa ProgressInterrupted && return stop(x)
-                err isa Union{_InfeasibleEvaluation, EBEConvergenceError} || rethrow()
+                err isa Union{_InfeasibleEvaluation, EBEConvergenceError, NonsmoothModeError} || rethrow()
                 return 1.0e12 + sum(abs2, x .- x0)
             end
             isfinite(value.ofv) || return 1.0e12 + sum(abs2, x .- x0)

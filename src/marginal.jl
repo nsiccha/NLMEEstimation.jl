@@ -105,6 +105,7 @@ end
 # The approximation's points around each subject's conditional mode in `ebe`,
 # scaled by the inverse curvature there.
 function _points_at_modes(approximation, model, θ, σ, ω, ebe, rng)
+    _smooth_modes(ebe, "marginal_loglikelihood with $(nameof(typeof(approximation)))")
     layout = nlme_layout(model)
     ids = collect(Int, ebe.subjects)
     indices, design = _saem_mu_trait(model, ids, layout)

@@ -106,8 +106,8 @@ function _residual_diagnostics(model, θ, σ, ω, subjects, η0, replicates, rng
     _check_length("θ", θ, layout.ntheta)
     _check_length("σ", σ, layout.nsigma)
     _check_length("ω", ω, nomega(layout))
-    ebe = _run_empirical_bayes(model, θ, σ, ω, subjects, η0, default_ebe_method(model),
-        ebe_options, true, progress, false)
+    ebe = _smooth_modes(_run_empirical_bayes(model, θ, σ, ω, subjects, η0, default_ebe_method(model),
+        ebe_options, true, progress, false), "residual_diagnostics (CPRED and CWRES linearize at the mode)")
     ids = collect(Int, ebe.subjects)
     modes = [Vector{Float64}(_eta_column(ebe.modes, k)) for k in eachindex(ids)]
     ys = [Vector{Float64}(y) for y in observations(model, ids)]
