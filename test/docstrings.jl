@@ -8,11 +8,14 @@ import NLMEEstimation as NE
 # text (a stray `_` earlier in the paragraph, as in "η̂_i", pairs with the link's
 # underscores as emphasis); Documenter then never sees the reference, and the
 # Docs build fails on a dead `./@ref` link in api.md with no Documenter warning
-# (Docs run 40862419235 on e466614). A detached docstring breaks the build the
-# same way (run 38228011497).
+# (Docs run 40862419235 on e466614). The broken link's leftover backtick can also
+# open a code span that holds the raw `](@ref)` (Docs run 42367935453 on ac2c742:
+# "η̂_i … [`empirical_bayes`](@ref) … `gradient_norm`" in EBEResult). A detached
+# docstring breaks the build the same way (run 38228011497).
 function _doc_links!(links, raw, x, owner)
     x isa Markdown.Link && push!(links, (owner, x))
     x isa AbstractString && occursin("](@ref)", x) && push!(raw, (owner, x))
+    x isa Markdown.Code && occursin("](@ref)", x.code) && push!(raw, (owner, x.code))
     for field in (:content, :text, :items)
         hasproperty(x, field) || continue
         value = getproperty(x, field)

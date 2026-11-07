@@ -131,13 +131,14 @@ subject `subjects[k]`.
   at η̂_i.
 - `converged`, `iterations`: per-subject solver diagnostics.
 - `gradient_norm`: the standardized complete-data gradient `‖Lᵀg‖∞` at η̂_i.
-- `nonsmooth`: `true` where η̂_i is a certified mode on a kink of the complete-data
-  log-density (section "Modes at kinks" of [`empirical_bayes`](@ref)), which has no
-  gradient or curvature there. Its `gradient_norm` is then the standardized norm of
-  the element nearest zero of the convex hull of the gradients sampled within 1e-6
-  prior standard deviations of η̂_i, and its `hessians` entry the Hessian the model
-  reports at η̂_i, which is that of one smooth piece. Computations that need the
-  curvature at the mode refuse such a subject with a [`NonsmoothModeError`](@ref).
+- `nonsmooth`: `true` where the mode is a certified mode on a kink of the
+  complete-data log-density (section "Modes at kinks" of [`empirical_bayes`](@ref)),
+  which has no gradient or curvature there. Its `gradient_norm` is then the
+  standardized norm of the element nearest zero of the convex hull of the gradients
+  sampled within 1e-6 prior standard deviations of the mode, and its `hessians` entry
+  the Hessian the model reports at the mode, which is that of one smooth piece.
+  Computations that need the curvature at the mode refuse such a subject with a
+  [`NonsmoothModeError`](@ref).
 - `method`: the [`EBEMethod`](@ref) used.
 """
 struct EBEResult{T <: Real, HS <: Union{Nothing, Vector{Matrix{T}}, Vector{SparseMatrixCSC{T, Int}}},
