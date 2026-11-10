@@ -99,26 +99,26 @@ NE.saem_population_gradient_style(::PerSubjectRouted) = PerSubjectEvaluation()
 NE.conditional_loglikelihood_sum_and_population_gradient(::PerSubjectRouted, subjects, θ, σ, H) =
     error("PerSubjectRouted is never asked for its batched population gradient")
 
-# Protocol-forwarding wrappers (as a counting wrapper is): `Forwarding` forwards the
+# Protocol-forwarding wrappers (as a counting wrapper is): `FullyForwarded` forwards the
 # batched population gradient with the rest, `Unforwarded` everything but it.
-struct Forwarding{M}
+struct FullyForwarded{M}
     inner::M
 end
 struct Unforwarded{M}
     inner::M
 end
-for W in (:Hooked, :Legacy, :PerSubjectRouted, :Forwarding, :Unforwarded), f in FORWARDED_PROTOCOL
+for W in (:Hooked, :Legacy, :PerSubjectRouted, :FullyForwarded, :Unforwarded), f in FORWARDED_PROTOCOL
     @eval NE.$f(m::$W) = NE.$f(m.inner)
 end
-for W in (:Hooked, :Legacy, :PerSubjectRouted, :Forwarding, :Unforwarded), f in FORWARDED_BATCH
+for W in (:Hooked, :Legacy, :PerSubjectRouted, :FullyForwarded, :Unforwarded), f in FORWARDED_BATCH
     @eval NE.$f(m::$W, subjects, θ, σ, H) = NE.$f(m.inner, subjects, θ, σ, H)
 end
-for W in (:Forwarding, :Unforwarded)
+for W in (:FullyForwarded, :Unforwarded)
     @eval NE.saem_population_gradient_style(m::$W) = saem_population_gradient_style(m.inner)
     @eval NE.saem_population_gradient_style(m::$W, mode::Val) =
         saem_population_gradient_style(m.inner, mode)
 end
-NE.conditional_loglikelihood_sum_and_population_gradient(m::Forwarding, subjects, θ, σ, H) =
+NE.conditional_loglikelihood_sum_and_population_gradient(m::FullyForwarded, subjects, θ, σ, H) =
     conditional_loglikelihood_sum_and_population_gradient(m.inner, subjects, θ, σ, H)
 
 same_fit(a, b) = a.theta == b.theta && a.sigma == b.sigma && a.omega == b.omega && a.eta == b.eta
@@ -152,13 +152,13 @@ same_fit(a, b) = a.theta == b.theta && a.sigma == b.sigma && a.omega == b.omega 
         @test hooked.calls[] > 0
         @test result.numeric_mstep == :online
         @test all(isfinite, (result.theta..., result.sigma..., result.omega...))
-        wrapped = Forwarding(Hooked(base))
+        wrapped = FullyForwarded(Hooked(base))
         @test same_fit(fit(wrapped), result)
         @test wrapped.inner.calls[] == hooked.calls[]
         score = SAEMOptions(iterations = 12, burnin = 4, mcmc_burnin = 2, mstep_interval = 2,
             numeric_mstep = :score)
         hooked_score = Hooked(base)
-        @test same_fit(fit(Forwarding(hooked_score); options = score), fit(Hooked(base); options = score))
+        @test same_fit(fit(FullyForwarded(hooked_score); options = score), fit(Hooked(base); options = score))
         @test hooked_score.calls[] > 0
     end
 
@@ -169,7 +169,7 @@ same_fit(a, b) = a.theta == b.theta && a.sigma == b.sigma && a.omega == b.omega 
         result = fit(hooked; seed = 7, options = minibatch)
         @test result.numeric_mstep == :minibatch
         @test hooked.calls[] > 0
-        wrapped = Forwarding(Hooked(base))
+        wrapped = FullyForwarded(Hooked(base))
         @test same_fit(fit(wrapped; seed = 7, options = minibatch), result)
         @test wrapped.inner.calls[] == hooked.calls[]
     end
@@ -179,7 +179,7 @@ same_fit(a, b) = a.theta == b.theta && a.sigma == b.sigma && a.omega == b.omega 
         direct = fit(legacy)
         @test legacy.calls[] > 0
         @test same_fit(direct, fit(base))
-        forwarded = Forwarding(Legacy(base))
+        forwarded = FullyForwarded(Legacy(base))
         @test same_fit(fit(forwarded), direct)
         @test forwarded.inner.calls[] == legacy.calls[]
         # A wrapper that does not forward the method gets the default, AD over the
@@ -196,7 +196,7 @@ same_fit(a, b) = a.theta == b.theta && a.sigma == b.sigma && a.omega == b.omega 
         louis = LouisInformation(draws = 200, burnin = 20)
         direct = covariance_step(legacy, result; approximation = louis, rng = Xoshiro(3))
         @test legacy.calls[] > before
-        forwarded = Forwarding(Legacy(base))
+        forwarded = FullyForwarded(Legacy(base))
         wrapped = covariance_step(forwarded, result; approximation = louis, rng = Xoshiro(3))
         @test forwarded.inner.calls[] == legacy.calls[] - before
         @test wrapped.covariance == direct.covariance
@@ -207,7 +207,7 @@ same_fit(a, b) = a.theta == b.theta && a.sigma == b.sigma && a.omega == b.omega 
         hooked = Hooked(base)
         @test check_protocol(hooked, θ, σ, ω; η, population_gradient = true)
         @test hooked.calls[] == 1
-        @test check_protocol(Forwarding(Hooked(base)), θ, σ, ω; η, population_gradient = true)
+        @test check_protocol(FullyForwarded(Hooked(base)), θ, σ, ω; η, population_gradient = true)
         wrong = Hooked(base; scale = 2.0)
         @test check_protocol(wrong, θ, σ, ω; η)
         @test wrong.calls[] == 0
