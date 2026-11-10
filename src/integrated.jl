@@ -161,13 +161,13 @@ conditional_loglikelihoods(m::_IntegratedModel, subjects, θ, σ, H) =
 conditional_loglikelihoods_and_gradients(m::_IntegratedModel, subjects, θ, σ, H) =
     laplace_conditionals_and_gradients(m.model, m.integrated, subjects, θ, σ, m.ω, H)
 
-function _saem_population_value_gradient(::BatchedEvaluation, m::_IntegratedModel,
+function conditional_loglikelihood_sum_and_population_gradient(m::_IntegratedModel,
         subjects, θ, σ, H)
     ℓ, gθ, gσ, _ = _laplace_population_gradient(m.model, m.integrated, subjects,
         θ, σ, m.ω, H)
     _check_length("the Laplace conditionals' gradient in θ", gθ, length(θ))
     _check_length("the Laplace conditionals' gradient in σ", gσ, length(σ))
-    return sum(ℓ), vcat(gθ, gσ)
+    return sum(ℓ), gθ, gσ
 end
 
 # With every family integrated the conditionals are the marginals, which a model

@@ -471,6 +471,8 @@ function _check_ragged_protocol(model, layout::RaggedNLMELayout, θ, σ, ω;
         population_gradient && _check_population_gradient(violation, agrees,
             reference, model, i, θ, σ, ηi, value, layout)
     end
+    population_gradient && _check_batch_population_gradient(violation, agrees,
+        model, ids, θ, σ, H, layout)
     observation_model(model) isa GaussianObservations &&
         _check_observation_batch(violation, agrees, model, ids, θ, σ, H, layout)
     threads && _check_concurrent_evaluation(violation, agrees, model, ids, θ, σ, H)

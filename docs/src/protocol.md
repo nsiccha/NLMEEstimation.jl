@@ -39,6 +39,20 @@ gradients for the single-draw updates (`:online`, and `:score`, which takes
 about one gradient per iteration) and a batched gradient for the
 retained-draw mixture.
 
+Where the route is batched (`BatchedEvaluation()`, the default for a batched
+model), SAEM's numerical M-step and `LouisInformation` call
+`conditional_loglikelihood_sum_and_population_gradient(model, subjects, θ, σ, H)`.
+It returns the batch's conditional log-density, the sum over the listed subjects
+(one real number), with its gradients in θ and σ at fixed `H`. By default it
+differentiates the sum of `conditional_loglikelihoods` with `ad_backend(model)`.
+A model implements it to supply that gradient itself, for example when its
+batched program should not be handed to the AD backend as a whole. A wrapper
+that forwards the protocol to an inner model (to count, time or cache its calls)
+forwards this method with the others, so that the wrapped fit takes the inner
+model's route. Before NLMEEstimation 0.2.11 the estimators called an internal
+here, which BRM overrode; a model that still overrides it is reached through
+this method's default.
+
 A model can hold a random-effect covariance family, or part of one, at a known value by declaring `fixed_omega(model)`. It returns `family => FixedOmega(…)` pairs, where a family is an `eta_blocks` entry of `NLMELayout` (or a `family_sizes` entry of `RaggedNLMELayout`) by position. `FixedOmega(Ω)` fixes the whole family, matching nlmixr2's `fix()` on an ω block and NONMEM's `OMEGA … FIX`. `FixedOmega(sd = [0.3, nothing], correlation = nothing)` fixes the listed standard deviations, and `FixedOmega(correlation = R)` fixes the correlation, in `Ω = D R D` terms. FOCE(I) searches only the free Ω coordinates. SAEM leaves a fully fixed family unchanged and maximizes the expected Gaussian random-effect density over a partially fixed family's free standard deviations and correlation. Both report the fixed values in `omega` and `omega_matrix`. Their starting `ω0` must hold the fixed values; `apply_fixed_omega(model, ω)` moves a vector onto them. `empirical_bayes` evaluates at the `ω` it is given.
 
 A model that computes its own Laplace approximation, such as a joint program with an embedded Laplace, can declare `provides_laplace_gradient(model) = true` and implement `laplace_marginals_and_gradient(model, subjects, θ, σ, ω, H)`. It returns each listed subject's Laplace marginal log-likelihood and the gradient of their sum in θ, σ and ω, including the mode's dependence on them; `H` holds starting points for its mode search, in the batch shape of `conditional_loglikelihoods`. `covariance_step` with `AdaptiveGaussHermite(nodes = 1)` then takes `R` from central differences of that gradient, as TMB's `sdreport` does: `2p + 1` calls for `p` estimated coordinates, where differences of marginal values take `2p² + 1`. The package adds the gradient of a `population_logprior` (from `population_logprior_and_gradient`) and maps the ω gradient onto the coordinates `fixed_omega` leaves free.
@@ -51,6 +65,6 @@ Such a model can also integrate some covariance families out inside SAEM, so tha
 
 The model keeps its own sparse factorization: only the modes and the instances' covariance blocks cross the protocol, never a dense matrix. How SAEM uses them is in [estimators](estimators.md).
 
-Run `check_protocol(model, θ, σ, ω)` while implementing a model. It checks dimensions, agreement between evaluation styles, subject separability, available derivatives, declared observation and mu-referencing traits, that `ω` holds any declared `fixed_omega` values, that a declared Laplace gradient's values equal the package's own Laplace approximation and its gradient a central difference of them, and the same for the methods of `integrated_families` (on small subjects, against a dense Laplace of the integrated effects given the others). Where a subject's complete-data density has several local modes, each has its own Laplace value. A model that implements `laplace_conditional_moments` for every family integrated is compared at the modes it reports (which must be modes, with the same values as `laplace_marginals_and_gradient`); otherwise the package's own search starts from the checked `η`, and a value mismatch names the mode it reached.
+Run `check_protocol(model, θ, σ, ω)` while implementing a model. It checks dimensions, agreement between evaluation styles, subject separability, available derivatives (with `population_gradient = true` also the θ/σ gradients, per subject and, where SAEM routes them batched, `conditional_loglikelihood_sum_and_population_gradient` against their sum), declared observation and mu-referencing traits, that `ω` holds any declared `fixed_omega` values, that a declared Laplace gradient's values equal the package's own Laplace approximation and its gradient a central difference of them, and the same for the methods of `integrated_families` (on small subjects, against a dense Laplace of the integrated effects given the others). Where a subject's complete-data density has several local modes, each has its own Laplace value. A model that implements `laplace_conditional_moments` for every family integrated is compared at the modes it reports (which must be modes, with the same values as `laplace_marginals_and_gradient`); otherwise the package's own search starts from the checked `η`, and a value mismatch names the mode it reached.
 
 The [PK comparison](pk-comparison.md) shows a complete batched BRM+RKPPL model and the calls used to fit it. The [API reference](api.md) lists every protocol entry point.
