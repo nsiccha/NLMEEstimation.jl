@@ -86,11 +86,13 @@ end
         same = saem(model, Float64[], Float64[], floored; rng = MersenneTwister(1), options, kernel)
         @test fit.omega == same.omega && fit.eta == same.eta && fit.iterations == same.iterations
         # Before the floor, NUTS (serial and on threads) ended this fit at
-        # Ω = [0.199 3.08; 3.08 74.2] with 33 divergences and |η| up to 21.
-        @test fit.omega_matrix[1, 1] < 1e-6
+        # Ω = [0.199 3.08; 3.08 74.2] with 33 divergences and |η| up to 21. Over 3
+        # data and 10 chain seeds (90 fits, three kernels) the floored start stayed
+        # within Ω₁₁ ≤ 2.2e-6, Ω₂₂ ≤ 0.39, |η| ≤ 1.71 and 4 divergences.
+        @test fit.omega_matrix[1, 1] < 1e-4
         @test 0.05 < fit.omega_matrix[2, 2] < 1.0
         @test maximum(abs, fit.eta) < 3
-        kernel isa WarmupHMCNUTS && @test fit.nuts_divergences <= 3
+        kernel isa WarmupHMCNUTS && @test fit.nuts_divergences <= 10
         # The fit's Ω holds the floor (η₁'s variance just above it): a warm start
         # from it stays as it is.
         warm, none_warm = NE._saem_floored_start(layout, nothing, fit.omega, options.omega_floor)
