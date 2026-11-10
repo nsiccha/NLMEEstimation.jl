@@ -72,7 +72,11 @@ against that backend, and its Hessian blocks (when provided) against
 `reference_hessian_backend` (for Enzyme, a forward-over-reverse
 `DifferentiationInterface.SecondOrder`). With
 `population_gradient = true`, the optional θ/σ gradient is checked as well (against
-`reference_backend` when given).
+`reference_backend` when given). Where [`saem_population_gradient_style`](@ref)
+returns [`BatchedEvaluation`](@ref) for some numerical M-step mode,
+[`conditional_loglikelihood_sum_and_population_gradient`](@ref) on the checked batch
+must then return a real value and gradients of the lengths of θ and σ that equal
+the sums of the per-subject values and gradients.
 
 With `threads = true`, which needs a Julia process with several threads, all
 `subjects` are evaluated at once on Julia's threads, 20 times over, and every value
@@ -150,6 +154,8 @@ function check_protocol(model, θ::AbstractVector, σ::AbstractVector, ω::Abstr
         population_gradient &&
             _check_population_gradient(violation, agrees, reference, model, i, θ, σ, ηi, ℓ, layout)
     end
+    population_gradient &&
+        _check_batch_population_gradient(violation, agrees, model, subjects, θ, σ, H, layout)
     observation_model(model) isa GaussianObservations &&
         _check_observation_batch(violation, agrees, model, subjects, θ, σ, H, m)
     threads && _check_concurrent_evaluation(violation, agrees, model, subjects, θ, σ, H)
@@ -416,5 +422,34 @@ function _check_population_gradient(violation, agrees, reference, model, i, θ, 
     gref = DI.gradient(_population_objective, reference.gradient, x,
         DI.Constant(model), DI.Constant(i), DI.Constant(η), DI.Constant(length(θ)))
     agrees(vcat(gθ, gσ), gref) || violation("subject $i: θ/σ gradient disagrees with the reference backend's")
+    return nothing
+end
+
+# The batched population gradient against the sum of the per-subject ones, where some
+# numerical M-step mode would ask for it (SAEM never calls it otherwise, and a model
+# that routes every mode per subject need not provide it).
+function _check_batch_population_gradient(violation, agrees, model, subjects, θ, σ, H, layout)
+    any(mode -> saem_population_gradient_style(model, mode) isa BatchedEvaluation,
+        (Val(:online), Val(:score), Val(:mixture))) || return nothing
+    ℓ, gθ, gσ = conditional_loglikelihood_sum_and_population_gradient(model, subjects, θ, σ, H)
+    ℓ isa Real || violation("conditional_loglikelihood_sum_and_population_gradient returned " *
+        "the value $(repr(ℓ)); expected the batch's summed log-density, a real number")
+    length(gθ) == layout.ntheta || violation(
+        "conditional_loglikelihood_sum_and_population_gradient's θ gradient has length $(length(gθ))")
+    length(gσ) == layout.nsigma || violation(
+        "conditional_loglikelihood_sum_and_population_gradient's σ gradient has length $(length(gσ))")
+    total, sθ, sσ = 0.0, zeros(layout.ntheta), zeros(layout.nsigma)
+    for (k, i) in enumerate(subjects)
+        a, b, c = conditional_loglikelihood_and_population_gradient(model, i, θ, σ,
+            _eta_column(H, k))
+        total += a
+        sθ .+= b
+        sσ .+= c
+    end
+    agrees(ℓ, total) || violation("conditional_loglikelihood_sum_and_population_gradient " *
+        "value $ℓ ≠ $total, the sum of the subjects' conditional_loglikelihood_and_population_gradient values")
+    agrees(vcat(gθ, gσ), vcat(sθ, sσ)) || violation(
+        "conditional_loglikelihood_sum_and_population_gradient's θ/σ gradient " *
+        "$(vcat(gθ, gσ)) ≠ $(vcat(sθ, sσ)), the sum of the subjects' population gradients")
     return nothing
 end

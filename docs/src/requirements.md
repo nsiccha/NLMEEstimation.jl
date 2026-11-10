@@ -152,7 +152,7 @@ The covariance step needs the Hessian of the objective in `(θ, σ, Ω)`, one or
 
 1. Implement `nsubjects`, `nlme_layout`, and either `conditional_loglikelihood` or `conditional_loglikelihoods`, with η as an input and no η prior.
 2. Provide ∇η: declare a reverse-mode `ad_backend`, or implement `conditional_loglikelihoods_and_gradients`. This enables posthoc and the gradient-based SAEM kernels.
-3. Provide ∇θσ, either from the same backend or with `conditional_loglikelihood_and_population_gradient`. This enables SAEM's numerical M-step.
+3. Provide ∇θσ, either from the same backend or with `conditional_loglikelihood_and_population_gradient` (one subject) or `conditional_loglikelihood_sum_and_population_gradient` (a batch's summed density). This enables SAEM's numerical M-step.
 4. For FOCE(I), declare `GaussianObservations()` and provide `observations`, `observation_moments`, and their η Jacobians.
 5. Optionally declare `mu_referencing` for closed-form SAEM updates, and Hessian blocks for Newton posthoc steps, `ebe_covariances`, and curvature-based MALA/NUTS metrics. For subjects with hundreds or thousands of random effects, declare `eta_hessian_sparsity` instead of dense Hessian blocks. A model with its own Laplace approximation can implement `laplace_marginals_and_gradient` for a Laplace covariance step whose cost is linear in the number of population coordinates, and the methods of `integrated_families` so that SAEM samples only the random effects it does not integrate.
 6. Run `check_protocol(model, θ, σ, ω)`. It checks the evaluation styles against each other, subject separability, the derivatives the model provides, and the declared traits.

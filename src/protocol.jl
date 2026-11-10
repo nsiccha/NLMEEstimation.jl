@@ -277,9 +277,11 @@ population-parameter gradient for its numerical M-step. Defaults to
 [`evaluation_style`](@ref). A model with [`BatchedEvaluation`](@ref) can return
 [`PerSubjectEvaluation`](@ref) here when it implements an efficient
 [`conditional_loglikelihood_and_population_gradient`](@ref) for one subject;
-SAEM sums those subject values and gradients. This choice affects only that
-M-step gradient. Likelihood, η-gradient, and η-Hessian evaluation continue to
-use `evaluation_style(model)`.
+SAEM sums those subject values and gradients. Under [`BatchedEvaluation`](@ref)
+SAEM calls [`conditional_loglikelihood_sum_and_population_gradient`](@ref) for
+the whole batch instead. This choice affects only that M-step gradient (and
+[`LouisInformation`](@ref)'s differences of it). Likelihood, η-gradient, and
+η-Hessian evaluation continue to use `evaluation_style(model)`.
 
 The optional second argument is `Val(:online)`, `Val(:score)` or `Val(:mixture)`,
 the resolved SAEM numerical M-step mode (minibatch SAEM passes `Val(:online)`).
@@ -291,6 +293,43 @@ one-argument style, preserving existing model methods.
 """
 saem_population_gradient_style(model) = evaluation_style(model)
 saem_population_gradient_style(model, ::Val) = saem_population_gradient_style(model)
+
+"""
+    conditional_loglikelihood_sum_and_population_gradient(model, subjects, θ, σ, H) -> (ℓ, ∇θ ℓ, ∇σ ℓ)
+
+**Optional, or provided by [`ad_backend`](@ref).** The conditional log-density of
+the batch `subjects`, which is the sum of its subjects' conditional log-densities
+(a real number, not one value per subject), with its gradients in θ and σ at
+fixed `H`. `H` is in the batch shape of [`conditional_loglikelihoods`](@ref). It
+is the batched counterpart of
+[`conditional_loglikelihood_and_population_gradient`](@ref), with the same
+return triple.
+
+SAEM's numerical M-step and [`LouisInformation`](@ref) call it whenever
+[`saem_population_gradient_style`](@ref) returns [`BatchedEvaluation`](@ref).
+Each value and gradient of the M-step's objective then costs one call per
+retained draw, over the M-step's subjects (every fitted subject, or the
+minibatch). Under [`PerSubjectEvaluation`](@ref) they sum
+[`conditional_loglikelihood_and_population_gradient`](@ref) instead.
+
+The default differentiates the sum of [`conditional_loglikelihoods`](@ref) with
+`ad_backend(model)`. A model implements this method when it computes the gradient
+more cheaply itself, or when its batched program should not be handed to the
+backend as a whole. A wrapper that forwards the protocol to an inner model (to
+count, time or cache its calls) forwards this method like the others, so that the
+wrapped fit takes the inner model's route.
+"""
+conditional_loglikelihood_sum_and_population_gradient(model, subjects, θ, σ, H) =
+    _population_gradient_parts(
+        _saem_population_value_gradient(BatchedEvaluation(), model, subjects, θ, σ, H),
+        length(θ))
+
+# The default above goes through `_saem_population_value_gradient(::BatchedEvaluation,
+# …)` (src/saem.jl), the internal that models overrode before NLMEEstimation 0.2.11,
+# so that a model still overriding it is reached, through a forwarding wrapper too.
+function _population_gradient_parts((value, gradient), ntheta)
+    return value, gradient[1:ntheta], gradient[(ntheta + 1):end]
+end
 
 """
     population_logprior(model, θ, σ, ω) -> Union{Nothing, Real}

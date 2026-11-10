@@ -18,7 +18,9 @@ derivatives in those θ and in ω are closed form. Those in the other θ and in 
 come from [`conditional_loglikelihood_and_population_gradient`](@ref) (one call
 per subject and draw), and their curvature from central differences of the
 summed population gradient (two batched calls per coordinate and draw, with
-[`covariance_step`](@ref)'s `step`).
+[`covariance_step`](@ref)'s `step`). That gradient takes the route
+[`saem_population_gradient_style`](@ref) names: summed per-subject calls, or
+[`conditional_loglikelihood_sum_and_population_gradient`](@ref) for the batch.
 
 `kernel`, a [`WarmupHMCNUTS`](@ref), draws each subject's η: Pathfinder from the
 starting η (a fit's chain states or modes), `burnin` discarded transitions that
@@ -125,7 +127,7 @@ function _covariance_matrices(prepared::_PreparedLouis, split, ŷ, free, step, m
         end
         method == :s && continue
         for j in conditional
-            gradient(sign) = last(_saem_population_value_gradient(style, model, ids,
+            gradient(sign) = last(_population_value_gradient(style, model, ids,
                 split(_louis_shift(ŷ, j, sign * h[j]))[1:2]..., H))
             column = (gradient(1) - gradient(-1)) / (2h[j])
             curvature[conditional, j] .-= column[conditional]

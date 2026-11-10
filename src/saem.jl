@@ -1231,10 +1231,32 @@ _saem_batch_population_objective(x, model, subjects, H, ntheta) =
     sum(conditional_loglikelihoods(model, subjects, view(x, 1:ntheta),
         view(x, ntheta+1:length(x)), H))
 
+# The default of the public `conditional_loglikelihood_sum_and_population_gradient`
+# (src/protocol.jl). Estimators call that method, never this one: a model that
+# overrides this internal (BRM did before NLMEEstimation 0.2.11) is reached through
+# the public method's default, and so through a wrapper that forwards it.
 function _saem_population_value_gradient(::BatchedEvaluation, model, subjects, θ, σ, H)
     backend = _checked_backend(model, ad_backend(model), :saem)
     return DI.value_and_gradient(_saem_batch_population_objective, backend, vcat(θ, σ),
         DI.Constant(model), DI.Constant(subjects), DI.Constant(H), DI.Constant(length(θ)))
+end
+
+# The value and θ/σ gradient (one vector) of the summed conditional log-density of
+# `subjects`, by the route `saem_population_gradient_style` chose: a sum of
+# per-subject calls, or the public batched method.
+_population_value_gradient(style::PerSubjectEvaluation, model, subjects, θ, σ, H) =
+    _saem_population_value_gradient(style, model, subjects, θ, σ, H)
+function _population_value_gradient(::BatchedEvaluation, model, subjects, θ, σ, H)
+    ℓ, gθ, gσ = conditional_loglikelihood_sum_and_population_gradient(model, subjects,
+        θ, σ, H)
+    ℓ isa Real || throw(ArgumentError(
+        "conditional_loglikelihood_sum_and_population_gradient returned the value " *
+        "$(repr(ℓ)); expected the batch's summed log-density, a real number"))
+    _check_length("conditional_loglikelihood_sum_and_population_gradient's θ gradient",
+        gθ, length(θ))
+    _check_length("conditional_loglikelihood_sum_and_population_gradient's σ gradient",
+        gσ, length(σ))
+    return ℓ, vcat(gθ, gσ)
 end
 
 function _saem_numeric_value_gradient(z, model, subjects, θ, σ, free, indices, design,
@@ -1248,7 +1270,7 @@ function _saem_numeric_value_gradient(z, model, subjects, θ, σ, free, indices,
     style = saem_population_gradient_style(model, mode)
     for (Φ, w) in zip(bank, weights)
         H = _saem_eta(Φ, θz, indices, design)
-        v, g = _saem_population_value_gradient(style, model, subjects, θz, σz, H)
+        v, g = _population_value_gradient(style, model, subjects, θz, σz, H)
         value += w * v
         gradient += w * g
     end

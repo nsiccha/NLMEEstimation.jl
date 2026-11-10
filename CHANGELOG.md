@@ -14,6 +14,26 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.11
+
+- New `conditional_loglikelihood_sum_and_population_gradient(model, subjects, θ,
+  σ, H) -> (ℓ, ∇θ ℓ, ∇σ ℓ)`: the summed conditional log-density of a batch of
+  subjects with its θ and σ gradient, the batched counterpart of
+  `conditional_loglikelihood_and_population_gradient`. SAEM's numerical M-step
+  and `LouisInformation` call it wherever `saem_population_gradient_style`
+  returns `BatchedEvaluation()`. A model implements it to supply that gradient
+  itself, and a wrapper that forwards the protocol to an inner model forwards it,
+  so that the wrapped fit takes the inner model's route. Before, they called an
+  internal that BRM overrode, which a forwarding wrapper could not reach: the
+  wrapped fit then differentiated the wrapper with `ad_backend` (snag
+  `nlme-use-does-no-88813224`).
+- Its default is that internal's route, so every fit is unchanged bit for bit,
+  and a model that still overrides the internal is reached, through a forwarding
+  wrapper too. Override the public method instead from 0.2.11.
+- `check_protocol(…; population_gradient = true)` compares it with the summed
+  per-subject population gradients on the checked batch, where some numerical
+  M-step mode routes the gradient batched.
+
 ## 0.2.10
 
 - `empirical_bayes` finds and certifies modes on kinks of a piecewise-smooth
