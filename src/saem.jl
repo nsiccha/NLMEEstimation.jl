@@ -20,7 +20,14 @@ that adapts on every transition.
 for the mu-referenced coefficients, the covariance that maximizes an M-step's
 Gaussian term can be singular; its closed-form update moves towards the floor
 by at most 100 coordinate updates per M-step, so Ω may approach it over several
-iterations.
+iterations. The fit also starts on the floor (NLMEEstimation 0.2.12): an estimated
+part of `ω0` below it by more than rounding is raised to it before the first
+sweep, with a warning naming the families, and fixed parts are kept. A start
+that holds the floor, such as a previous fit's estimate, is used as it is. A
+variance far below the floor, as a maximum a posteriori point that collapsed it
+leaves, gave the chains a target they could not sample: Pathfinder's start of a
+`WarmupHMCNUTS` chain drew points far below the start, the chains stayed there,
+and the first M-step took Ω from them.
 `omega_annealing=0.95` anneals Ω while γ = 1, as Monolix and saemix do: an
 M-step may shrink no covariance family by more than that factor in any
 direction (its new Ω is at least `omega_annealing` times the previous one in
@@ -1317,6 +1324,65 @@ function _saem_omega_above_floor(layout, ω, floor)
     return all(r -> _factor_above_floor(L[r, r], floor), ranges)
 end
 
+# The SAEM start on the M-step's floor (`omega_floor`): every estimated part of ω0
+# below it is raised to it, as every M-step leaves Ω, and fixed parts are kept: an
+# unconstrained family's eigenvalues, a partially fixed family's estimated
+# variances and the eigenvalues of its estimated correlation. Returns `(ω, raised)`:
+# ω itself and no family where it already holds the floor (so such a fit is
+# unchanged), else a copy and the families raised. A start below the floor is
+# typically a variance that a maximum a posteriori point collapsed, and the chains
+# of the first iterations would sample a target whose conditioning makes it
+# unsamplable (snag tgi-nlme-point-u-fbe50c66: an SD of 4e-12 beside SDs of 0.4).
+function _saem_floored_start(layout, constraints, ω, floor)
+    start, raised = ω, Int[]
+    for (f, (k, r)) in enumerate(zip(_omega_family_sizes(layout), _omega_family_ranges(layout)))
+        fam = _omega_family(constraints, f)
+        fam !== nothing && fam.fully_fixed && continue
+        segment = view(ω, r)
+        floored = fam === nothing ? _floored_family_start(segment, k, floor) :
+            _floored_partial_start(fam, segment, k, floor)
+        floored === nothing && continue
+        start === ω && (start = copy(ω))
+        start[r] = floored
+        push!(raised, f)
+    end
+    return start, raised
+end
+
+# How far below the floor a start's eigenvalue must lie to count as below it, in
+# units of the rounding of forming and factoring Ω (k·eps·‖Ω‖ for a k × k family):
+# a family an M-step left on the floor reads as on it after the round trip through
+# ω, so that a warm start from a fit stays as it is, bit for bit.
+const _START_FLOOR_ROUNDING = 1.0e3
+
+# An unconstrained family's segment with its eigenvalues raised to `floor`, or
+# `nothing` where its smallest one is not below the floor by more than rounding.
+function _floored_family_start(segment, k, floor)
+    block = NLMELayout(0, 0, [k])
+    L = omega_cholesky(block, segment)
+    s = svdvals(Matrix(L))
+    all(isfinite, s) || return nothing
+    minimum(s)^2 >= floor - _START_FLOOR_ROUNDING * k * eps(Float64) * max(floor, maximum(s)^2) &&
+        return nothing
+    E = eigen(Symmetric(Matrix(L * L')))
+    return omega_parameters(block,
+        Matrix(Symmetric(E.vectors * Diagonal(max.(E.values, floor)) * E.vectors')))
+end
+
+# A partially fixed family's segment with its estimated variances and the
+# eigenvalues of an estimated correlation raised to `floor` (the M-step's
+# `_floor_partial_family`), or `nothing` where none lies below it by more than
+# rounding. Not `eigmin`: its index-range path is wrong on Julia 1.10's LAPACK
+# for some small tridiagonals (section "Modes on kinks").
+function _floored_partial_start(fam::_FixedFamily, segment, k, floor)
+    s, m = _scale_coordinates(segment, k)
+    tolerance = _START_FLOOR_ROUNDING * k * eps(Float64)
+    low = any(j -> !fam.sd_fixed[j] && exp(2s[j]) < floor * (1 - tolerance), 1:k) ||
+        (!fam.correlation_fixed &&
+         minimum(eigvals(Symmetric(_correlation_from_coordinates(m, k)))) < floor - tolerance)
+    return low ? _floor_partial_family(fam, segment, k, floor) : nothing
+end
+
 # What the MAP Gaussian block carries from one M-step to the next: the
 # inverse-Hessian approximation its last search ended with, in the floor-free
 # coordinates (`_map_block_families`), which starts the next search. The block's
@@ -2031,7 +2097,14 @@ function _saem(layout, model, θ0, σ0, ω0, rng, subjects, η0, options, kernel
     !isempty(ids) && allunique(ids) && all(i -> 1 <= i <= nsubjects(model), ids) ||
         throw(ArgumentError("subjects must be distinct valid model subject indices"))
     indices, design = _saem_mu_trait(model, ids, layout)
-    θ, σ, ω = Float64.(θ0), Float64.(σ0), Float64.(ω0)
+    θ, σ = Float64.(θ0), Float64.(σ0)
+    ω, raised = _saem_floored_start(layout, constraints, Float64.(ω0), options.omega_floor)
+    isempty(raised) || @warn "saem: ω0 lies below omega_floor = $(options.omega_floor) in " *
+        (length(raised) == 1 ? "covariance family $(only(raised)); the fit starts from it" :
+            "covariance families $(join(raised, ", ")); the fit starts from them") *
+        " raised to the floor, as every M-step leaves Ω. A start variance far below the " *
+        "floor, such as one a maximum a posteriori point collapsed, gives the first " *
+        "iterations' chains a target they cannot sample."
     initial_lp = population_logprior(model, θ, σ, ω)
     initial_lp === nothing || initial_lp isa Real || throw(ArgumentError(
         "population_logprior must return a real log density or nothing"))
