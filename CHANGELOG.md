@@ -14,6 +14,25 @@ NLMEEstimation commit is then refused when it resolves, with
 `Unsatisfiable requirements detected for package NLMEEstimation`, instead of
 failing or silently behaving differently at run time.
 
+## 0.2.12
+
+- `saem` starts on `SAEMOptions.omega_floor`: an estimated part of `ω0` below it
+  by more than rounding (an unconstrained family's eigenvalues, a partially fixed
+  family's estimated variances and correlation eigenvalues) is raised to it before
+  the first sweep, as every M-step leaves Ω, and `saem` warns naming those
+  families. Fixed parts are kept. A start that holds the floor, a previous fit's
+  estimate among them, is used as it is, so those fits are unchanged bit for bit;
+  seeded fits from a start below the floor differ, for every kernel.
+- Why: a variance a maximum a posteriori point collapsed (an SD of 4.4e-12 beside
+  SDs near 0.4 in Bruno's joint TGI start) gave the `WarmupHMCNUTS` chains a target
+  they could not sample. Each chain's Pathfinder start drew points about 1e24
+  log-density units below the start that were finite, 13 of 24 chains started
+  there and stayed, and the first M-step took Ω from them: the fit ended at a
+  population log prior of −2.8e6, in lockstep and on threads alike, and 8 of 24
+  subjects had no certified empirical Bayes mode at it. From the floored start
+  the fit takes 38 s instead of 1,644 s and every subject's mode is certified
+  (snag `tgi-nlme-point-u-fbe50c66`).
+
 ## 0.2.11
 
 - New `conditional_loglikelihood_sum_and_population_gradient(model, subjects, θ,
