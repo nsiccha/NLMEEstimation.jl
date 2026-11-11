@@ -1,31 +1,15 @@
 import { defineConfig } from 'vitepress'
-import { tabsMarkdownPlugin } from 'vitepress-plugin-tabs'
 import { mathjaxPlugin } from './mathjax-plugin'
 import footnote from "markdown-it-footnote";
 import path from 'path'
 
 const mathjax = mathjaxPlugin()
 
-function getBaseRepository(base: string): string {
-  if (!base || base === '/') return '/';
-  const parts = base.split('/').filter(Boolean);
-  return parts.length > 0 ? `/${parts[0]}/` : '/';
-}
-
-const baseTemp = {
-  base: 'REPLACE_ME_DOCUMENTER_VITEPRESS',// TODO: replace this in makedocs!
-}
-
 const navTemp = {
   nav: 'REPLACE_ME_DOCUMENTER_VITEPRESS',
 }
 
-const nav = [
-  ...navTemp.nav,
-  {
-    component: 'VersionPicker'
-  }
-]
+const nav = navTemp.nav
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
@@ -37,14 +21,10 @@ export default defineConfig({
   outDir: 'REPLACE_ME_DOCUMENTER_VITEPRESS', // This is required for MarkdownVitepress to work correctly...
   head: [
     ['link', { rel: 'icon', href: 'REPLACE_ME_DOCUMENTER_VITEPRESS_FAVICON' }],
-    ['script', {src: `${getBaseRepository(baseTemp.base)}versions.js`}],
-    // ['script', {src: '/versions.js'], for custom domains, I guess if deploy_url is available.
-    ['script', {src: `${baseTemp.base}siteinfo.js`}]
   ],
   
   markdown: {
     config(md) {
-      md.use(tabsMarkdownPlugin);
       md.use(footnote);
       mathjax.markdownConfig(md);
     },
@@ -64,20 +44,6 @@ export default defineConfig({
       alias: {
         '@': path.resolve(__dirname, '../components')
       }
-    },
-    optimizeDeps: {
-      exclude: [ 
-        '@nolebase/vitepress-plugin-enhanced-readabilities/client',
-        'vitepress',
-        '@nolebase/ui',
-      ], 
-    }, 
-    ssr: { 
-      noExternal: [ 
-        // If there are other packages that need to be processed by Vite, you can add them here.
-        '@nolebase/vitepress-plugin-enhanced-readabilities',
-        '@nolebase/ui',
-      ], 
     },
   },
   themeConfig: {

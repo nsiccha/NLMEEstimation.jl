@@ -59,8 +59,7 @@ failing or silently behaving differently at run time.
   complete-data log-density (a running minimum, thresholds ordered by `min`, a
   clamp), where the gradient does not vanish. Such a subject used to raise
   `EBEConvergenceError: no mode found` after every step the method's model
-  predicted to climb crossed the kink (Bruno's joint PK/QT/TGI model with RECIST's
-  tumour-category law: 4 of 24 subjects under `NewtonEBE` and `QuasiNewtonEBE`).
+  predicted to climb crossed the kink.
   Where no step is accepted, the subject is now searched further by gradient
   sampling with the method's own metric, and a point where it stops is reported
   as a mode with the new `nonsmooth` field of `EBEResult` / `RaggedEBEResult` set

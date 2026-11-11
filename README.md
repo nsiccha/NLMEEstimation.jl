@@ -1,345 +1,43 @@
 # NLMEEstimation.jl
 
-[![Dev Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://nsiccha.github.io/NLMEEstimation.jl/dev/)
+NLMEEstimation estimates population parameters and subject effects for nonlinear
+mixed-effects models defined by Julia conditional likelihoods.
 
-Model-agnostic estimators for nonlinear mixed-effects (NLME) models.
+[Start and installation](https://nsiccha.github.io/NLMEEstimation.jl/dev/) ·
+[Oral PK example](https://nsiccha.github.io/NLMEEstimation.jl/dev/oral-pk) ·
+[Model protocol](https://nsiccha.github.io/NLMEEstimation.jl/dev/protocol) ·
+[API reference](https://nsiccha.github.io/NLMEEstimation.jl/dev/reference/estimation)
 
-A model is any Julia value that implements a small protocol: a conditional
-log-density of the observations given the random effects η, with its derivatives in
-η, and a parameter layout. The package owns the random-effect prior
-`η_i ~ N(0, Ω)` and builds estimators on top of the protocol. Posthoc empirical
-Bayes, FOCE(I), and SAEM population estimation are implemented.
+The model supplies the observation density, layout and derivatives.
+NLMEEstimation supplies the Gaussian random-effect prior, subject-mode search,
+FOCE and SAEM population estimation, and diagnostic calculations. SAEM returns
+a population point estimate; its internal subject-effect chains are not a
+population posterior sample.
 
-Derivatives come from automatic differentiation. A model either implements its
-derivative methods itself, or declares an
-[ADTypes](https://github.com/SciML/ADTypes.jl) backend that the package drives
-through
-[DifferentiationInterface](https://github.com/JuliaDiff/DifferentiationInterface.jl).
-What the package promises and tests is reverse-mode AD with
-[Enzyme](https://github.com/EnzymeAD/Enzyme.jl) (`AutoEnzyme()`). Second order is
-optional, and only ever requested as per-subject `neta × neta` blocks, never as a
-joint Hessian.
+## Installation
 
-## The protocol
+From a shell with Julia 1.11 or later, install the pinned example and docs
+environment. These commands change the environment and are not run by the docs
+build:
 
-A model declares how it evaluates, by setting `evaluation_style`:
-
-- **`PerSubjectEvaluation()`** (default): the model implements
-  `conditional_loglikelihood(model, i, θ, σ, η)`, the log-density for one subject.
-- **`BatchedEvaluation()`**: the model implements
-  `conditional_loglikelihoods(model, subjects, θ, σ, H)`, a joint program that
-  evaluates many subjects in one pass. For `NLMELayout`, `H` holds one column of
-  η per subject. For `RaggedNLMELayout`, `H[k]` is a compact η vector for
-  `subjects[k]`.
-
-Estimator likelihood queries call the batched entry points. Each style derives
-the other style's methods. A batched model's η gradients come from one AD pass
-over the batch's summed log-density, which works because subjects are
-conditionally independent. SAEM's numerical population M-step uses the
-per-subject population-gradient method for per-subject models and one batched
-AD pass for batched models.
-
-| Function | Status | Meaning |
-|---|---|---|
-| `nsubjects(model)` | required | number of subjects |
-| `nlme_layout(model)` | required | `NLMELayout` for equal-size subjects or `RaggedNLMELayout` for repeated, variable-count random-effect families |
-| `evaluation_style(model)` | optional | `PerSubjectEvaluation()` (default) or `BatchedEvaluation()` |
-| `conditional_loglikelihood(model, i, θ, σ, η)` | required (per-subject) | `log p(y_i \| θ, σ, η_i)`, without the η prior |
-| `conditional_loglikelihoods(model, subjects, θ, σ, H)` | required (batched) | the same for a batch of subjects |
-| `conditional_loglikelihoods_and_gradients(model, subjects, θ, σ, H)` | derived from `ad_backend`, or implemented | values and η gradients of a batch |
-| `conditional_loglikelihood_hessian_blocks(model, subjects, θ, σ, H)` | optional | per-subject η Hessian blocks (Hessian-vector products for batched models) |
-| `ad_backend(model)`, `hessian_ad_backend(model)` | optional | backends for derivatives the model does not implement; `hessian_ad_backend = nothing` declares a gradient-only model |
-| `provides_eta_hessian(model)` | optional | whether Hessian blocks are available |
-| `conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)` | optional | `(ℓ, ∇θ ℓ, ∇σ ℓ)` |
-| `population_logprior(model, θ, σ, ω)` | optional | log prior on unconstrained population coordinates; `nothing` (default) selects maximum likelihood |
-| `population_logprior_and_gradient(model, θ, σ, ω)` | optional | prior value and gradients in θ, σ, ω; derived using `ad_backend` unless implemented |
-| `population_prior_provenance(model)` | optional | description carried in population-fit results |
-| `fixed_omega(model)` | optional | `family => FixedOmega(…)` pairs holding a random-effect covariance family, or part of one, at a known value |
-| `mu_referencing(model)` | optional trait | `MuReferencing`: θ coordinates entering as `ϕ_i = X_i θ + η_i` (SAEM) |
-| `observation_model(model)` | optional trait | `GaussianObservations()` for FOCE(I) |
-| `observations(model, subjects)` | required for batched Gaussian models | one observation vector per subject, in batch order |
-| `observation_moments(model, subjects, θ, σ, H)` | required for batched Gaussian models | one `(mean, variance)` pair per subject |
-| `observation_moments_and_jacobians(model, subjects, θ, σ, H)` | derived per subject or implemented for a batch | one `(μ, v, Jμ, Jv)` tuple per subject; Jacobian rows follow observations and columns follow η |
-| `parameter_names(model)` | optional | names for reporting |
-
-Coordinates:
-
-- θ and σ are in the model's unconstrained coordinates.
-- Ω is parameterized by the package: for each block, the log-Cholesky coordinates of
-  `Ω_b = L_b L_bᵀ` (`omega_matrix`, `omega_parameters`).
-
-`check_protocol(model, θ, σ, ω)` checks an implementation against these contracts,
-including batched-vs-per-subject consistency and the independence of subjects.
-
-### Fixed (known) covariance families
-
-A model holds a covariance family at a known value, like nlmixr2's `fix()` on
-an ω or NONMEM's `OMEGA … FIX`, by declaring `fixed_omega`. A family is an
-`eta_blocks` entry of `NLMELayout`, or a `family_sizes` entry of
-`RaggedNLMELayout`, by position:
-
-```julia
-NLMEEstimation.fixed_omega(::MyModel) = [
-    1 => FixedOmega(fill(0.1, 1, 1)),                 # eta.ka ~ fix(0.1)
-    2 => FixedOmega([0.1 0.01; 0.01 0.1]),            # eta.cl + eta.v ~ fix(c(0.1, 0.01, 0.1))
-    3 => FixedOmega(sd = [0.3, nothing]),             # first SD known; second SD and correlation estimated
-    4 => FixedOmega(correlation = [1 0.5; 0.5 1]),    # correlation known; both SDs estimated
-]
-ω0 = apply_fixed_omega(model, omega_parameters(nlme_layout(model), Ω0))
+```sh
+git clone https://github.com/nsiccha/NLMEEstimation.jl
+cd NLMEEstimation.jl
+julia --project=docs docs/install.jl
 ```
 
-The keyword form fixes parts of a family in standard-deviation/correlation
-terms, `Ω = D R D`. `focei` and `saem` estimate only the free parts, keep the
-fixed parts at their values, and report them in `omega` and `omega_matrix`.
-Their `ω0` must already hold the fixed values; `apply_fixed_omega` moves a
-vector onto them. `empirical_bayes` uses whatever `ω` it is given, and
-`check_protocol` verifies that `ω` holds the declared values.
+The package itself supports Julia 1.10; this installer uses Julia 1.11's
+`[sources]` support to resolve the unregistered dependencies. The example script
+is [`research/docs/pk_fit.jl`](research/docs/pk_fit.jl). The published example
+shows its cached output and the receipt for the run.
 
-### Nested random effects with unequal subject sizes
+## Development
 
-`RaggedNLMELayout(ntheta, nsigma, family_sizes, subject_families)` declares one
-covariance per family and an ordered list of block instances for each subject.
-For example, one two-dimensional subject family followed by one one-dimensional
-lesion family per lesion can use:
+[`docs/README.md`](docs/README.md) lists the documentation pages and build gates.
+[`research/docs/README.md`](research/docs/README.md) describes explicit fit
+regeneration. The docs build never runs a fit in CI and generates figures in its
+ignored build directory.
 
-```julia
-layout = RaggedNLMELayout(ntheta=3, nsigma=1, family_sizes=[2, 1],
-    subject_families=[[1, 2], [1, 2, 2, 2], [1, 2, 2]])
-neta(layout, 1), neta(layout, 2), neta(layout, 3)  # 3, 5, 4
-```
-
-Each repeated `2` block shares the same family covariance. `ω` has one
-log-Cholesky segment per family; `omega_matrix(layout, ω)` returns a vector of
-family covariance matrices, and `omega_parameters(layout, Ωs)` is its inverse.
-The model implements the same conditional methods, with `H` as one vector per
-requested subject and gradients in the same shape. Its conditional density
-excludes all random-effect priors. `re_logprior(re_prior(model, ω), i, η_i)`
-sums the appropriate family densities for subject `i`.
-
-`empirical_bayes` and `posthoc` return `RaggedEBEResult`: `modes[k]` has the
-actual length of `subjects[k]`, and Hessian blocks have matching dimensions.
-`saem` returns `RaggedSAEMResult`; its `eta[k]` is the compact final chain
-state and its `omega_matrix[f]` is the pooled covariance for family `f`. All
-three kernels run on ragged layouts: `StandardSAEMMH()`, `DualAveragingMALA()`
-and `WarmupHMCNUTS()`. Each moves a subject's chain on that subject's own
-coordinates, MALA with its own step size and NUTS with its own warmup. A
-subject with hundreds or thousands of nested effects needs `WarmupHMCNUTS()`:
-there the MH random walks and the prior-metric MALA proposals move the chains
-too little, and the fit settles with the nested variance collapsed. A model's optional `population_logprior` is included once in
-the MAP M-step and recorded by `objective` and `population_logprior`.
-Mu-referencing designs have `neta(layout, i)` rows. When
-`parameter_names` is not supplied by the model, `eta[i]` contains the default
-names for subject `i`; a model can supply its own subject and nested-unit labels.
-Ragged layouts support SAEM with every kernel and posthoc; FOCE(I) still uses
-the equal-size layout.
-
-## Empirical Bayes estimates (posthoc)
-
-```julia
-using NLMEEstimation, NLMEEstimation.ReferenceModels
-using ADTypes: AutoEnzyme
-import Enzyme, Random
-
-θ = [log(1.5), log(2.8), log(32.0), 0.75]   # log ka, log CL, log V, weight effect on CL
-σ = [log(0.3), log(0.1)]                     # log additive sd, log proportional sd
-Ω = [0.16 0 0; 0 0.09 0; 0 0 0.04]
-subjects, η_true = simulate_one_compartment_oral(Random.Xoshiro(1), θ, σ, Ω; nsubjects = 20)
-model = OneCompartmentOral(subjects; backend = AutoEnzyme())
-
-ω = omega_parameters(nlme_layout(model), Ω)
-r = empirical_bayes(model, θ, σ, ω)   # or posthoc(...)
-r.modes        # η̂, one column per subject
-r.hessians     # nothing for this gradient-only model
-```
-
-`empirical_bayes` solves all subjects in lockstep. Each iteration makes one batched
-gradient call, plus batched value calls for its trial steps.
-
-- **`NewtonEBE()`**: trust-region Newton on the Hessian blocks, which also leaves
-  saddle points and non-concave regions of a subject's density. This is the default
-  when the model provides Hessian blocks.
-- **`QuasiNewtonEBE()`**: limited-memory BFGS on gradients (`memory = 20`
-  curvature pairs per subject). This is the default for gradient-only
-  models. It checks each subject's curvature and leaves saddle points. The
-  check uses sparse Hessians when the model declares `eta_hessian_sparsity`,
-  the Hessian blocks when the model provides them, and otherwise Lanczos on
-  Hessian-vector products from batched gradients: at most
-  `curvature_steps + 16` batched gradient calls per check (`curvature_steps =
-  20`) and memory linear in a subject's effects. It is exact for a subject of
-  at most that many effects; in a larger one it can miss upward curvature.
-
-It throws an `EBEConvergenceError` naming any subject without a mode, unless
-`require_convergence = false`.
-
-A model whose subjects carry thousands of nested random effects declares which
-entries of each subject's η Hessian can be nonzero,
-`NLMEEstimation.eta_hessian_sparsity(model, i)`. Newton then runs on sparse
-Hessians computed from a few batched gradient calls and factored sparsely, and
-the marginal likelihood and covariance step take their curvature from them, so
-time and memory grow linearly with a subject's size. Use
-`AdaptiveGaussHermite(nodes = 1)` (Laplace) for such subjects.
-
-## FOCE(I) population estimation
-
-```julia
-at_start = focei_evaluate(model, θ, σ, ω)
-fit = focei(model, θ, σ, ω; options = FOCEOptions(maxeval = 500))
-fit.theta, fit.sigma, fit.omega_matrix  # estimated model coordinates and Ω
-fit.ofv                                # -2 × fitted ML or MAP objective
-fit.ebes.modes                         # η̂ at the optimum
-fit.objective, fit.loglikelihood, fit.logposterior
-fit.converged, fit.evaluations
-```
-
-FOCE(I) uses only first η derivatives of the observation means and variances.
-The outer BOBYQA search uses no gradients. For a joint-program model, implement
-the three batched Gaussian methods in the table so one query can return the
-moments and η Jacobians of all subjects. `FOCEOptions(interaction = false)`
-omits the variance-Jacobian term for FOCE without interaction.
-
-By default FOCE and SAEM estimate by maximum likelihood (`objective == :ML`).
-To request a maximum a posteriori (MAP) population point, implement
-`population_logprior(model, θ, σ, ω)` and return a real log density. This is a
-single prior for the whole population fit; it does not belong in each subject's
-conditional likelihood. The density must be expressed with respect to the
-unconstrained coordinates. For example, a prior on a positive parameter
-`a = exp(θ[1])` needs the `+θ[1]` log-Jacobian term. The package's Gaussian
-random-effect prior is already included separately. A model can also implement
-`population_logprior_and_gradient` directly and name its prior through
-`population_prior_provenance`. FOCE keeps `loglikelihood` separate from
-`logposterior`; its `ofv` optimizes `-2logposterior` in MAP mode.
-
-## SAEM population estimation
-
-```julia
-using Random
-
-saem_fit = saem(model, θ, σ, ω; rng = Xoshiro(2026),
-    options = SAEMOptions(iterations = 300, burnin = 150))
-saem_fit.theta, saem_fit.sigma, saem_fit.omega_matrix
-saem_fit.eta                 # final subject-chain states
-saem_fit.objective, saem_fit.population_logprior, saem_fit.prior_provenance
-posthoc_fit = empirical_bayes(model, saem_fit.theta, saem_fit.sigma,
-    saem_fit.omega; η0 = saem_fit.eta)  # subject EBEs at the fitted point
-saem_fit.acceptance          # prior and random-walk MH acceptance fractions
-```
-
-For per-subject NUTS transitions, select `WarmupHMCNUTS()`:
-
-```julia
-nuts_fit = saem(model, θ, σ, ω; rng = Xoshiro(2026),
-    options = SAEMOptions(iterations = 300, burnin = 150),
-    kernel = WarmupHMCNUTS())
-nuts_fit.kernel, nuts_fit.nuts_divergences
-```
-
-Each subject's chain starts with Pathfinder from its starting η and then adapts
-its diagonal metric and step size on every transition, for the whole fit, as the
-population parameters change (WarmupHMC's continuously adapting kernel). There is
-no warmup phase and no η Hessian; `WarmupHMCNUTS(; target_acceptance_rate = 0.8,
-max_tree_depth = 10, threads = false)` are its only settings. NUTS uses `Xoshiro` streams
-internally, seeded from the supplied RNG; its MH-only `acceptance` and `rw_scale`
-fields are `missing`. A `BatchedEvaluation` model's chains run in lockstep: each
-leapfrog step of every subject whose trajectory is still growing reaches the model
-as one `conditional_loglikelihoods_and_gradients` call over those subjects, so a
-round of transitions costs as many batched calls as its longest trajectory, not
-the sum over subjects (NLMEEstimation 0.2.1). When both routes return bit-identical
-model values and gradients at every queried point, those calls list, subject for
-subject, the evaluations the per-subject route would make, with the same draws, so
-outside the domain-error fallback (a batch that throws is evaluated again one
-subject at a time) lockstep never asks a model for more subject evaluations; a
-model whose small batches cost more than their subjects' own calls pays the difference, which is
-its batched call's to remove. A per-subject model's chains run one
-after another, one call per subject and leapfrog step. The chains are tasks on the
-calling thread: the model is never called from another thread.
-
-`kernel = WarmupHMCNUTS(threads = true)` runs the chains in parallel instead, for that
-call: each chain is a task on Julia's threads (start Julia with `-t <n>`) making its
-own one-subject model calls, whatever the model's evaluation style. A batched model
-therefore leaves lockstep for that call, which can cost much more where a one-subject
-call costs a whole-model sweep, and the model must accept concurrent calls for
-different subjects. `check_protocol(...; threads = true)` tries that out. With the
-same seed and inputs, the fit equals the serial one bit for bit if both routes
-return bit-identical values and gradients at every queried point
-(`test/saem_nuts_threads.jl`). Batched and one-subject evaluations may differ by
-roundoff; even a last-bit difference can change Pathfinder's path and subsequent
-NUTS draws. Equality at the start, or a passing `check_protocol` (which uses
-tolerances at the checked points), does not establish this condition. On twelve subjects of
-3,294–35,783 nested units, two threads on two CPUs of a loaded host took a fit from
-20.9 s to 19.2 s, and the largest subject limits the gain to 3.6× on any number of
-threads (`bench/saem_nuts_threads.jl`).
-
-See [`bench/RESULTS.md`](bench/RESULTS.md) for MH/NUTS sampling and fit benchmarks.
-
-SAEM keeps one η chain per subject. Each MH round evaluates prior-independence
-and random-walk proposals in two model batches, with separate accept/reject
-decisions per subject. The random-walk scale adapts for a finite initial period.
-After an optional MCMC burn-in, stochastic approximation averages latent-effect
-statistics with unit steps during exploration and decreasing steps thereafter.
-
-When a population prior is present, SAEM includes it once in its M-step, which
-keeps the two blocks of the maximum-likelihood step described below. The
-mu-referenced fixed effects and Ω move from their closed-form update to the
-maximizer of the running Gaussian random-effect statistics plus the prior, a
-search that evaluates only the prior, one value and gradient per iteration, and
-moves along an Ω eigenvalue floor the data press against; the remaining θ and σ take the numerical
-update with the prior added. Priors on mu-referenced fixed effects and
-covariance coordinates therefore affect the estimate, and a prior adds no model
-evaluations to the step. A combination of mu-referenced fixed effects that no
-subject's design carries (more coefficients on a random effect than subjects,
-or collinear covariates) does not change the likelihood; the prior alone sets
-it, and without a prior `saem` throws an `ArgumentError` naming those
-coefficients. The reported point and final subject states are estimates, not
-samples from a population posterior.
-
-`saem_fit.eta` contains the final Markov-chain states, not EBEs; call
-`empirical_bayes` as above when subject posterior modes are needed for app
-reporting or initialization.
-
-Without a population prior, `mu_referencing(model)` lets the M-step update its
-θ coordinates by generalized least squares and Ω within `eta_blocks`; other θ
-coordinates and σ use first-order AD. The `:mixture` numerical mode retains
-weighted latent draws, so its memory and evaluation cost grow with iterations.
-The `:online` mode keeps the current draw and applies the SA gain to its
-numerical update. The `:score` mode keeps the current draw too and takes one Robbins–Monro step
-along its score per iteration, which converges where the observed-data score
-vanishes, as `:mixture` does. `:auto` selects `:online` when every fitted θ is
-mu-referenced and `:score` otherwise (`:mixture` before 0.2.6).
-`mstep_interval` can reduce evaluation frequency.
-SAEM estimates depend on the RNG stream and run length, so assess recovery
-across starts for a new model. While the SA step size is one, Ω is annealed as
-in Monolix and saemix (`SAEMOptions(omega_annealing = 0.95)`): an M-step may
-shrink no covariance family by more than that factor, which keeps a noisy early
-Ω from collapsing onto a singular correlation that the MCMC kernels cannot
-leave. `omega_annealing = 0` turns it off.
-
-For many subjects, `SAEMOptions(minibatch_size = b)` moves the chains of only
-`b` randomly drawn subjects per SA iteration and evaluates the model for them
-alone. Every subject's last draw stays in the statistics, and the numerical
-update takes capped Robbins–Monro steps along the batch's scaled score, so the
-fit converges to the full-batch estimate. Each chain then moves in a fraction
-`b / nsubjects` of the iterations; scale `iterations`, `burnin` and
-`adapt_iterations` by `nsubjects / b` to give each chain as many transitions as
-a full-batch fit. That bounds the cost and memory of each model call, but a
-minibatch fit needs about as many passes over the subjects as a full-batch one;
-the documentation's estimators page has the measurements.
-
-## Progress and early stopping
-
-Every estimator takes `progress = nothing`: a
-[Treebars](https://github.com/nsiccha/Treebars.jl) node under which it builds a
-labelled progress node (SAEM phases and iteration counters, the EBE solver's
-converged subjects, FOCE(I) objective calls with the best OFV, covariance-step
-evaluations), or a backend symbol such as `:term` for a terminal display
-(Treebars' terminal backend needs `using Term`).
-
-```julia
-using Term
-saem_fit = saem(model, θ, σ, ω; rng = Xoshiro(2026), progress = :term)
-```
-
-`Treebars.request_interrupt!` on that node stops `saem` at the next iteration
-(the result has `interrupted = true` and the completed `iterations`) and `focei`
-at the next objective call (`converged = false`, status `:FORCED_STOP`), each
-returning its estimate so far. See the documentation's estimators page for every
-function's node.
+Historical estimator experiments are under [`bench`](bench/README.md) and
+[`research`](research/pk-comparison/README.md). External numerical-oracle fixtures
+and their provenance are retained under [`test/data`](test/data/README.md).

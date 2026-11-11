@@ -189,7 +189,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     BLAS.set_num_threads(1)
     check_differentials()
     println("Julia=$(VERSION) threads=$(Threads.nthreads()) BLAS_threads=$(BLAS.get_num_threads())")
-    println("repo_sha=$(readchomp(`git rev-parse HEAD`)) host=$(readchomp(`hostname`))")
+    println("repo_sha=$(readchomp(`git rev-parse HEAD`)) host=a Linux fleet host")
     println("fixture=6 subjects; 12 doses 0.08..20 per endpoint; 4 random effects per Hill Emax endpoint; 1 or 2 endpoints; observation SD 0.12; Gaussian prior with pairwise correlation 0.2; all draws retained")
     println("reference=two independent 100000-draw full-subject Laplace-proposal importance estimates; proposal covariance inflated 1.5^2")
     println("selection_seeds=301:308 heldout_seeds=401:416 longheldout_seeds=701:708")

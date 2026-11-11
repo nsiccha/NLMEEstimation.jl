@@ -130,7 +130,7 @@ end
 if abspath(PROGRAM_FILE) == @__FILE__
     BLAS.set_num_threads(1)
     println("Julia=$(VERSION) threads=$(Threads.nthreads()) BLAS_threads=$(BLAS.get_num_threads())")
-    println("repo_sha=$(readchomp(`git rev-parse HEAD`)) host=$(readchomp(`hostname`))")
+    println("repo_sha=$(readchomp(`git rev-parse HEAD`)) host=a Linux fleet host")
     println("fixed_target=6 correlated 2D Gaussian subjects; 400 draws, all retained")
     println("selection_seeds=301:308 heldout_seeds=401:416")
     mh_cfgs = [(scale=s,) for s in (0.25, 0.5, 0.8, 1.2)]

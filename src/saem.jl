@@ -411,7 +411,7 @@ For MALA, `mala_stepsizes` and `mala_acceptance` hold per-subject final values;
 `mala_adaptation_steps` counts updates per subject, the fewest any subject
 received under `minibatch_size`. The acceptance fractions are over every
 subject's proposals, so under `minibatch_size` over the batches'. `numeric_mstep` records
-the resolved numerical M-step mode (`:online` or `:mixture`, `:minibatch` under
+the resolved numerical M-step mode (`:online`, `:score` or `:mixture`, `:minibatch` under
 `minibatch_size`). `objective` is
 `:ML` without a model population prior and `:MAP` otherwise. The result is a
 population point estimate, not a draw from a population posterior.

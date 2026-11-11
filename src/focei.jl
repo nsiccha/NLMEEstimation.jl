@@ -152,7 +152,8 @@ Estimate population parameters by minimizing the FOCE(I) OFV with NLopt's
 BOBYQA, a quadratic-interpolation trust-region algorithm.
 The model's θ and σ and the package's log-Cholesky ω are already unconstrained.
 Each objective call warm-starts subject EBEs from the preceding successful call.
-No population derivatives or η Hessians are taken.
+No population derivatives are taken. The FOCE curvature uses first η derivatives;
+the subject mode solver can also inspect η Hessians when the model supplies them.
 `free` may select one-based positions in the concatenated `(θ, σ, ω)` vector;
 other coordinates stay at their starting values.
 With a population prior, the outer objective is the MAP point's negative twice

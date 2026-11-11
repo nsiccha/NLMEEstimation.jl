@@ -1,70 +1,79 @@
 # Model protocol
 
-A model is any Julia value that supplies a conditional observation likelihood. NLMEEstimation supplies the subject-level random-effect prior, `ηᵢ ~ N(0, Ω)`, and represents Ω by blockwise log-Cholesky coordinates. The model supplies θ and σ in its own unconstrained coordinates.
+Implement a Julia likelihood that NLMEEstimation can evaluate by subject, differentiate and check before estimation. The interface separates the observation model from the Gaussian random-effect prior. A model may be an ordinary struct; it does not need to inherit from a package type.
 
-Every model implements `nsubjects(model)` and `nlme_layout(model)`. It can use either evaluation style:
+## Conditional likelihood
 
-| Style | Required conditional likelihood | How estimators evaluate it |
-| --- | --- | --- |
-| `PerSubjectEvaluation()` | `conditional_loglikelihood(model, i, θ, σ, η)` | The package gathers subject calls into a batch. |
-| `BatchedEvaluation()` | `conditional_loglikelihoods(model, subjects, θ, σ, H)` | One call evaluates the listed subjects; column `k` of `H` is that subject's η. |
+This model has a population mean, a log residual standard deviation and one subject-specific offset. Its likelihood contains the observations only:
 
-The likelihood excludes the η prior. Derivatives may be provided directly or obtained through `ad_backend(model)` with DifferentiationInterface. Reverse-mode Enzyme is the tested backend. Per-subject η Hessian blocks are optional; set `hessian_ad_backend(model) = nothing` for a gradient-only model. A model whose subjects carry many nested random effects can instead declare `eta_hessian_sparsity(model, i)`, which entries of subject `i`'s η Hessian can be nonzero; the estimators then compute sparse Hessians from its η gradients ([PPL and AD requirements](requirements.md), "Sparse η Hessians"). [PPL and AD requirements](requirements.md) lists which derivatives each estimator uses; every method runs on first-order AD.
+```@example protocol
+using NLMEEstimation
+struct LocationModel
+    y::Vector{Vector{Float64}}
+end
+NLMEEstimation.nsubjects(m::LocationModel) = length(m.y)
+NLMEEstimation.nlme_layout(::LocationModel) = NLMELayout(1, 1, [1])
+function NLMEEstimation.conditional_loglikelihood(m::LocationModel, i, θ, σ, η)
+    sum(y -> -(log(2π) + 2σ[1] + (y - θ[1] - η[1])^2 * exp(-2σ[1])) / 2, m.y[i])
+end
+function NLMEEstimation.conditional_loglikelihood_and_gradient(m::LocationModel, i, θ, σ, η)
+    value = conditional_loglikelihood(m, i, θ, σ, η)
+    gradient = [sum(y -> y - θ[1] - η[1], m.y[i]) * exp(-2σ[1])]
+    return value, gradient
+end
+m = LocationModel([[1.0, 1.5], [2.0, 2.5]])
+θ, σ, ω = [1.5], [log(0.5)], [log(0.3)]
+println((subjects=nsubjects(m), eta_dimension=neta(nlme_layout(m))))
+println(check_protocol(m, θ, σ, ω))
+```
 
-A model rejects a point outside its domain by returning `-Inf`, or by throwing a `DomainError`, `OverflowError` or `PosDefException` as a Stan-semantics model does (a matrix exponential of an overflowed rate, the Cholesky factor of an indefinite matrix). At a trial point the estimators treat both alike. Where each subject has its own trial point (EBE steps, MCMC proposals, quadrature points) and a batched evaluation throws, the subjects are evaluated one at a time to find which ones.
+`check_protocol` checks consistency between the declared layout, scalar and batched evaluations, and derivatives. A pass at these coordinates is a local check. Exercise your model at representative parameters, including difficult regions, before starting a long fit.
 
-- `empirical_bayes` (Newton and BFGS, and so the EBEs inside `focei`) rejects that subject's trial step and tries a shorter one; Newton's final polishing step is dropped.
-- `focei`'s search scores the evaluation as a very large objective.
-- SAEM's MH and MALA kernels reject that subject's proposal. The NUTS kernel scores that position `-Inf`, exactly as if the model had returned it. SAEM's numerical and MAP M-steps halve their line-search step.
-- `marginal_loglikelihood` gives that importance-sampling or quadrature point zero density.
+The model's `θ` and `σ` coordinates must be unconstrained: every real vector of the declared length represents a valid parameter value. Apply logarithmic or other transformations inside the likelihood where needed. The package owns `ω`, the log-Cholesky representation of the random-effect covariance. See [random effects](random-effects.md) for that representation.
 
-The point a search starts from must evaluate finitely.
+## Derivatives
 
-A population update keeps SAEM's chains inside the domain: it keeps each subject's φ = Dθ + η where it was, and its numerical M-step rejects trial parameters at which a current chain would leave the domain. If a chain's density is still non-finite after an update, the MH and NUTS kernels raise a `DomainError` naming those subjects, and the MALA kernel raises its own `DomainError`.
+The example supplies an analytical gradient in `η`. Alternatively, declare `ad_backend(model)` and load the package implementing that AD backend. The built-in [PK model](oral-pk.md) uses Enzyme. The package's documented AD path is reverse mode with Enzyme; a different backend should be verified against the operations in your likelihood.
 
-FOCE and FOCEI require `observation_model(model) = GaussianObservations()` and observation means, variances, and first η Jacobians. SAEM can use `mu_referencing(model)` for a closed-form update of the corresponding fixed effects and Ω; remaining population coordinates use a numerical M-step.
+| Operation | Model information |
+|:--|:--|
+| Subject modes with `QuasiNewtonEBE` | Conditional likelihood and `η` gradients |
+| Subject modes with `NewtonEBE` | Conditional likelihood, `η` gradients and Hessian blocks |
+| FOCE approximation | Gaussian observation means, variances and their `η` Jacobians |
+| SAEM Metropolis transitions | Conditional likelihood |
+| SAEM MALA or NUTS transitions | Conditional likelihood and `η` gradients |
+| Numerical SAEM population update | Population gradients where the selected update uses them |
 
-A batched model may keep its batched likelihood and η derivatives while using
-subject-level population gradients in SAEM. Implement
-`conditional_loglikelihood_and_population_gradient(model, i, θ, σ, η)` and
-declare `saem_population_gradient_style(model) = PerSubjectEvaluation()`. SAEM
-then sums those subject values and gradients for the numerical M-step. This
-choice does not change `evaluation_style(model)` or any other estimator step.
-For different routes in the numerical M-step modes, define
-`saem_population_gradient_style(model, ::Val{:online})`,
-`saem_population_gradient_style(model, ::Val{:score})` or
-`saem_population_gradient_style(model, ::Val{:mixture})`. A missing mode-specific
-method uses the one-argument style. This lets a model use compact subject-cell
-gradients for the single-draw updates (`:online`, and `:score`, which takes
-about one gradient per iteration) and a batched gradient for the
-retained-draw mixture.
+These are requirements of the named operation, not a claim that an entire fit never requests other information. FOCE first solves subject modes with `QuasiNewtonEBE`; that solver can inspect available Hessians to reject saddles. Its first-order approximation itself uses observation Jacobians. NUTS uses Pathfinder initialization and continuous adaptation; it does not require an `η` Hessian metric from the model.
 
-Where the route is batched (`BatchedEvaluation()`, the default for a batched
-model), SAEM's numerical M-step and `LouisInformation` call
-`conditional_loglikelihood_sum_and_population_gradient(model, subjects, θ, σ, H)`.
-It returns the batch's conditional log-density, the sum over the listed subjects
-(one real number), with its gradients in θ and σ at fixed `H`. By default it
-differentiates the sum of `conditional_loglikelihoods` with `ad_backend(model)`.
-A model implements it to supply that gradient itself, for example when its
-batched program should not be handed to the AD backend as a whole. A wrapper
-that forwards the protocol to an inner model (to count, time or cache its calls)
-forwards this method with the others, so that the wrapped fit takes the inner
-model's route. Before NLMEEstimation 0.2.11 the estimators called an internal
-here, which BRM overrode; a model that still overrides it is reached through
-this method's default.
+`hessian_ad_backend` defaults to `ad_backend`. Return `nothing` when only first derivatives are supported. A model implementing Hessian methods directly must declare `provides_eta_hessian`. Hessians are subject blocks, never a joint matrix across all subjects. A truthful sparsity declaration through `eta_hessian_sparsity` can reduce the cost of recovering those blocks.
 
-A model can hold a random-effect covariance family, or part of one, at a known value by declaring `fixed_omega(model)`. It returns `family => FixedOmega(…)` pairs, where a family is an `eta_blocks` entry of `NLMELayout` (or a `family_sizes` entry of `RaggedNLMELayout`) by position. `FixedOmega(Ω)` fixes the whole family, matching nlmixr2's `fix()` on an ω block and NONMEM's `OMEGA … FIX`. `FixedOmega(sd = [0.3, nothing], correlation = nothing)` fixes the listed standard deviations, and `FixedOmega(correlation = R)` fixes the correlation, in `Ω = D R D` terms. FOCE(I) searches only the free Ω coordinates. SAEM leaves a fully fixed family unchanged and maximizes the expected Gaussian random-effect density over a partially fixed family's free standard deviations and correlation. Both report the fixed values in `omega` and `omega_matrix`. Their starting `ω0` must hold the fixed values; `apply_fixed_omega(model, ω)` moves a vector onto them. `empirical_bayes` evaluates at the `ω` it is given.
+## Observation moments
 
-A model that computes its own Laplace approximation, such as a joint program with an embedded Laplace, can declare `provides_laplace_gradient(model) = true` and implement `laplace_marginals_and_gradient(model, subjects, θ, σ, ω, H)`. It returns each listed subject's Laplace marginal log-likelihood and the gradient of their sum in θ, σ and ω, including the mode's dependence on them; `H` holds starting points for its mode search, in the batch shape of `conditional_loglikelihoods`. `covariance_step` with `AdaptiveGaussHermite(nodes = 1)` then takes `R` from central differences of that gradient, as TMB's `sdreport` does: `2p + 1` calls for `p` estimated coordinates, where differences of marginal values take `2p² + 1`. The package adds the gradient of a `population_logprior` (from `population_logprior_and_gradient`) and maps the ω gradient onto the coordinates `fixed_omega` leaves free.
+FOCE and residual diagnostics need a Gaussian observation interface in addition to the density. Extend the location model with moments and their Jacobians:
 
-Such a model can also integrate some covariance families out inside SAEM, so that SAEM samples only the others. `integrated_families(model)` lists them (by default none; `saem(...; integrated = …)` chooses another set for one fit), and the model implements three methods, each taking that set as its second argument and a batch `H` whose integrated entries start the mode search while the other, sampled entries are given:
+```@example protocol
+NLMEEstimation.observation_model(::LocationModel) = GaussianObservations()
+NLMEEstimation.observations(m::LocationModel, i::Integer) = m.y[i]
+function NLMEEstimation.observation_moments(m::LocationModel, i::Integer, θ, σ, η)
+    n = length(m.y[i])
+    return fill(θ[1] + η[1], n), fill(exp(2σ[1]), n)
+end
+function NLMEEstimation.observation_moments_and_jacobians(m::LocationModel, i::Integer, θ, σ, η)
+    μ, v = observation_moments(m, i, θ, σ, η)
+    return μ, v, ones(length(μ), 1), zeros(length(v), 1)
+end
+println(check_protocol(m, θ, σ, ω))
+```
 
-- `laplace_conditionals_and_gradients(model, integrated, subjects, θ, σ, ω, H)` returns each subject's Laplace approximation of its conditional log-likelihood given its sampled effects, with the integrated ones integrated out against their prior at ω, and its gradient in the sampled entries (zero in the integrated ones). The chains sample against it. `laplace_conditionals` returns the values alone and defaults to this method.
-- `laplace_conditional_moments(model, integrated, subjects, θ, σ, ω, H)` returns the same values, `H` with its integrated entries at the mode, and per subject the covariance block of each integrated instance, the diagonal blocks of the inverse negative Hessian. SAEM's M-step takes each integrated family's covariance from them.
-- `laplace_conditionals_and_population_gradient(model, integrated, subjects, θ, σ, ω, H)` returns the values and their summed gradient in θ, σ and ω at fixed sampled effects, for the numerical M-step. With every family integrated it is `laplace_marginals_and_gradient`, and either method serves for the other.
+The variance is the conditional observation variance, not the residual standard deviation. Jacobian rows follow observation order; columns follow the subject's `η` coordinates. `check_protocol` checks that the moments reproduce the declared likelihood.
 
-The model keeps its own sparse factorization: only the modes and the instances' covariance blocks cross the protocol, never a dense matrix. How SAEM uses them is in [estimators](estimators.md).
+## Additional contracts
 
-Run `check_protocol(model, θ, σ, ω)` while implementing a model. It checks dimensions, agreement between evaluation styles, subject separability, available derivatives (with `population_gradient = true` also the θ/σ gradients, per subject and, where SAEM routes them batched, `conditional_loglikelihood_sum_and_population_gradient` against their sum), declared observation and mu-referencing traits, that `ω` holds any declared `fixed_omega` values, that a declared Laplace gradient's values equal the package's own Laplace approximation and its gradient a central difference of them, and the same for the methods of `integrated_families` (on small subjects, against a dense Laplace of the integrated effects given the others). Where a subject's complete-data density has several local modes, each has its own Laplace value. A model that implements `laplace_conditional_moments` for every family integrated is compared at the modes it reports (which must be modes, with the same values as `laplace_marginals_and_gradient`); otherwise the package's own search starts from the checked `η`, and a value mismatch names the mode it reached.
+Use [`BatchedEvaluation`](@ref) when the model natively evaluates subjects together. Its likelihood output has one entry per requested subject, in request order. The fallback supplies batched calls for a per-subject model. A batched implementation must preserve separability: changing one subject's effects must not change another subject's density.
 
-The [PK comparison](pk-comparison.md) shows a complete batched BRM+RKPPL model and the calls used to fit it. The [API reference](api.md) lists every protocol entry point.
+[`population_logprior`](@ref) declares a population prior. It is added once per population objective evaluation, after summing subjects. It changes the fitted target from ML to MAP and does not change subject EBEs at fixed population parameters. Return `nothing` when no population prior is intended.
+
+[`MuReferencing`](@ref) declares how population coordinates shift the Gaussian subject effects and enables closed-form updates. It must describe an invariance of the likelihood, not an approximate relationship. The protocol check verifies that invariance locally. More specialized integrated-family and Laplace-gradient hooks are grouped in the [protocol reference](reference/protocol.md).
+
+The [oral PK example](oral-pk.md) uses a model that implements the likelihood, derivatives, Gaussian moments and mu-referencing contracts together.

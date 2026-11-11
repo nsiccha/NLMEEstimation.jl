@@ -334,7 +334,7 @@ end
 """
     population_logprior(model, θ, σ, ω) -> Union{Nothing, Real}
 
-Optional log prior on the population coordinates, evaluated **once per fit**, not
+Optional log prior on the population coordinates, evaluated **once per objective evaluation**, not
 once per subject or retained SAEM draw. Return `nothing` (the default) for
 maximum likelihood. A model with a prior returns its log density with respect
 to the unconstrained `(θ, σ, ω)` coordinates. If the original prior is defined
