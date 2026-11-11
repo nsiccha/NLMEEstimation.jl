@@ -13,7 +13,7 @@ using .TestCommon: growth_model, growth_exact, occasions_model, occasions_exact_
 @testset "Louis's identity: nested occasions against the exact information" begin
     # Eight subjects of 10–60 occasions at the exact maximum. The posterior is
     # Gaussian and the variances are well informed, so 2000 draws give R within
-    # 0.4% of the exact Hessian (0.2% declared; seeds measured on gordito) and the
+    # 0.4% of the exact Hessian (0.2% declared; seeds measured on a Linux fleet host) and the
     # standard errors within 1%.
     model = occasions_model(seed = 4, units = [20, 40, 60, 30, 10, 25, 50, 15])
     f(y) = -occasions_exact_nested(model, y)

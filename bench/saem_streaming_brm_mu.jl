@@ -6,7 +6,7 @@ using NLMEEstimation, Distributions, Random, LinearAlgebra, Printf
 using DifferentiationInterface: AutoEnzyme
 import Enzyme
 
-include(joinpath(@__DIR__, "..", "docs", "examples", "brm_rkppl_pk_fixture.jl"))
+include(joinpath(@__DIR__, "..", "research", "pk-comparison", "brm_rkppl_pk_fixture.jl"))
 
 BLAS.set_num_threads(1)
 const AD = AutoEnzyme(; mode=Enzyme.Reverse)

@@ -1,42 +1,33 @@
-// .vitepress/theme/index.ts
-import { h } from 'vue'
 import DefaultTheme from 'vitepress/theme'
-import type { Theme as ThemeConfig } from 'vitepress'
-import 'virtual:mathjax-styles.css';
+import type { Theme } from 'vitepress'
+import 'virtual:mathjax-styles.css'
+import './style.css'
+import './docstrings.css'
 
-import { 
-  NolebaseEnhancedReadabilitiesMenu, 
-  NolebaseEnhancedReadabilitiesScreenMenu, 
-} from '@nolebase/vitepress-plugin-enhanced-readabilities/client'
-
-import VersionPicker from "@/VersionPicker.vue"
-import AuthorBadge from '@/AuthorBadge.vue'
-import Authors from '@/Authors.vue'
-import Banner from '@/Banner.vue'
-
-import { enhanceAppWithTabs } from 'vitepress-plugin-tabs/client'
-
-import '@nolebase/vitepress-plugin-enhanced-readabilities/client/style.css'
-import './style.css' // You could setup your own, or else a default will be copied.
-import './docstrings.css' // You could setup your own, or else a default will be copied.
-
-export const Theme: ThemeConfig = {
-  extends: DefaultTheme,
-  Layout() {
-    return h(DefaultTheme.Layout, null, {
-      'layout-bottom': () => h(Banner),
-      'nav-bar-content-after': () => [
-        h(NolebaseEnhancedReadabilitiesMenu), // Enhanced Readabilities menu
-      ],
-      // A enhanced readabilities menu for narrower screens (usually smaller than iPad Mini)
-      'nav-screen-content-after': () => h(NolebaseEnhancedReadabilitiesScreenMenu),
-    })
-  },
-  enhanceApp({ app, router, siteData }) {
-    enhanceAppWithTabs(app);
-    app.component('VersionPicker', VersionPicker);
-    app.component('AuthorBadge', AuthorBadge)
-    app.component('Authors', Authors)
-  }
+// Keep generated same-origin figures in the reader's selected VitePress theme.
+// This small adapter can be replaced by DocsKit's shared figure integration.
+function syncFigureThemes() {
+  const dark = document.documentElement.classList.contains('dark')
+  const background = getComputedStyle(document.documentElement).getPropertyValue('--vp-c-bg')
+  document.querySelectorAll<HTMLIFrameElement>('iframe[data-docs-figure]').forEach(frame => {
+    const sync = () => {
+      const root = frame.contentDocument?.documentElement
+      if (root) {
+        root.classList.toggle('dark', dark)
+        root.style.setProperty('--docs-background', background)
+      }
+    }
+    frame.onload = sync
+    sync()
+  })
 }
-export default Theme
+export default {
+  extends: DefaultTheme,
+  enhanceApp({ router }) {
+    if (typeof window !== 'undefined') {
+      router.onAfterRouteChanged = () => requestAnimationFrame(syncFigureThemes)
+      new MutationObserver(syncFigureThemes).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+      window.addEventListener('DOMContentLoaded', syncFigureThemes)
+    }
+  },
+} satisfies Theme

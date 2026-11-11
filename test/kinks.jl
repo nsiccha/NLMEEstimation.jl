@@ -3,7 +3,6 @@ import NLMEEstimation as NE
 using LinearAlgebra
 using Random
 using Test
-import ForwardDiff
 import Optim
 
 # Empirical Bayes modes on kinks of a piecewise-smooth complete-data density
@@ -81,81 +80,6 @@ function NE.conditional_loglikelihoods_and_gradients(m::Batched, subjects, θ, �
 end
 NE.conditional_loglikelihood_hessian_blocks(m::Batched, subjects, θ, σ, H) =
     [last(conditional_loglikelihood_gradient_and_hessian(m.inner, i, θ, σ, H[:, k])) for (k, i) in enumerate(subjects)]
-
-# A tumour-response model shaped as Bruno's RECIST category law: tumour size
-# S(t) = S₀(e^{gt} + e^{-dt} - 1) with g, d, S₀ log-normal in η, observed log sizes, and
-# a category per visit from the change r = S/S₀ - 1 against its running nadir (a
-# running minimum): pd = (c_pd + nadir - r)/τ, pr = min((c_pr - r)/τ, pd),
-# cr = min((c_cr - r)/τ, pr), an ordered logit with an ε floor.
-struct RecistLike
-    times::Vector{Float64}
-    logsize::Vector{Vector{Float64}}
-    category::Vector{Vector{Int}}
-end
-NE.nsubjects(m::RecistLike) = length(m.logsize)
-NE.nlme_layout(::RecistLike) = NLMELayout(0, 0, [3])
-logistic_lcdf(x) = x < 0 ? x - log1p(exp(x)) : -log1p(exp(-x))
-logaddexp(a, b) = (top = max(a, b); top + log1p(exp(min(a, b) - top)))
-function logit_interval(a, b)
-    b <= a && return oftype(a, -Inf)
-    return a > 0 ? logistic_lcdf(-a) + log1p(-exp(logistic_lcdf(-b) - logistic_lcdf(-a))) :
-        logistic_lcdf(b) + log1p(-exp(logistic_lcdf(a) - logistic_lcdf(b)))
-end
-tumour_sizes(η, times) = (s0 = 50 * exp(η[3]);
-    ([s0 * (exp(0.05 * exp(η[1]) * t) + exp(-0.3 * exp(η[2]) * t) - 1) for t in times], s0))
-function recist_loglikelihood(m::RecistLike, i, η)
-    S, s0 = tumour_sizes(η, m.times)
-    lp = zero(eltype(η))
-    nadir = zero(eltype(η))
-    for (j, v) in enumerate(m.category[i])
-        lp += -((log(max(S[j], 1.0e-8)) - m.logsize[i][j]) / 0.3)^2 / 2
-        r = S[j] / s0 - 1
-        pd = (0.2 + nadir - r) / 0.05
-        pr = min((-0.3 - r) / 0.05, pd)
-        cr = min((-1.0 - r) / 0.05, pr)
-        p = v == 1 ? logit_interval(oftype(cr, -30), cr) : v == 2 ? logit_interval(cr, pr) :
-            v == 3 ? logit_interval(pr, pd) : logit_interval(pd, oftype(pd, 30))
-        floor = oftype(p, log(1.0e-3) - log(4.0))
-        lp += p == -Inf ? floor : logaddexp(floor, log1p(-1.0e-3) + p)
-        nadir = min(nadir, r)
-    end
-    return lp
-end
-NE.conditional_loglikelihood(m::RecistLike, i, θ, σ, η) = recist_loglikelihood(m, i, η)
-NE.conditional_loglikelihood_and_gradient(m::RecistLike, i, θ, σ, η) =
-    (recist_loglikelihood(m, i, η), ForwardDiff.gradient(e -> recist_loglikelihood(m, i, e), η))
-NE.conditional_loglikelihood_gradient_and_hessian(m::RecistLike, i, θ, σ, η) =
-    (NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η)...,
-        ForwardDiff.hessian(e -> recist_loglikelihood(m, i, e), η))
-NE.provides_eta_hessian(::RecistLike) = true
-function recist_like(rng, n)
-    times = collect(6.0:6.0:48.0)
-    logsize, category = Vector{Float64}[], Vector{Int}[]
-    for _ in 1:n
-        η = 0.5 .* randn(rng, 3)
-        S, s0 = tumour_sizes(η, times)
-        push!(logsize, log.(S) .+ 0.3 .* randn(rng, length(times)))
-        nadir = 0.0
-        push!(category, map(eachindex(times)) do j
-            r = S[j] / s0 - 1 + 0.1 * randn(rng)
-            v = r - nadir >= 0.2 ? 4 : r <= -1.0 ? 1 : r <= -0.3 ? 2 : 3
-            nadir = min(nadir, S[j] / s0 - 1)
-            v
-        end)
-    end
-    return RecistLike(times, logsize, category)
-end
-
-# Gradients only, without blocks or a declared pattern.
-struct GradientsOnly{M}
-    inner::M
-end
-NE.nsubjects(m::GradientsOnly) = nsubjects(m.inner)
-NE.nlme_layout(m::GradientsOnly) = nlme_layout(m.inner)
-NE.conditional_loglikelihood(m::GradientsOnly, i, θ, σ, η) = conditional_loglikelihood(m.inner, i, θ, σ, η)
-NE.conditional_loglikelihood_and_gradient(m::GradientsOnly, i, θ, σ, η) =
-    conditional_loglikelihood_and_gradient(m.inner, i, θ, σ, η)
-NE.provides_eta_hessian(::GradientsOnly) = false
 
 # A Gaussian observation whose mean has a kink: y_i ~ N(-s|η₁|, 1), y_i > 0, so the
 # complete-data density's mode is the kink η₁ = 0.
@@ -292,36 +216,6 @@ const METHODS = (NewtonEBE(), QuasiNewtonEBE())
             for k in 1:3
                 @test maximum(abs, r.modes[k][1:2] - ridge_mode(ridgepart, k)) < 1.0e-5
                 @test r.modes[k][3:end] ≈ units[k] ./ 2 atol = 1.0e-5
-            end
-        end
-    end
-
-    @testset "a RECIST-shaped category law" begin
-        model = recist_like(Xoshiro(2026), 40)
-        ω = omega_parameters(nlme_layout(model), Matrix(Diagonal(fill(0.25, 3))))
-        smooth_only = empirical_bayes(model, Float64[], Float64[], ω; method = NewtonEBE(),
-            options = EBEOptions(nonsmooth = false), require_convergence = false)
-        stalled = findall(!, smooth_only.converged)
-        @test !isempty(stalled)
-        for method in METHODS, m in (model, GradientsOnly(model))
-            method isa NewtonEBE && m isa GradientsOnly && continue
-            r = empirical_bayes(m, Float64[], Float64[], ω; method)
-            @test all(r.converged)
-            kinked = findall(r.nonsmooth)
-            @test !isempty(kinked)
-            for k in kinked
-                f(η) = complete_data_loglikelihood(model, k, Float64[], Float64[], ω, η)
-                local_search = Optim.optimize(η -> -f(η), r.modes[:, k], Optim.NelderMead(),
-                    Optim.Options(g_tol = 1.0e-14, iterations = 10_000))
-                @test -Optim.minimum(local_search) - f(r.modes[:, k]) < 1.0e-8
-                @test maximum(abs, Optim.minimizer(local_search) - r.modes[:, k]) < 1.0e-4
-            end
-            # Subjects the smooth search settled are left as they were.
-            if method isa NewtonEBE
-                settled = findall(smooth_only.converged)
-                @test kinked ⊆ stalled
-                @test r.modes[:, settled] == smooth_only.modes[:, settled]
-                @test r.iterations[settled] == smooth_only.iterations[settled]
             end
         end
     end

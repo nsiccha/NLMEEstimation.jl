@@ -1,6 +1,6 @@
 # Wall time of SAEM's NUTS kernel on a BRM model with unit partitions: lockstep
 # (`WarmupHMCNUTS()`) against `WarmupHMCNUTS(threads = true)`, the measurement that
-# decides whether lockstep can go (todo `0kbdz33`).
+# compares their execution costs.
 #
 # The model is BRM's flat PK benchmark (BRM `research/nlme_threads/benchmark.jl`): `units`
 # subjects with `rows` observations each. 80 × 8 is the fixture brm-use reports on.
@@ -10,9 +10,7 @@
 # printed. A ratio is lockstep's wall time over threads', so above 1 means threads are
 # faster. Run one process per thread count on at least as many CPUs as threads:
 #
-#   bash bench/saem_threads_vs_lockstep_brm.sh
-#
-# or by hand, in an environment holding this checkout, BRM and BRM's Enzyme:
+# Use an environment holding this checkout, BRM and BRM's Enzyme:
 #
 #   julia --project=<env> --threads=<T> bench/saem_threads_vs_lockstep_brm.jl \
 #       <units> <rows> <output> [<round pairs> <start pairs> <fit pairs>]
@@ -189,7 +187,7 @@ function measure_calls()
 end
 
 report("\n══ ", UNITS, " subjects × ", ROWS, " observations, ", Threads.nthreads(), " thread(s), ",
-    Threads.ngcthreads(), " GC thread(s), a grant of ", get(ENV, "KB_COMPUTE_CPUS", "?"), " CPU(s) ══")
+    Threads.ngcthreads(), " GC thread(s), host reports ", Sys.CPU_THREADS, " CPU(s) ══")
 report("Julia ", VERSION, ", NLMEEstimation ", pkgversion(NE), ", WarmupHMC ", pkgversion(NE.WarmupHMC),
     ", BayesianRegressionModels ", pkgversion(BayesianRegressionModels), ", Enzyme ", pkgversion(Enzyme))
 measure_calls()
