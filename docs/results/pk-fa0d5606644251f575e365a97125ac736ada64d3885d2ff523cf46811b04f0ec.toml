@@ -22,13 +22,13 @@ pk_diagnostics = """(subject_modes_converged = true, largest_scaled_gradient = 8
 pk_fit = """Converged: true; subjects: 20\nka (1/h), CL (L/h), V (L): [1.199, 3.882, 37.12]\n"""
 
 [receipt]
-created_utc = "2026-11-10T23:48:09.876"
-elapsed_seconds = 87.055898647
+created_utc = "2026-11-11T05:52:20.310"
+elapsed_seconds = 68.156578393
 inputs = ["Project.toml", "docs/Project.toml", "research/docs/pk_fit.jl", "research/docs/pk_diagnostics.jl", "research/docs/generate.jl", "research/docs/cache.jl", "src/NLMEEstimation.jl", "src/ReferenceModels.jl", "src/conformance.jl", "src/covariance.jl", "src/diagnostics.jl", "src/empirical_bayes.jl", "src/fixed_omega.jl", "src/focei.jl", "src/integrated.jl", "src/kinks.jl", "src/laplace_gradient.jl", "src/layout.jl", "src/louis.jl", "src/marginal.jl", "src/matrixfree_curvature.jl", "src/protocol.jl", "src/ragged.jl", "src/re_prior.jl", "src/saem.jl", "src/sparse_curvature.jl"]
 julia = "1.10.12"
-key = "6b56a84cfcab2ba822345391b6ab26270d5db824d1e0387a07ffc496b1010711"
-source_dirty = true
-source_revision = "5956401017c634befd5e2eeb161962d6523a6da7"
+key = "fa0d5606644251f575e365a97125ac736ada64d3885d2ff523cf46811b04f0ec"
+source_dirty = false
+source_revision = "bac4614d16aa6c35def41870bf8e9b4e4f83a8d8"
 
     [receipt.dependencies]
     ADTypes = "1.24.0"
