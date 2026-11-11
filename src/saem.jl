@@ -20,9 +20,9 @@ that adapts on every transition.
 for the mu-referenced coefficients, the covariance that maximizes an M-step's
 Gaussian term can be singular; its closed-form update moves towards the floor
 by at most 100 coordinate updates per M-step, so Ω may approach it over several
-iterations. The fit also starts on the floor (NLMEEstimation 0.2.12): an estimated
-part of `ω0` below it by more than rounding is raised to it before the first
-sweep, with a warning naming the families, and fixed parts are kept. A start
+iterations. The fit also starts on the floor: an estimated part of `ω0` below it
+by more than rounding is raised to it before the first sweep, with a warning
+naming the families, and fixed parts are kept. A start
 that holds the floor, such as a previous fit's estimate, is used as it is. A
 variance far below the floor, as a maximum a posteriori point that collapsed it
 leaves, gave the chains a target they could not sample: Pathfinder's start of a
