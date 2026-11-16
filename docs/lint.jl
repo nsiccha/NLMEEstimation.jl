@@ -27,3 +27,7 @@ function lint_docs(pages)
     any(f -> occursin(r"\.(png|svg|pdf|webm|mp4)$"i, f), tracked) && error("Committed generated image/video in docs")
     return nothing
 end
+
+if abspath(PROGRAM_FILE) == @__FILE__
+    lint_docs(include("pages.jl"))
+end
