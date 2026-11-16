@@ -2,15 +2,7 @@ using Documenter, DocumenterVitepress, NLMEEstimation
 include("support.jl")
 include("lint.jl")
 
-pages = [
-    "Start" => ["Introduction" => "index.md"],
-    "Guides" => ["Model protocol" => "protocol.md", "Random effects" => "random-effects.md",
-        "Estimation" => "fitting.md", "Diagnostics" => "diagnostics.md"],
-    "Examples" => ["Oral pharmacokinetics" => "oral-pk.md"],
-    "Reference" => ["Protocol" => "reference/protocol.md", "Random effects" => "reference/random-effects.md",
-        "Estimation" => "reference/estimation.md", "Diagnostics" => "reference/diagnostics.md",
-        "Models" => "reference/models.md"],
-]
+pages = include("pages.jl")
 lint_docs(pages)
 DocsSupport.cache() # Refuse a missing/stale receipt; never run a fit from the build.
 makedocs(
